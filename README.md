@@ -126,6 +126,15 @@ Invoke-RestMethod http://127.0.0.1:8000/api/v1/approvals -Headers $h            
 
 Live events: `GET /api/v1/runs/<run_id>/events/stream` (server-sent events, same bearer header).
 
+Live smoke test, which asks one question: can GPT submit a structured analysis? The default is a dry run that sends nothing. `--send` makes at most 2 calls and uses at most about 8,000 tokens:
+
+```powershell
+& $env:DEVPILOT_PYTHON backend\scripts\live_smoke_test.py           # dry run: shows the exact request
+& $env:DEVPILOT_PYTHON backend\scripts\live_smoke_test.py --send    # paid; run only after approval
+```
+
+Docker and WSL2 setup for Phase 3: [docs/SETUP_WINDOWS.md](docs/SETUP_WINDOWS.md).
+
 ## Documentation
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): system design, orchestration protocol, algorithms, data model and APIs

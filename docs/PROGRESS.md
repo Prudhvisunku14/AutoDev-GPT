@@ -279,3 +279,38 @@ The calculator was **not** generated, run or tested.
 - C: still has only about 0.4 GB free. This blocks Docker in Phase 3.
 
 **Next phase:** Phase 3, the Docker sandbox. It starts only on explicit approval, and needs Docker Desktop with WSL2 installed by the user, with its data on D:, which requires freeing space on C: first.
+
+### Phase 2 finalization (2026-10-29)
+
+**Commits (local only, nothing pushed):**
+- `042e6b9`: Phase 2, GPT orchestrator. 52 files. Before committing, the full suite passed (432 passed, 1 skipped), the staged content was scanned for secrets, and every ignore rule was checked by exit code.
+- A follow-up commit holds the items below. Its ID is reported in the session summary.
+
+**Security fix: settings errors echoed values.**
+- A probe with fake values showed that a too-short `DEVPILOT_API_TOKEN` was printed verbatim in the validation error, so a typo in `.env` would have put the token in the startup traceback.
+- Fixed with `hide_input_in_errors=True` in `Settings`, plus a regression test with 3 cases.
+- `check_openai_access.py` no longer needs `DEVPILOT_API_TOKEN`. It prints "FIELD: problem" lines without values, plus a hint for each error kind.
+
+**Live smoke test prepared, not run** (`app/demo/live_smoke.py`, `backend/scripts/live_smoke_test.py`, `tests/live/test_openai_live.py`):
+- Requirement: "Create a simple Python calculator application."
+- Limits enforced in code by `SmokeGuardClient`:
+  - at most 2 OpenAI calls, with SDK retries off
+  - ANALYZING requests only (it stops once the analysis is accepted)
+  - a second call only if the first used ≤ 2,500 tokens
+  - `max_output_tokens` 2,000 per call and `RUN_MAX_TOKENS` 8,000
+  - a request is refused before sending if any configured secret appears in it
+- The estimated worst-case total is about 7,500 tokens.
+- The dry run (the default) prints call 1 and sends nothing: about 700 estimated input tokens, the tools `request_human_input` and `submit_analysis`, and only the public requirement sentence.
+- 7 offline tests in `tests/unit/test_live_smoke.py` cover the guard: one call on success, one retry on rejection, never a third call, no retry after an expensive first call, a secret refused before sending, and the dry run.
+
+**Tests:** 442 passed, 1 skipped (the live test, not run), 0 failed.
+
+**OpenAI configuration:**
+- `.env` exists, is ignored by git and is not tracked.
+- `OPENAI_API_KEY`, `OPENAI_MODEL` and `DEVPILOT_API_TOKEN` are still empty, so the model-access check reports "OPENAI_API_KEY is not set". No network call was made.
+
+**Phase 3 readiness:** see [SETUP_WINDOWS.md](SETUP_WINDOWS.md).
+- WSL is not installed, and neither is Docker.
+- Virtualization is active (a hypervisor is present).
+- C: has 0.43 GB free; about 15 GB are needed. D: has 149.7 GB free.
+- About 7 GB of regenerable caches on C: are listed there for the user to review.

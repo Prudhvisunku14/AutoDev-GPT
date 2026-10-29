@@ -28,6 +28,9 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
+        # Validation errors must never echo values: a mistyped token would otherwise be
+        # printed in the startup traceback.
+        hide_input_in_errors=True,
     )
 
     # --- Backend ---------------------------------------------------------

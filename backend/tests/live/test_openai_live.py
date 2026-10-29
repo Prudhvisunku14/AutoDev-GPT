@@ -1,59 +1,40 @@
 """Opt-in live smoke test against the real OpenAI API. COSTS MONEY; needs explicit approval.
 
 Skipped unless RUN_LIVE_OPENAI_TESTS=true is set in the environment. It reads the key
-and model from the repo-root .env and makes at most two small GPT calls: one analysis
-turn for the calculator requirement (MAX_TURNS=2 caps it). The key is never printed.
+and model from the repo-root .env and runs `app.demo.live_smoke` (at most 2 calls,
+8,000 tokens, stops after the analysis). The key is never printed.
 
     $env:RUN_LIVE_OPENAI_TESTS = 'true'
-    cd backend; & $env:DEVPILOT_PYTHON -m pytest tests/live -m live_openai -s
+    cd backend; & $env:DEVPILOT_PYTHON -m pytest tests/live -s
     Remove-Item Env:RUN_LIVE_OPENAI_TESTS
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
-from app.config import REPO_ROOT, Settings
 from app.core.egress import EgressPolicy
-from app.db.models import RunState
+from app.demo.live_smoke import MAX_CALLS, TOKEN_LIMIT, run_smoke, smoke_settings
 from app.orchestrator.llm_client import OpenAIResponsesClient, llm_config_problem
-from tests.harness import Harness
 
 pytestmark = pytest.mark.live_openai
 
 
-def test_one_real_function_calling_turn(tmp_path: Path) -> None:
-    real = Settings(_env_file=REPO_ROOT / ".env")  # type: ignore[call-arg]
-    problem = llm_config_problem(real, EgressPolicy.from_file(real.egress_allowlist_file))
+def test_gpt_submits_a_structured_analysis(tmp_path: Path) -> None:
+    settings = smoke_settings(tmp_path)
+    problem = llm_config_problem(settings, EgressPolicy.from_file(settings.egress_allowlist_file))
     if problem:
         pytest.skip(f"OpenAI not configured: {problem}")
 
-    h = Harness(
-        tmp_path,
-        openai_api_key=real.openai_api_key.get_secret_value(),  # type: ignore[union-attr]
-        openai_model=real.openai_model,
-        openai_base_url=real.openai_base_url,
-        openai_price_input_per_mtok=real.openai_price_input_per_mtok,
-        openai_price_output_per_mtok=real.openai_price_output_per_mtok,
-        max_turns=2,
-        max_nudges=0,
-        run_max_tokens=60_000,
-    )
-    h.llm = OpenAIResponsesClient(h.settings)
-    run_id = h.new_run()
-    run = h.advance(run_id)
+    summary = run_smoke(settings, OpenAIResponsesClient(settings))
+    print({k: v for k, v in summary.items() if k != "requests"})
 
-    invocations = h.invocations(run_id)
-    print(f"\nmodel={real.openai_model} state={run.state} turns={run.turns} tool_calls={run.tool_calls} "
-          f"tokens_in={run.tokens_in} tokens_out={run.tokens_out} cost_known={run.cost_known} cost_usd={run.cost_usd:.5f}")
-    for inv in invocations:
-        out = json.loads(inv.output_json or "{}")
-        print(f"  {inv.tool}: ok={inv.ok} error={inv.error_class} {(out.get('error') or {}).get('details', '')}")
-    assert run.turns >= 1
-    assert invocations, "GPT returned no function call"
-    assert invocations[0].tool in {"submit_analysis", "request_human_input"}
-    assert run.state in {RunState.PLANNING, RunState.DEFINING_CRITERIA, RunState.ANALYZING, RunState.AWAITING_APPROVAL, RunState.STOPPED_BY_POLICY}
-    h.close()
+    assert 1 <= summary["api_calls"] <= MAX_CALLS
+    assert summary["tokens_total"] <= TOKEN_LIMIT
+    assert summary["llm_errors"] == []
+    assert summary["invocations"], "GPT returned no function call"
+    assert summary["invocations"][0][0] in {"submit_analysis", "request_human_input"}
+    assert summary["analysis_accepted"], f"analysis not accepted: {summary['invocations']}"
+    assert summary["state"] == "PLANNING"

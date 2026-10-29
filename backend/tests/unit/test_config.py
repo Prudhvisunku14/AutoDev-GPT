@@ -37,6 +37,21 @@ def test_short_api_token_is_rejected(tmp_path: Path) -> None:
         make_settings(tmp_path, devpilot_api_token="short")
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"devpilot_api_token": "fakeShortTok123"},  # too short: rejected, must not be echoed
+        {"devpilot_api_token": API_TOKEN, "devpilot_port": "fakeShortTok123"},
+        {"devpilot_api_token": API_TOKEN, "openai_price_input_per_mtok": "fakeShortTok123"},
+    ],
+)
+def test_validation_errors_never_echo_values(tmp_path: Path, overrides: dict[str, object]) -> None:
+    with pytest.raises(ValidationError) as info:
+        make_settings(tmp_path, **overrides)
+    assert "fakeShortTok123" not in str(info.value)
+    assert FAKE_OPENAI_KEY not in str(info.value)
+
+
 @pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.10", "example.com", "::"])
 def test_non_loopback_host_is_rejected(tmp_path: Path, host: str) -> None:
     with pytest.raises(ValidationError, match="loopback"):
