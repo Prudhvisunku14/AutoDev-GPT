@@ -1,0 +1,25 @@
+# DevPilot AI outbound network allowlist (ARCHITECTURE §8.5, SECURITY §9).
+# Default deny: a component may reach only the entries listed here.
+# Entries are `host` or `host:port`. No schemes, paths or wildcards.
+# Private addresses cannot be listed; loopback is allowed only with an explicit port.
+
+components:
+  backend:            # GPT orchestrator (Phase 2)
+    - api.openai.com
+  opencode:           # OpenCode container (Phase 4)
+    - api.openai.com
+  github:             # GitHub adapter and import (Phase 8)
+    - github.com
+    - api.github.com
+  google_drive:       # Google Drive OAuth and file export (Phase 8)
+    - accounts.google.com
+    - oauth2.googleapis.com
+    - www.googleapis.com
+  n8n:                # Local n8n instance (Phase 8)
+    - 127.0.0.1:5678
+  sandbox_install:    # Dependency install through the egress proxy (Phase 3)
+    - pypi.org
+    - files.pythonhosted.org
+    - registry.npmjs.org
+  sandbox_run: []     # Run and test containers: no network
+  document_parser: [] # Parser container: no network
