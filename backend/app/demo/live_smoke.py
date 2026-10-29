@@ -73,15 +73,16 @@ class SmokeGuardClient:
         return response
 
     def _refuse(self, reason: str) -> LLMResponse:
+        # STOPPED, not CONFIG: the run pauses as "llm_stopped" and no error is recorded.
         self.refusal = reason
-        raise LLMError(LLMErrorKind.CONFIG, reason)
+        raise LLMError(LLMErrorKind.STOPPED, reason)
 
 
 class CaptureOnlyClient:
     """Dry run: records the request that would be sent, never sends it."""
 
     def create(self, request: LLMRequest) -> LLMResponse:
-        raise LLMError(LLMErrorKind.CONFIG, "dry run: the request was not sent")
+        raise LLMError(LLMErrorKind.STOPPED, "dry run: the request was not sent")
 
 
 def smoke_settings(data_dir: Path, env_file: Path = REPO_ROOT / ".env") -> Settings:
@@ -133,11 +134,9 @@ def run_smoke(
             time.sleep(0.1)
         invocations = client.get(f"{api}/runs/{run['id']}/invocations", headers=headers).json()
         analysis = client.get(f"{api}/runs/{run['id']}/analysis", headers=headers)
-        llm_errors = [
-            e["payload"]
-            for e in client.get(f"{api}/runs/{run['id']}/events?limit=500", headers=headers).json()
-            if e["type"] == "llm.error"
-        ]
+        events = client.get(f"{api}/runs/{run['id']}/events?limit=500", headers=headers).json()
+        llm_errors = [e["payload"] for e in events if e["type"] == "llm.error"]
+        llm_stops = [e["payload"] for e in events if e["type"] == "llm.stopped"]
 
     summary: dict[str, Any] = {
         "model": settings.openai_model,
@@ -153,7 +152,8 @@ def run_smoke(
         "analysis_accepted": analysis.status_code == 200,
         "requirements": [r["code"] + " " + r["text"] for r in analysis.json()["requirements"]] if analysis.status_code == 200 else [],
         "guard_stop": guard.refusal,
-        "llm_errors": [e for e in llm_errors if "smoke test" not in e.get("message", "") and "dry run" not in e.get("message", "")],
+        "llm_stops": llm_stops,  # deliberate stops (not faults); a real error is only ever in llm_errors
+        "llm_errors": llm_errors,
         "requests": guard.requests,
     }
     return summary

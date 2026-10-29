@@ -113,7 +113,7 @@ GPT advances the run by calling **gate tools**. The executor applies a transitio
 
 - The `RunManager` runs as an in-process asyncio worker started by the FastAPI lifespan. It executes **one run at a time**. Celery and Redis are not used.
 - Runs start only on an explicit request: `POST /runs/{id}/start`, or a decision on one of the run's approvals. Nothing resumes automatically after a restart, so GPT is never called (and money never spent) without a user action.
-- A run that cannot progress keeps its state and records why in `pause_reason`. Examples: a later phase is needed, an LLM error that can be retried (auth, quota, rate limit, timeout, server error), or a backend shutdown. Starting it again resumes from the last persisted step.
+- A run that cannot progress keeps its state and records why in `pause_reason`. Examples: a later phase is needed, an LLM error that can be retried (auth, quota, rate limit, timeout, server error), or a backend shutdown. Starting it again resumes from the last persisted step. A deliberate stop by the caller (`llm_stopped`, used by the smoke-test guard) is not an error: it records `llm.stopped`, never `llm.error`.
 - Blocking work (Docker CLI, git, SQLite) runs through `asyncio.to_thread`.
 - Every SQLite transaction starts with `BEGIN IMMEDIATE` (WAL mode, `busy_timeout` 30 s). This serializes writers so that a read-then-write transaction never fails with "database is locked". The cost is negligible for one user.
 - Run state and `last_response_id` are persisted after every turn. A run paused for approval therefore survives a backend restart.
@@ -570,7 +570,7 @@ StackRegistry.validate(entry) -> ValidationResult
 
 `GET /api/v1/runs/{id}/events/stream` sends `text/event-stream` messages. Each event has:
 - `id`: its per-project `seq`
-- `event`: the event type, such as `run.state_changed`, `llm.request`, `llm.response`, `llm.error`, `tool.called`, `tool.result`, `approval.requested`, `approval.decided`, `run.paused` or `run.stopped`
+- `event`: the event type, such as `run.state_changed`, `llm.request`, `llm.response`, `llm.error`, `llm.stopped`, `tool.called`, `tool.result`, `approval.requested`, `approval.decided`, `run.paused` or `run.stopped`
 - `data`: the redacted event as JSON
 
 Delivery rules:

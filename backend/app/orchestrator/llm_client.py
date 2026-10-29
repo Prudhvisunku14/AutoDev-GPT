@@ -32,6 +32,9 @@ class LLMErrorKind(StrEnum):
     BAD_REQUEST = "BAD_REQUEST"  # 400/422: the request itself is wrong
     CONFIG = "CONFIG"  # local configuration is missing or refused
     UNEXPECTED = "UNEXPECTED"
+    # Not a fault: the caller refused to send the request (the smoke-test guard, a dry run).
+    # The run pauses as "llm_stopped" and no llm.error event is recorded.
+    STOPPED = "STOPPED"
 
 
 # A run hitting one of these pauses and can be resumed after the cause is fixed.

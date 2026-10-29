@@ -19,8 +19,8 @@ from app.demo.live_smoke import (
     run_smoke,
     smoke_settings,
 )
-from app.orchestrator.fake_llm import FakeLLM, call
-from app.orchestrator.llm_client import FunctionCall, LLMError, LLMRequest, LLMResponse, Usage
+from app.orchestrator.fake_llm import FakeLLM, call, fail
+from app.orchestrator.llm_client import FunctionCall, LLMError, LLMErrorKind, LLMRequest, LLMResponse, Usage
 from tests.helpers import FAKE_OPENAI_KEY
 
 BAD = {**ANALYSIS, "requirements": [{**ANALYSIS["requirements"][0], "code": "R-009"}]}
@@ -57,6 +57,9 @@ def test_accepted_analysis_uses_one_call_and_stops(tmp_path: Path, env_file: Pat
     assert summary["state"] == "PLANNING"
     assert summary["guard_stop"] == "smoke test complete: it stops after the analysis step"
     assert summary["llm_errors"] == []
+    # The deliberate stop is a pause reason of its own, never reported as a config error.
+    assert summary["pause_reason"] == "llm_stopped"
+    assert [stop["message"] for stop in summary["llm_stops"]] == [summary["guard_stop"]]
     assert fake.remaining == 1  # the planning step was never requested
     (request,) = summary["requests"]
     assert f"<requirement>\n{REQUIREMENT}\n</requirement>" in request.input[0]["content"]
@@ -68,6 +71,14 @@ def test_rejected_analysis_gets_one_retry(tmp_path: Path, env_file: Path) -> Non
     assert summary["api_calls"] == 2
     assert summary["analysis_accepted"]
     assert [ok for _, ok, _ in summary["invocations"]] == [False, True]
+
+
+def test_a_genuine_config_error_is_reported_as_one(tmp_path: Path, env_file: Path) -> None:
+    fake = FakeLLM(fail(LLMErrorKind.CONFIG, "OPENAI_MODEL is not set for this key"))
+    summary = run_smoke(_settings(tmp_path, env_file), fake)
+    assert summary["pause_reason"] == "llm_error:config"
+    assert [e["kind"] for e in summary["llm_errors"]] == ["CONFIG"]
+    assert summary["llm_stops"] == [] and summary["guard_stop"] is None
 
 
 def test_never_more_than_two_calls(tmp_path: Path, env_file: Path) -> None:
@@ -105,8 +116,9 @@ def test_request_containing_a_secret_is_never_sent() -> None:
         tools=[{"name": "submit_analysis"}],
         previous_response_id=None,
     )
-    with pytest.raises(LLMError, match="secret appeared"):
+    with pytest.raises(LLMError, match="secret appeared") as info:
         guard.create(request)
+    assert info.value.kind is LLMErrorKind.STOPPED
     assert inner.requests == [] and guard.calls == 0
 
 
@@ -114,6 +126,7 @@ def test_dry_run_sends_nothing_and_describes_the_request(tmp_path: Path, env_fil
     settings = _settings(tmp_path, env_file)
     summary = run_smoke(settings, CaptureOnlyClient())
     assert summary["invocations"] == []
+    assert summary["pause_reason"] == "llm_stopped" and summary["llm_errors"] == []
     (request,) = summary["requests"]
     assert [t["name"] for t in request.tools] == ["request_human_input", "submit_analysis"]
     assert all(t["strict"] for t in request.tools)

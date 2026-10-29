@@ -1,6 +1,6 @@
 # DevPilot AI: Progress
 
-**Current phase:** Phase 2 complete (2026-10-29). Phase 3 has **not started** and is waiting for explicit approval.
+**Current phase:** Phase 2 complete (2026-10-29), with the first live GPT call verified. Phase 3 has **not started** and is waiting for explicit approval.
 
 ## Phase tracker
 
@@ -8,7 +8,7 @@
 |---|---|---|---|
 | 0 | Architecture and initialization | ✅ Done (2026-10-29, revised the same day) | none |
 | 1 | Backend foundation | ✅ Done (2026-10-29) | Python 3.12.9 at `D:\python.exe` |
-| 2 | GPT orchestrator | ✅ Done (2026-10-29), verified with FakeLLM; live smoke test not yet run | OpenAI API key (user) for live use |
+| 2 | GPT orchestrator | ✅ Done (2026-10-29), verified with FakeLLM; first live GPT call verified (analysis accepted, 1 call, 919 tokens) | OpenAI API key (user) for live use |
 | 3 | Docker sandbox | ⏳ Not started | Docker Desktop + WSL2 (data on D:) |
 | 4 | OpenCode integration | ⏳ Not started | OpenCode container image, Git |
 | 5 | Verification-guided development | ⏳ Not started | — |
@@ -254,7 +254,7 @@ Each criterion must be **verified by running tests**, not claimed.
 - Approval pauses the run, and it resumes after approve or deny. The approved action runs exactly once, and a double decision gets 409 ✅
 - Turn, tool-call, token, budget, wall-clock, repeated-call and no-progress limits stop the run ✅
 - The key never appears in GPT requests, the DB files or the logs ✅
-- An opt-in live smoke test exists ✅ (not run)
+- An opt-in live smoke test exists ✅ (first real run 2026-10-29, see the post-test review below)
 
 **Demonstration (offline, FakeLLM): "Create a Python calculator application."** (`backend/scripts/demo_calculator.py`)
 1. GPT analyzed the request into R-001 to R-005.
@@ -314,3 +314,34 @@ The calculator was **not** generated, run or tested.
 - Virtualization is active (a hypervisor is present).
 - C: has 0.43 GB free; about 15 GB are needed. D: has 149.7 GB free.
 - About 7 GB of regenerable caches on C: are listed there for the user to review.
+
+### Phase 2 post-test review: first live GPT call (2026-10-29)
+
+**Live result (one paid call, reviewed from the run's stored events):**
+- Model: `gpt-6.1-sol`, as set in `.env` (the key is not recorded anywhere).
+- API calls: 1. Tokens: 543 input + 376 output = 919, against the 8,000 cap.
+- Tool call: `submit_analysis`, accepted by validation on the first attempt. No retry, no second call.
+- Requirements: R-001 to R-008.
+- Run: 1 turn, 1 tool call, state PLANNING. The guard stopped it after the analysis, as designed.
+- Cost: not computed. `OPENAI_PRICE_*` is not set in `.env`, so `cost_known` is false and only the token cap applied.
+
+**What `llm_error:config` meant.** The configuration was fine. The guard refused the planning request on purpose by raising `LLMError(CONFIG)`. The orchestrator treats every `LLMError` as a resumable error, so it recorded `llm.error` (kind CONFIG) and paused with `llm_error:config`. The smoke summary then hid that event, because the message contained "smoke test", so the printout listed no OpenAI error and only said `pause: llm_error:config`. That was a bug in the harness: a deliberate stop looked like a broken configuration.
+
+**Fix:**
+- New error kind `LLMErrorKind.STOPPED`: the caller refused to send the request. It is not a provider or configuration fault.
+- The orchestrator records `llm.stopped` and pauses the run with `llm_stopped`. It records no `llm.error` for a deliberate stop.
+- The smoke guard and the dry run raise `STOPPED`.
+- The smoke summary no longer filters events by message text. `llm_errors` holds only real errors; `llm_stops` holds deliberate stops.
+- The CLI prints "Stopped on purpose by the smoke guard (not an error)".
+
+**Tests** (FakeLLM only, no network, no cost):
+- 3 new tests. A deliberate stop pauses as `llm_stopped` with no error event. A real CONFIG error still pauses as `llm_error:config` with an error event. A genuine config error inside the smoke harness is reported as an error.
+- The smoke unit tests now assert `llm_stopped`, an empty `llm_errors`, and the `STOPPED` kind on a refused request.
+- The opt-in live test asserts that the run ends at `llm_stopped`.
+- Full suite: 445 passed, 1 skipped (the live test, not run), 0 failed. Coverage 97%.
+
+**Remaining Phase 2 issues:**
+1. Cost is unknown until `OPENAI_PRICE_INPUT_PER_MTOK` and `OPENAI_PRICE_OUTPUT_PER_MTOK` are set. Until then `RUN_BUDGET_USD` is not enforced; the token cap still applies.
+2. Only the analysis step has run against the live model. Planning (`submit_plan`) and criteria (`submit_criteria`) are tested only with FakeLLM. Checking them live needs a new paid approval.
+3. A third-party deprecation warning (Starlette's test client asks for `httpx2`) appears in test runs. It is not from our code, and nothing was changed for it.
+4. Earlier smoke databases remain under `D:\DevPilotCache\temp` (`devpilot-smoke-*` and `smoke\`). They are temp files and can be removed only with your approval.

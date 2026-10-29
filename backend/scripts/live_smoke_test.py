@@ -83,7 +83,7 @@ def main() -> int:
         print(f"  {line}")
     print(f"Run state: {summary['state']}  pause: {summary['pause_reason']}  outcome: {summary['outcome']}")
     if summary["guard_stop"]:
-        print(f"Guard: {summary['guard_stop']}")
+        print(f"Stopped on purpose by the smoke guard (not an error): {summary['guard_stop']}")
     for err in summary["llm_errors"]:
         print(f"OpenAI error ({err.get('kind')}): {err.get('message')}")
     return 0 if summary["analysis_accepted"] else 2

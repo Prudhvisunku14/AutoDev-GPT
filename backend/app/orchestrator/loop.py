@@ -46,7 +46,7 @@ from app.db.models import (
 )
 from app.orchestrator import prompts
 from app.orchestrator.budget import LimitHit, RunGuard, turn_cost_usd
-from app.orchestrator.llm_client import LLMClient, LLMError, LLMRequest, LLMResponse
+from app.orchestrator.llm_client import LLMClient, LLMError, LLMErrorKind, LLMRequest, LLMResponse
 from app.orchestrator.run_control import change_state, end_run, pause_run
 from app.orchestrator.state_machine import ORCHESTRATED_STATES, REQUIRED_PHASE
 from app.stacks.catalog import StackCatalog
@@ -450,6 +450,11 @@ class Orchestrator:
         with self._sessions.begin() as s:
             run = s.get(Run, run_id)
             assert run is not None
+            if exc.kind is LLMErrorKind.STOPPED:
+                self._record(s, run, "llm.stopped", {"message": message})
+                if not run.is_terminal and run.state is not RunState.AWAITING_APPROVAL:
+                    pause_run(s, run, self._events, reason="llm_stopped", detail=message)
+                return
             self._record(s, run, "llm.error", {"kind": exc.kind, "message": message, "resumable": exc.resumable})
             if run.is_terminal or run.state is RunState.AWAITING_APPROVAL:
                 return

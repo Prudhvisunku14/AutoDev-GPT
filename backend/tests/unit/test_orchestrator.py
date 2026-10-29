@@ -387,6 +387,25 @@ def test_quota_error_pauses_for_the_user(make: Any) -> None:
     assert run.state is RunState.ANALYZING and run.pause_reason == "llm_error:quota"
 
 
+def test_deliberate_stop_pauses_as_llm_stopped_not_as_an_error(make: Any) -> None:
+    h = make(call("submit_analysis", ANALYSIS), fail(LLMErrorKind.STOPPED, "smoke test complete"))
+    run_id = h.new_run()
+    run = h.advance(run_id)
+    assert run.state is RunState.PLANNING and run.pause_reason == "llm_stopped"
+    assert not run.is_terminal and run.outcome is None
+    assert h.events_of(run_id, "llm.error") == []
+    assert h.events_of(run_id, "llm.stopped")[0]["message"] == "smoke test complete"
+
+
+def test_config_error_is_still_reported_as_an_error(make: Any) -> None:
+    h = make(call("submit_analysis", ANALYSIS), fail(LLMErrorKind.CONFIG, "OPENAI_MODEL must be set"))
+    run_id = h.new_run()
+    run = h.advance(run_id)
+    assert run.state is RunState.PLANNING and run.pause_reason == "llm_error:config"
+    assert h.events_of(run_id, "llm.error")[0]["kind"] == "CONFIG"
+    assert h.events_of(run_id, "llm.stopped") == []
+
+
 def test_cancel_during_gpt_call_discards_the_response(make: Any) -> None:
     holder: dict[str, Harness] = {}
 

@@ -38,3 +38,4 @@ def test_gpt_submits_a_structured_analysis(tmp_path: Path) -> None:
     assert summary["invocations"][0][0] in {"submit_analysis", "request_human_input"}
     assert summary["analysis_accepted"], f"analysis not accepted: {summary['invocations']}"
     assert summary["state"] == "PLANNING"
+    assert summary["pause_reason"] == "llm_stopped", "the run should end at the smoke guard, not at an error"
