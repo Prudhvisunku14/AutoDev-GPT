@@ -170,7 +170,7 @@ def test_status_reports_components(client: TestClient, auth: dict[str, str]) -> 
     assert body["workspaces_writable"] is True
     assert body["projects"] == 1 and body["runs"] == 0
     assert "backend" in body["egress_components"]
-    assert body["phase"].startswith("1")
+    assert body["phase"].startswith("2")
 
 
 def test_responses_carry_a_request_id(client: TestClient) -> None:

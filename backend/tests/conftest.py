@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -18,7 +19,27 @@ _ENV_VARS = (
     "DEVPILOT_API_TOKEN", "DEVPILOT_HOST", "DEVPILOT_PORT", "DATABASE_URL", "WORKSPACES_DIR", "LOG_LEVEL",
     "OPENAI_API_KEY", "OPENCODE_SERVER_PASSWORD", "N8N_API_KEY", "N8N_WEBHOOK_SECRET", "GITHUB_TOKEN",
     "GOOGLE_OAUTH_CLIENT_SECRET", "DEVPILOT_TOKEN_KEY", "EGRESS_ALLOWLIST_FILE",
+    "OPENAI_MODEL", "OPENAI_BASE_URL", "OPENAI_STORE_RESPONSES", "OPENAI_PRICE_INPUT_PER_MTOK",
+    "OPENAI_PRICE_OUTPUT_PER_MTOK", "MAX_TURNS", "MAX_TOOL_CALLS", "RUN_BUDGET_USD", "RUN_MAX_TOKENS",
 )
+
+
+_LIVE_FLAGS = {
+    "live_openai": "RUN_LIVE_OPENAI_TESTS",
+    "live_opencode": "RUN_LIVE_OPENCODE_TESTS",
+    "live_n8n": "RUN_LIVE_N8N_TESTS",
+    "live_google": "RUN_LIVE_GOOGLE_TESTS",
+    "live_github": "RUN_LIVE_GITHUB_TESTS",
+    "docker": "RUN_DOCKER_TESTS",
+}
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Opt-in tests run only when their flag is exactly `true` in the process environment."""
+    for item in items:
+        for marker, flag in _LIVE_FLAGS.items():
+            if marker in item.keywords and os.environ.get(flag, "").lower() != "true":
+                item.add_marker(pytest.mark.skip(reason=f"opt-in: set {flag}=true (needs approval; may cost money)"))
 
 
 @pytest.fixture(autouse=True)

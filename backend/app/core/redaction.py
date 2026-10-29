@@ -23,8 +23,11 @@ _TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),  # GitHub fine-grained PATs
     re.compile(r"ya29\.[0-9A-Za-z\-_]{20,}"),  # Google OAuth access tokens
     re.compile(r"1//[0-9A-Za-z\-_]{20,}"),  # Google OAuth refresh tokens
-    re.compile(r"(?i)(?<=bearer )[A-Za-z0-9\-._~+/]{8,}=*"),  # Authorization: Bearer <x>
-    re.compile(r"(?i)(?<=basic )[A-Za-z0-9+/]{8,}=*"),  # Authorization: Basic <x>
+    # Authorization: Bearer/Basic <x>. The token must contain a digit (Basic: or padding),
+    # so ordinary prose like "basic arithmetic" or "the bearer instrument" is left alone.
+    # Configured tokens are masked regardless, through the known-value list.
+    re.compile(r"(?i)(?<=bearer )(?=[A-Za-z\-._~+/]*[0-9])[A-Za-z0-9\-._~+/]{8,}=*"),
+    re.compile(r"(?i)(?<=basic )(?=[A-Za-z+/]*[0-9]|[A-Za-z0-9+/]{8,}=)[A-Za-z0-9+/]{8,}=*"),
 )
 
 _SENSITIVE_KEY = r"[A-Za-z0-9_\-]*(?:api[_\-]?key|secret|password|passwd|token|authorization)"

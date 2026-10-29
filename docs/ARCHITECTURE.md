@@ -105,11 +105,15 @@ GPT advances the run by calling **gate tools**. The executor applies a transitio
 
 `request_human_input` is available in every non-terminal state.
 
+**Phase 2 build.** The orchestrator drives ANALYZING, PLANNING and DEFINING_CRITERIA. When a run reaches a state whose tools belong to a later phase (IMPLEMENTING and after), it stays in that state with `pause_reason = "phase_unavailable"`. GPT is not called again, and nothing is generated or executed. `POST /runs/{id}/start` resumes it once that phase exists.
+
 > Refinement over the Phase 0 plan: `submit_analysis` was added as an explicit gate. It produces the canonical requirement list that the criteria coverage check (§9.3) depends on.
 
 ### 4.2 Execution model
 
 - The `RunManager` runs as an in-process asyncio worker started by the FastAPI lifespan. It executes **one run at a time**. Celery and Redis are not used.
+- Runs start only on an explicit request: `POST /runs/{id}/start`, or a decision on one of the run's approvals. Nothing resumes automatically after a restart, so GPT is never called (and money never spent) without a user action.
+- A run that cannot progress keeps its state and records why in `pause_reason`. Examples: a later phase is needed, an LLM error that can be retried (auth, quota, rate limit, timeout, server error), or a backend shutdown. Starting it again resumes from the last persisted step.
 - Blocking work (Docker CLI, git, SQLite) runs through `asyncio.to_thread`.
 - Every SQLite transaction starts with `BEGIN IMMEDIATE` (WAL mode, `busy_timeout` 30 s). This serializes writers so that a read-then-write transaction never fails with "database is locked". The cost is negligible for one user.
 - Run state and `last_response_id` are persisted after every turn. A run paused for approval therefore survives a backend restart.
@@ -139,7 +143,17 @@ while not run.is_terminal:
 
 - `parallel_tool_calls=False` keeps the order of side effects deterministic and easy to audit.
 - The requirement text, file contents, documents and logs are passed to GPT as **delimited data blocks**, never as instructions (see SECURITY.md).
-- `OPENAI_STORE_RESPONSES=false` turns on a fallback mode. In this mode the loop replays its own persisted transcript instead of using `previous_response_id`.
+- `OPENAI_STORE_RESPONSES=false` turns on a fallback mode. In this mode the loop replays its own persisted transcript instead of using `previous_response_id`. **Not implemented yet:** Phase 2 requires `true`, and starting a run with `false` returns 503 with an explanation.
+- `tool_choice="required"` is sent whenever tools are exposed. A reply without a function call (possible with other providers or the FakeLLM) gets a reminder. After `MAX_NUDGES` reminders the run stops with `no_progress`.
+
+**Exactly-once execution and crash recovery (implemented in `orchestrator/loop.py`)**
+1. Every function call is stored in `tool_invocations` before anything runs. `(run_id, call_id)` is unique, so a replayed call is ignored.
+2. A call is *claimed* (QUEUED → STARTED) in its own transaction. Its handler and result are then committed together, inside a savepoint that rolls back a failed handler.
+3. A call still STARTED when `advance` begins was cut off by a crash. It is marked INTERRUPTED and GPT is told so. It is never re-executed automatically.
+4. Outputs are marked `delivered` only after GPT accepted the request that carried them. An interrupted or failed LLM call is therefore repeated with identical input and the same `previous_response_id`.
+5. No database transaction is open while GPT is being called.
+
+**Loop protection (in code):** `MAX_TURNS`, `MAX_TOOL_CALLS`, `RUN_MAX_TOKENS`, `RUN_BUDGET_USD` (enforced when prices are configured), `RUN_WALL_CLOCK_SECONDS` of *active* time (time spent waiting for approval does not count), `MAX_REPEATED_TOOL_CALLS` identical consecutive calls, and `MAX_NUDGES`. When `OPENAI_PRICE_*` is not set, the run records `cost_known = false`, cost stays unreported rather than guessed, and `RUN_MAX_TOKENS` is the hard cap.
 
 ### 5.2 `ToolExecutor.execute` pipeline
 
@@ -186,6 +200,12 @@ The executor **refuses** calls that contradict an active directive. For example,
    - **Approved:** the tool executes, and its real result becomes the `function_call_output`.
    - **Denied:** the `function_call_output` is `{"ok": false, "error": {"class": "APPROVAL_DENIED"}}`.
 4. The loop resumes with the persisted `previous_response_id`.
+
+Implementation notes (Phase 2):
+- The decision is a conditional `UPDATE … WHERE status = 'PENDING'`, so an approval is decided exactly once. A second decision returns 409.
+- The HTTP request only records the decision. An approved call is executed by the run worker, through the same claim step as every other call, so it can never run twice.
+- `request_human_input` uses the same queue. Approving requires an answer, which becomes `{"ok": true, "data": {"answer": …}}`. Denying returns `HUMAN_DECLINED`, and GPT is told to continue with an assumption.
+- Cancelling a run cancels its pending approvals and skips its queued calls.
 
 ### 5.5 Tool catalog
 
@@ -490,15 +510,15 @@ S(t,k) = w_s·Suit(t,k) + w_r·Rel(t,c) + w_l·(1 − L̂(t)) + w_c·(1 − Ĉ(t
 | Table | Key columns |
 |---|---|
 | `projects` | id, name, requirement_text, stack, workspace_path, status, created_at |
-| `runs` | id, project_id, state, resume_state, last_response_id, turns, tokens_in, tokens_out, cost_usd, started_at, ended_at, outcome |
+| `runs` | id, project_id, state, resume_state, last_response_id, turns, tokens_in, tokens_out, cost_usd, started_at, ended_at, outcome; Phase 2: tool_calls, nudges, active_seconds, cost_known, pause_reason, status_detail, analysis_json, plan_json, pending_messages_json |
 | `requirements` | run_id, code (R-xxx), text, kind (functional / non-functional) |
 | `tasks` | run_id, order, title, capability, features_json, status |
 | `acceptance_criteria` | run_id, code, given, when, then, priority, method, status, test_refs_json, frozen_hash |
-| `tool_invocations` | run_id, task_id, tool, capability, provider, args_redacted, outcome, latency_ms, cost_usd, tokens, selection_json, error_class |
+| `tool_invocations` | run_id, seq, call_id (unique per run), response_id, tool, arguments_json (redacted), fingerprint, state_at_call, status (QUEUED → AWAITING_APPROVAL/APPROVED → STARTED → SUCCEEDED/FAILED/DENIED/INTERRUPTED, or SKIPPED), ok, error_class, output_json (exactly what GPT receives), delivered, latency_ms, capability, provider; later phases add cost, tokens, selection_json |
 | `tool_stats` | provider, category, successes, failures, ewma_latency_ms, ewma_cost_usd, consecutive_failures, breaker_until |
 | `test_runs` / `test_cases` | suite, passed, failed, errors, duration, junit_path / name, criterion_code, outcome, message |
 | `failures` / `recovery_actions` | class, confidence, fingerprint, location, evidence / action, reason, attempt_no |
-| `approvals` | run_id, call_id, tool, risk, payload_redacted, status, decided_at |
+| `approvals` | id, run_id, invocation_id (unique), kind (TOOL / HUMAN_INPUT), tool, risk, payload_json (redacted), status (PENDING / APPROVED / DENIED / CANCELLED), response_text (redacted), created_at, decided_at |
 | `events` | project_id, run_id (nullable), seq (monotonic per project, assigned inside the INSERT), type, payload_json (redacted), ts (feeds SSE, n8n and the report) |
 | `documents` / `doc_chunks_fts` | title, source, source_kind, mime_type, sha256, parser_version / FTS5(content, heading, document_id) |
 | `artifacts` | run_id, kind (report / bundle / junit), path |
@@ -518,9 +538,9 @@ All routes require a bearer token (`DEVPILOT_API_TOKEN`) unless noted.
 |---|---|
 | Health | `GET /health` (no auth, liveness only), `GET /status` (database, workspaces, egress components, counts) |
 | Projects | `POST /projects`, `GET /projects`, `GET /projects/{id}` |
-| Runs | `POST /projects/{id}/runs` (409 while the project has an active run), `GET /projects/{id}/runs`, `GET /runs/{id}`, `POST /runs/{id}/cancel`, `GET /runs/{id}/events` (JSON with `after_seq` since Phase 1; SSE via `Accept: text/event-stream` from Phase 2) |
-| Run details | `GET /runs/{id}/plan`, `/criteria`, `/tests`, `/invocations`, `/failures` |
-| Approvals | `GET /approvals?status=pending`, `POST /approvals/{id}/decision` |
+| Runs | `POST /projects/{id}/runs` (409 while the project has an active run), `GET /projects/{id}/runs`, `GET /runs/{id}`, `POST /runs/{id}/start` (start or resume; 202; 503 if OpenAI is not configured; may cost money), `POST /runs/{id}/cancel`, `GET /runs/{id}/events` (JSON, `after_seq`), `GET /runs/{id}/events/stream` (SSE, §11.3) |
+| Run details | `GET /runs/{id}/analysis`, `/plan`, `/criteria`, `/invocations` (Phase 2); `/tests`, `/failures` (later phases) |
+| Approvals | `GET /approvals?status=pending\|approved\|denied\|cancelled\|all&run_id=`, `POST /approvals/{id}/decision` with `{"decision": "approve"\|"deny", "response": "…"}` (an answer is required to approve a human-input request) |
 | Files | `GET /projects/{id}/files`, `GET /projects/{id}/files/content?path=`, `GET /projects/{id}/diff` |
 | Delivery | `GET /runs/{id}/report`, `GET /runs/{id}/bundle` |
 | Documents | `POST /documents` (PDF, DOCX, Markdown, text), `GET /documents/search?q=` |
@@ -546,7 +566,26 @@ EgressPolicy.check(host, component) -> Decision
 StackRegistry.validate(entry) -> ValidationResult
 ```
 
-### 11.3 Repository layout
+### 11.3 Live events (SSE) and client authentication
+
+`GET /api/v1/runs/{id}/events/stream` sends `text/event-stream` messages. Each event has:
+- `id`: its per-project `seq`
+- `event`: the event type, such as `run.state_changed`, `llm.request`, `llm.response`, `llm.error`, `tool.called`, `tool.result`, `approval.requested`, `approval.decided`, `run.paused` or `run.stopped`
+- `data`: the redacted event as JSON
+
+Delivery rules:
+- **Source of truth.** The stream reads the `events` table (polled every `SSE_POLL_SECONDS`). A reconnecting client misses nothing: it sends the standard `Last-Event-ID` header (or `?after_seq=`) and receives only newer events.
+- **Ending.** A terminal run ends with `event: stream.end` once all its events are delivered. Every stream also closes after `SSE_MAX_STREAM_SECONDS`, and clients simply reconnect. Comment lines (`: keepalive`) are sent every `SSE_HEARTBEAT_SECONDS`.
+- **Authentication.** The stream uses the same `Authorization: Bearer` header as every other route. Tokens are never accepted in query strings, so they never appear in URLs, proxy logs or browser history. Event payloads are redacted before storage.
+
+**How the React client (Phase 9) authenticates the stream:** the browser's built-in `EventSource` cannot send headers, so the dashboard will not use it. It will read the stream with `fetch()`, using a streaming-body SSE helper such as `@microsoft/fetch-event-source`:
+- It sends `Authorization: Bearer <token>` and `Last-Event-ID` itself.
+- It reconnects with backoff after a close.
+- It keeps the token in memory, never in `localStorage` or the URL.
+
+The token reaches the dashboard by being entered by the user, or through a same-origin login flow if multi-user support is added later.
+
+### 11.4 Repository layout
 
 ```
 CLAUDE.md  README.md  .env.example  .gitignore  docker-compose.yml (Phase 10)
@@ -559,8 +598,10 @@ backend/
     core/           logging.py redaction.py auth.py events.py egress.py crypto.py
     db/             models.py session.py repositories.py
     schemas/
-    orchestrator/   llm_client.py loop.py state_machine.py budget.py prompts/
-    tools/          base.py registry.py executor.py policy.py
+    orchestrator/   llm_client.py fake_llm.py loop.py state_machine.py budget.py prompts.py
+                    run_control.py approvals.py run_manager.py
+    tools/          base.py registry.py executor.py policy.py gates.py
+    demo/           calculator.py (offline FakeLLM demonstration)
       adapters/     workspace_fs.py opencode.py gpt_writer.py sandbox.py test_runner.py
                     git_local.py github.py github_import.py google_drive.py
                     n8n.py docs_retrieval.py document_parser.py registry.py

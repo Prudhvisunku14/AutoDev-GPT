@@ -14,7 +14,7 @@ from app.core.auth import require_api_token
 from app.db import repositories
 from app.schemas.api import HealthOut, StatusOut
 
-PHASE = "1 - backend foundation"
+PHASE = "2 - GPT orchestrator"
 
 logger = logging.getLogger("devpilot.api")
 

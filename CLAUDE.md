@@ -43,7 +43,7 @@ Design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Security: [docs/SECURITY.m
 - **Session setup (every new terminal):** from the repo root, run `. .\scripts\dev-env.ps1`. It points TEMP, TMP and the pip cache at `D:\DevPilotCache`, refuses pip installs outside a venv, and sets `$env:DEVPILOT_PYTHON` to the venv interpreter. It changes nothing outside the session.
 - **Tests:** `cd backend; & $env:DEVPILOT_PYTHON -m pytest` (add `--cov=app` for coverage).
 - **Installed as of 2026-10-29:**
-  - Git 2.49.0 at `D:\Git\cmd\git.exe`. Global `user.name` is set. The repo was initialized on branch `main` in Phase 1; nothing has been committed or pushed.
+  - Git 2.49.0 at `D:\Git\cmd\git.exe`. Global `user.name` and `user.email` are set. The repo is on branch `main`. Commits are local only; nothing is ever pushed without the user's approval. Commit history is recorded in `docs/PROGRESS.md`.
   - Node.js v24.14.1 and npm 11.11.0 at `D:\DOWNLOAND_NEW_D\`.
 - **Not installed as of 2026-10-29:** Docker Desktop, WSL2 and OpenCode. Check before relying on any of them:
   - Phase 3 and later need Docker Desktop with WSL2, with its data on D:.
@@ -83,9 +83,10 @@ Design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Security: [docs/SECURITY.m
 ## Testing
 
 - Use `pytest`. External boundaries are faked:
-  - `FakeLLM` replays scripted function calls.
+  - `FakeLLM` (`app/orchestrator/fake_llm.py`) replays scripted function calls. `tests/harness.py` wires the real orchestrator around it. Never call the real OpenAI API from a unit or integration test.
   - `respx` mocks HTTP.
   - `FakeSandbox` replaces Docker.
-- Opt-in markers: `docker`, `live_openai`, `live_opencode`, `live_n8n`, `live_google`, `live_github`. These tests skip unless the matching `RUN_LIVE_*` or `RUN_DOCKER_TESTS` flag is set, and they need user approval.
+- Opt-in markers: `docker`, `live_openai`, `live_opencode`, `live_n8n`, `live_google`, `live_github`. `tests/conftest.py` skips them unless the matching `RUN_LIVE_*` or `RUN_DOCKER_TESTS` flag is exactly `true` in the process environment. They need user approval each time.
+- Never read, print or log the value of `OPENAI_API_KEY` or any other secret, including when checking whether it is set.
 - Google, GitHub and document services are faked in unit tests (respx and fixtures). No unit test calls them live.
 - Test algorithms on their math and with simulations, not only on happy paths.

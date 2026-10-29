@@ -21,7 +21,7 @@ DevPilot runs code it did not write, written by an LLM, from requirements it did
 | T4 | Path traversal through tool arguments | `WorkspaceFS` resolves every path inside `workspaces/<project_id>/`. It rejects `..`, absolute paths, drive letters, UNC paths, and symlinks or junctions that point outside. File-size and file-count limits apply. | 1 |
 | T5 | Prompt injection through requirements, docs, files or logs | Untrusted content is passed to GPT as delimited data. Permissions, approvals, limits and gates are enforced **in code**, so model output cannot grant itself a capability. Phase-scoped tool exposure limits which tools are reachable at all. | 2 |
 | T6 | A credential leaks | Credentials load only from env or `.env` (pydantic-settings). `.env` is gitignored. A redaction filter masks known secret values and token patterns in logs, events, DB rows and tool results. Secrets are never sent to GPT or placed in a sandbox. Tests assert that no secret appears in the logs or DB. | 1–2 |
-| T7 | Unauthorized use of the backend API | A bearer token is required on every route except `/health`. The server binds to `127.0.0.1` by default, and CORS is limited to the dashboard origin. | 1 |
+| T7 | Unauthorized use of the backend API | A bearer token is required on every route except `/health`, including the SSE stream. Tokens are accepted only in the `Authorization` header, never in URLs. The server binds to `127.0.0.1` by default, and CORS is limited to the dashboard origin. | 1, 2 |
 | T8 | Forged or replayed n8n callbacks | HMAC-SHA256 over `timestamp.body`, a 5-minute timestamp window and a constant-time compare. Outbound webhooks go only to allowlisted URLs. | 8 |
 | T9 | Unapproved external or destructive actions | The PolicyEngine assigns a risk level to every action. GIT_PUSH, GITHUB_\*, DESTRUCTIVE actions and anything using real credentials **always** go to the human approval queue. EXTERNAL_NETWORK (n8n) needs approval unless `N8N_AUTO_APPROVE=true`. | 2, 8 |
 | T10 | The model "passes" by editing tests | Accepted tests are frozen with SHA-256 hashes. A diff that touches a frozen test is reverted and recorded as POLICY_VIOLATION. Tests change only through an approved `amend_tests`. | 5 |
@@ -79,6 +79,8 @@ The final report includes a summary of approvals and policy refusals.
 - Live tests that use real credentials or cost money are opt-in (`RUN_LIVE_*`) and require explicit user approval each time.
 - Tests never call real Google, GitHub or document services. These are faked with respx and fixtures. Live tests use `RUN_LIVE_GOOGLE_TESTS` or `RUN_LIVE_GITHUB_TESTS`, and each run needs approval.
 - Test fixtures use fake tokens only. No test writes a real token to a fixture, a log or a snapshot.
+- Orchestrator tests use `FakeLLM` (scripted GPT responses). The only test that calls the real OpenAI API is `tests/live/test_openai_live.py`. It is skipped unless `RUN_LIVE_OPENAI_TESTS=true` is set for that one command, after the user approves the spend.
+- A run calls GPT only after `POST /runs/{id}/start` or an approval decision. Nothing resumes automatically after a restart.
 
 ## 7. OAuth and token handling
 

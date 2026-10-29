@@ -10,7 +10,7 @@ You describe the software you want in plain language. DevPilot AI then:
 - diagnoses and repairs failures within strict limits
 - delivers the source code, documentation, test results and a final report
 
-> **Status: Phase 1 (backend foundation) complete.** The REST API stores projects and runs, but runs are not executed yet; the GPT orchestrator arrives in Phase 2.
+> **Status: Phase 2 (GPT orchestrator) complete.** GPT analyzes a requirement, chooses a stack, plans the work and defines acceptance criteria. Python validates and stores each step. Runs then pause at IMPLEMENTING, because code generation and execution arrive in Phases 3 and 4.
 > See [docs/PROGRESS.md](docs/PROGRESS.md) for exactly what has been built and verified.
 
 ## How it works
@@ -97,6 +97,34 @@ Invoke-RestMethod http://127.0.0.1:8000/api/v1/projects -Method Post -Headers $h
 ```
 
 The SQLite database is created at `data/devpilot.db` and project workspaces under `workspaces/`, both in the repo folder on D: and both gitignored. Interactive API docs (`/docs`) are disabled, because every route except `/health` needs the token.
+
+### GPT orchestrator (Phase 2)
+
+Offline demo. It uses a scripted FakeLLM, with no key and no cost:
+
+```powershell
+& $env:DEVPILOT_PYTHON backend\scripts\demo_calculator.py
+```
+
+To use real GPT, edit `.env` yourself:
+- set `OPENAI_API_KEY` and `OPENAI_MODEL`
+- optionally set `OPENAI_PRICE_INPUT_PER_MTOK` and `OPENAI_PRICE_OUTPUT_PER_MTOK`, so spend is tracked against `RUN_BUDGET_USD`
+
+Then check that the key can see the model. This uses no tokens:
+
+```powershell
+& $env:DEVPILOT_PYTHON backend\scripts\check_openai_access.py
+```
+
+A run calls GPT only when you start it:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/api/v1/runs/<run_id>/start -Method Post -Headers $h   # may cost money
+Invoke-RestMethod http://127.0.0.1:8000/api/v1/runs/<run_id> -Headers $h                      # state, pause_reason
+Invoke-RestMethod http://127.0.0.1:8000/api/v1/approvals -Headers $h                          # pending questions
+```
+
+Live events: `GET /api/v1/runs/<run_id>/events/stream` (server-sent events, same bearer header).
 
 ## Documentation
 

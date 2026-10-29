@@ -44,6 +44,32 @@ class Settings(BaseSettings):
     workspace_max_file_bytes: int = Field(default=2_000_000, gt=0)
     workspace_max_files: int = Field(default=5_000, gt=0)
 
+    # --- OpenAI: GPT orchestrator (Responses API) -------------------------
+    openai_model: str | None = None
+    openai_base_url: str | None = None
+    openai_store_responses: bool = True
+    openai_timeout_seconds: float = Field(default=120.0, gt=0)
+    openai_max_retries: int = Field(default=2, ge=0, le=10)
+    openai_max_output_tokens: int | None = Field(default=None, gt=0)
+    # USD per 1M tokens. Unset means "cost unknown": the token cap is enforced instead.
+    openai_price_input_per_mtok: float | None = Field(default=None, ge=0)
+    openai_price_output_per_mtok: float | None = Field(default=None, ge=0)
+
+    # --- Run limits (enforced in code, never by prompts) ------------------
+    max_turns: int = Field(default=60, gt=0)
+    max_tool_calls: int = Field(default=100, gt=0)
+    max_repeated_tool_calls: int = Field(default=3, gt=0)
+    max_nudges: int = Field(default=2, ge=0)
+    run_budget_usd: float = Field(default=2.0, gt=0)
+    run_max_tokens: int = Field(default=1_000_000, gt=0)
+    run_wall_clock_seconds: float = Field(default=1800, gt=0)
+    tool_output_max_chars: int = Field(default=20_000, ge=1_000)
+
+    # --- Server-sent events ------------------------------------------------
+    sse_poll_seconds: float = Field(default=0.5, gt=0)
+    sse_heartbeat_seconds: float = Field(default=15.0, gt=0)
+    sse_max_stream_seconds: float = Field(default=300.0, gt=0)
+
     # --- Credentials used by later phases ---------------------------------
     # Declared here only so the redactor knows their values. Phase 1 never uses them.
     openai_api_key: SecretStr | None = None
@@ -70,6 +96,20 @@ class Settings(BaseSettings):
         if isinstance(value, str) and value.strip() == "":
             return None
         return value
+
+    @field_validator(
+        "openai_model",
+        "openai_base_url",
+        "openai_max_output_tokens",
+        "openai_price_input_per_mtok",
+        "openai_price_output_per_mtok",
+        mode="before",
+    )
+    @classmethod
+    def _empty_optional_is_unset(cls, value: object) -> object:
+        if isinstance(value, str) and value.strip() == "":
+            return None
+        return value.strip() if isinstance(value, str) else value
 
     @field_validator("devpilot_api_token")
     @classmethod
@@ -110,6 +150,10 @@ class Settings(BaseSettings):
         self.workspaces_dir = _from_repo_root(self.workspaces_dir)
         self.egress_allowlist_file = _from_repo_root(self.egress_allowlist_file)
         return self
+
+    @property
+    def cost_known(self) -> bool:
+        return self.openai_price_input_per_mtok is not None and self.openai_price_output_per_mtok is not None
 
     @property
     def cors_origins(self) -> list[str]:

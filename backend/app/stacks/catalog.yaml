@@ -1,0 +1,36 @@
+# StackCatalog (ARCHITECTURE §7.1, §7.4). GPT may choose only a stack listed here.
+#
+# Phase 2 uses the planning fields below. Phase 3 adds runner images and the
+# install/test/run commands to each entry.
+#
+# test_methods: verification methods a criterion may use with this stack
+# (`manual` is always allowed for SHOULD/COULD criteria, never for MUST).
+
+stacks:
+  python-cli:
+    name: Python command-line application
+    language: python
+    frameworks: []
+    description: A Python 3.12 program run from the command line, tested with pytest.
+    test_methods: [unit, static]
+
+  python-fastapi:
+    name: Python web API with FastAPI
+    language: python
+    frameworks: [fastapi]
+    description: A FastAPI service with JSON endpoints, tested with pytest and HTTP API tests.
+    test_methods: [unit, api, static]
+
+  react-vite:
+    name: React single-page app with Vite
+    language: typescript
+    frameworks: [react, vite]
+    description: A React + TypeScript front end built with Vite, tested with Playwright end-to-end tests.
+    test_methods: [unit, e2e, static]
+
+  static-html:
+    name: Static website
+    language: html
+    frameworks: []
+    description: Plain HTML, CSS and JavaScript pages, tested with Playwright end-to-end tests.
+    test_methods: [e2e, static]

@@ -53,8 +53,15 @@ def test_sensitive_key_value_pairs_are_masked(text: str) -> None:
     assert MASK in out
 
 
-def test_ordinary_text_is_untouched() -> None:
-    text = "Build a todo app with tokens_in=5 and max_tokens 100. The password reset page needs tests."
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Build a todo app with tokens_in=5 and max_tokens 100. The password reset page needs tests.",
+        "A calculator that performs basic arithmetic on two numbers.",
+        "The bearer instrument is described in basic terms.",
+    ],
+)
+def test_ordinary_text_is_untouched(text: str) -> None:
     assert Redactor().redact_text(text) == text
 
 

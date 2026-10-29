@@ -1,7 +1,9 @@
 """SQLAlchemy 2.0 typed ORM models (ARCHITECTURE §10).
 
-Phase 1 creates `projects`, `runs` and `events`. The other tables arrive with the
-phases that use them.
+Phase 1: `projects`, `runs`, `events`.
+Phase 2: `requirements`, `tasks`, `acceptance_criteria`, `tool_invocations`, `approvals`,
+plus orchestration columns on `runs`. Columns added after Phase 1 carry a server default
+so `init_db` can add them to an existing database (see db/session.py).
 """
 
 from __future__ import annotations
@@ -10,7 +12,17 @@ import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import TypeDecorator
@@ -69,6 +81,38 @@ class ProjectStatus(StrEnum):
     ARCHIVED = "ARCHIVED"
 
 
+class InvocationStatus(StrEnum):
+    """Lifecycle of one GPT function call (one `call_id`)."""
+
+    QUEUED = "QUEUED"  # received from GPT, not yet checked
+    AWAITING_APPROVAL = "AWAITING_APPROVAL"
+    APPROVED = "APPROVED"  # approved, waiting for the worker to execute it
+    STARTED = "STARTED"  # claimed by the worker; a crash leaves it here
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    DENIED = "DENIED"
+    INTERRUPTED = "INTERRUPTED"  # found STARTED after a crash; never re-executed
+    SKIPPED = "SKIPPED"  # the run ended before the call ran
+
+
+# Statuses whose output must be delivered to GPT as a function_call_output.
+FINAL_INVOCATION_STATUSES = frozenset(
+    {InvocationStatus.SUCCEEDED, InvocationStatus.FAILED, InvocationStatus.DENIED, InvocationStatus.INTERRUPTED}
+)
+
+
+class ApprovalKind(StrEnum):
+    TOOL = "TOOL"  # a risky tool call waits for approve/deny
+    HUMAN_INPUT = "HUMAN_INPUT"  # GPT asked the user a question
+
+
+class ApprovalStatus(StrEnum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    DENIED = "DENIED"
+    CANCELLED = "CANCELLED"
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -110,11 +154,118 @@ class Run(Base):
     ended_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
     outcome: Mapped[str | None] = mapped_column(String(64), default=None)
 
+    # --- Phase 2: orchestration ------------------------------------------------
+    tool_calls: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    nudges: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    active_seconds: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    cost_known: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    # Why a non-terminal run is not progressing (e.g. waiting for a later phase, LLM error).
+    pause_reason: Mapped[str | None] = mapped_column(String(256), default=None)
+    status_detail: Mapped[str | None] = mapped_column(Text, default=None)
+    analysis_json: Mapped[str | None] = mapped_column(Text, default=None)
+    plan_json: Mapped[str | None] = mapped_column(Text, default=None)
+    # User messages (e.g. reminders) to send with the next GPT request.
+    pending_messages_json: Mapped[str | None] = mapped_column(Text, default=None)
+
     project: Mapped[Project] = relationship(back_populates="runs")
 
     @property
     def is_terminal(self) -> bool:
         return self.state in TERMINAL_RUN_STATES
+
+
+class Requirement(Base):
+    __tablename__ = "requirements"
+    __table_args__ = (UniqueConstraint("run_id", "code", name="uq_requirements_run_code"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), index=True)
+    code: Mapped[str] = mapped_column(String(16))
+    text: Mapped[str] = mapped_column(Text)
+    kind: Mapped[str] = mapped_column(String(16))
+
+
+class PlanTask(Base):
+    __tablename__ = "tasks"
+    __table_args__ = (UniqueConstraint("run_id", "order", name="uq_tasks_run_order"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), index=True)
+    order: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text)
+    capability: Mapped[str] = mapped_column(String(32))
+    features_json: Mapped[str] = mapped_column(Text)
+    requirement_refs_json: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), default="PENDING")
+
+
+class AcceptanceCriterion(Base):
+    __tablename__ = "acceptance_criteria"
+    __table_args__ = (UniqueConstraint("run_id", "code", name="uq_criteria_run_code"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), index=True)
+    code: Mapped[str] = mapped_column(String(16))
+    given: Mapped[str] = mapped_column(Text)
+    when: Mapped[str] = mapped_column(Text)
+    then: Mapped[str] = mapped_column(Text)
+    priority: Mapped[str] = mapped_column(String(8))
+    method: Mapped[str] = mapped_column(String(16))
+    requirement_refs_json: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), default="DEFINED")
+    test_refs_json: Mapped[str] = mapped_column(Text, default="[]")
+    frozen_hash: Mapped[str | None] = mapped_column(String(64), default=None)
+
+
+class ToolInvocation(Base):
+    """One GPT function call. `(run_id, call_id)` is unique, so a call never runs twice."""
+
+    __tablename__ = "tool_invocations"
+    __table_args__ = (
+        UniqueConstraint("run_id", "call_id", name="uq_invocations_run_call"),
+        UniqueConstraint("run_id", "seq", name="uq_invocations_run_seq"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), index=True)
+    seq: Mapped[int] = mapped_column(Integer)
+    call_id: Mapped[str] = mapped_column(String(128))
+    response_id: Mapped[str | None] = mapped_column(String(128), default=None)
+    tool: Mapped[str] = mapped_column(String(64))
+    arguments_json: Mapped[str] = mapped_column(Text)  # redacted before storage
+    fingerprint: Mapped[str] = mapped_column(String(64))  # sha256 of tool + canonical arguments
+    state_at_call: Mapped[str] = mapped_column(String(32))
+    status: Mapped[InvocationStatus] = mapped_column(
+        Enum(InvocationStatus, native_enum=False, length=24), default=InvocationStatus.QUEUED
+    )
+    ok: Mapped[bool | None] = mapped_column(Boolean, default=None)
+    error_class: Mapped[str | None] = mapped_column(String(32), default=None)
+    output_json: Mapped[str | None] = mapped_column(Text, default=None)  # exactly what GPT receives
+    delivered: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    latency_ms: Mapped[int | None] = mapped_column(Integer, default=None)
+    capability: Mapped[str | None] = mapped_column(String(32), default=None)
+    provider: Mapped[str | None] = mapped_column(String(64), default=None)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
+
+
+class Approval(Base):
+    __tablename__ = "approvals"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), index=True)
+    invocation_id: Mapped[int] = mapped_column(ForeignKey("tool_invocations.id"), unique=True)
+    kind: Mapped[ApprovalKind] = mapped_column(Enum(ApprovalKind, native_enum=False, length=16))
+    tool: Mapped[str] = mapped_column(String(64))
+    risk: Mapped[str] = mapped_column(String(32))
+    payload_json: Mapped[str] = mapped_column(Text)  # redacted arguments or the question
+    status: Mapped[ApprovalStatus] = mapped_column(
+        Enum(ApprovalStatus, native_enum=False, length=16), default=ApprovalStatus.PENDING
+    )
+    response_text: Mapped[str | None] = mapped_column(Text, default=None)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    decided_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
 
 
 class Event(Base):
