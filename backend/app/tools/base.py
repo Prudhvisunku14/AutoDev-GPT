@@ -12,12 +12,16 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.db.models import RunState
 
 if TYPE_CHECKING:
+    import threading
+
     from sqlalchemy.orm import Session
 
     from app.config import Settings
     from app.core.events import EventRecorder
     from app.db.models import Project, Run
+    from app.sandbox.runner import SandboxRunner
     from app.stacks.catalog import StackCatalog
+    from app.tools.adapters.workspace_fs import WorkspaceFS
 
 
 class RiskLevel(StrEnum):
@@ -93,6 +97,10 @@ class ToolContext:
     settings: Settings
     events: EventRecorder
     catalog: StackCatalog
+    # Phase 3: the Docker sandbox, the workspace jail, and a signal set when the backend stops.
+    sandbox: SandboxRunner | None = None
+    workspace: WorkspaceFS | None = None
+    cancel: threading.Event | None = None
 
 
 Handler = Callable[[ToolContext, Any], dict[str, Any]]

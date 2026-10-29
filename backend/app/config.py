@@ -73,6 +73,16 @@ class Settings(BaseSettings):
     sse_heartbeat_seconds: float = Field(default=15.0, gt=0)
     sse_max_stream_seconds: float = Field(default=300.0, gt=0)
 
+    # --- Execution sandbox (Docker CLI; SECURITY T1, T2) -------------------
+    # The docker executable. Give the full path if docker.exe is not on PATH.
+    docker_cli: str = Field(default="docker", min_length=1)
+    sandbox_memory: str = Field(default="1g", pattern=r"^[1-9][0-9]{0,5}[bkmg]$")
+    sandbox_cpus: float = Field(default=1.0, gt=0, le=8)
+    sandbox_pids_limit: int = Field(default=256, ge=16, le=4096)
+    sandbox_timeout_seconds: float = Field(default=300.0, gt=0, le=3600)
+    # Per stream. Output beyond this is dropped and marked truncated; a flood kills the container.
+    sandbox_max_output_bytes: int = Field(default=65_536, ge=1_024, le=4_194_304)
+
     # --- Credentials used by later phases ---------------------------------
     # Declared here only so the redactor knows their values. Phase 1 never uses them.
     openai_api_key: SecretStr | None = None

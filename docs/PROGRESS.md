@@ -1,6 +1,6 @@
 # DevPilot AI: Progress
 
-**Current phase:** Phase 2 complete (2026-10-29), with the first live GPT call verified. Phase 3 has **not started** and is waiting for explicit approval.
+**Current phase:** Phase 3 built and tested offline (2026-10-29). The real-container checks are **pending** a verified Docker engine (see the Phase 3 log). Phase 4 has **not started**.
 
 ## Phase tracker
 
@@ -9,7 +9,7 @@
 | 0 | Architecture and initialization | ✅ Done (2026-10-29, revised the same day) | none |
 | 1 | Backend foundation | ✅ Done (2026-10-29) | Python 3.12.9 at `D:\python.exe` |
 | 2 | GPT orchestrator | ✅ Done (2026-10-29), verified with FakeLLM; first live GPT call verified (analysis accepted, 1 call, 919 tokens) | OpenAI API key (user) for live use |
-| 3 | Docker sandbox | ⏳ Not started | Docker Desktop + WSL2 (data on D:) |
+| 3 | Docker sandbox | 🟡 Built and tested offline; real-container checks pending (Docker not running, data not on D:) | Docker Desktop running, data on D:, `python:3.12-alpine` present |
 | 4 | OpenCode integration | ⏳ Not started | OpenCode container image, Git |
 | 5 | Verification-guided development | ⏳ Not started | — |
 | 6 | Failure classification and recovery | ⏳ Not started | — |
@@ -345,3 +345,46 @@ The calculator was **not** generated, run or tested.
 2. Only the analysis step has run against the live model. Planning (`submit_plan`) and criteria (`submit_criteria`) are tested only with FakeLLM. Checking them live needs a new paid approval.
 3. A third-party deprecation warning (Starlette's test client asks for `httpx2`) appears in test runs. It is not from our code, and nothing was changed for it.
 4. Earlier smoke databases remain under `D:\DevPilotCache\temp` (`devpilot-smoke-*` and `smoke\`). They are temp files and can be removed only with your approval.
+
+### Phase 3: Docker sandbox (2026-10-29): built offline, real-container checks pending
+
+**Docker verification: FAILED.** I made no container, no image pull and no Docker change. The checks:
+
+| Check | Result |
+|---|---|
+| Docker CLI | Version 29.9.2 at `C:\Users\prudh\AppData\Local\Programs\DockerDesktop\resources\bin\docker.exe`. **Not on PATH**, so the backend needs `DOCKER_CLI` set to that path. |
+| Docker Desktop program | Version 4.97.0, installed to **C:** (`C:\Users\prudh\AppData\Local\Programs\DockerDesktop`). The program needs about 3.3 GB on C:. `D:\DockerDesktop` exists but is empty. |
+| Engine | **Not running**: no Docker process, no `docker_engine` pipe, and `docker version` cannot reach the server. |
+| First start | Never done. Docker has no settings file, so no data location is set and none is confirmed on D:. |
+| Data location | `D:\DockerData` is empty. Without the setting, Docker's VM disk would go under `%LOCALAPPDATA%\Docker` on C:. |
+| Installer log | Two attempts failed for lack of C: space (needed 3.2 GB). The third ran `install -package … -vm-package …` with no `--installation-dir` or `--wsl-default-data-root`, so the program went to C:. The D: temp redirect was not used either. |
+| docker-users group | Not present. The elevated installer normally creates it. |
+| WSL | Version 3.0.3.0, default version 2, no distributions yet (expected before Docker's first start). |
+| Disk | C: 1.42 GB free of 183 GB. D: 148.8 GB free of 293 GB. |
+
+**Steps only you can do** (I have not done any of them):
+1. Decide where Docker's program lives. Option A: uninstall Docker Desktop and reinstall it to D: as in `docs/SETUP_WINDOWS.md` step 5, in an administrator PowerShell. Option B: keep the program on C: (about 3.3 GB) and move only the data to D: after the first start. Option B needs about 5 GB free on C: first. Tell me which you choose; I will not reinstall without your permission.
+2. Start Docker Desktop once from `C:\Users\prudh\AppData\Local\Programs\DockerDesktop\Docker Desktop.exe`. It may ask for administrator approval to install its service. Approve it yourself. Sign-in is optional.
+3. In Settings → Resources → Advanced, set **Disk image location** to `D:\DockerData` (Option B; under Option A this is already the install setting). Then run `docker info` and check `Docker Root Dir`.
+4. Add the CLI path to `.env` (not a secret): `DOCKER_CLI=C:\Users\prudh\AppData\Local\Programs\DockerDesktop\resources\bin\docker.exe`. Or put Docker on PATH yourself.
+5. Only after step 3 is confirmed, run `docker pull python:3.12-alpine`. It is a small official image, and the download goes to the disk location set in step 3.
+6. Then tell me. I will run `docker version`, the real-container tests and `demo_sandbox.py --run`.
+
+**What was built (offline):**
+- `app/sandbox/`: `policy.py` (approval table and request checks), `spec.py` (job and result types), `docker_cli.py` (the only code that knows docker's syntax, including the hardened `create` arguments), `process.py` (subprocess with timeout, cancel and output cap), `runner.py` (create, start, inspect, remove, with status mapping and orphan sweep), `fake.py` (test double).
+- `app/tools/adapters/sandbox.py`: the GPT tool `run_sandbox_command`, registered only when a sandbox is supplied.
+- `ToolContext` gained the sandbox, the workspace and a cancel signal. The orchestrator passes them on, and backend shutdown cancels running containers.
+- `create_app` takes an optional `sandbox`. `python -m app` supplies `DockerSandbox`; tests do not, so tests never touch Docker.
+- Settings: `DOCKER_CLI`, `SANDBOX_MEMORY`, `SANDBOX_CPUS`, `SANDBOX_PIDS_LIMIT`, `SANDBOX_TIMEOUT_SECONDS` (already in `.env.example`) and `SANDBOX_MAX_OUTPUT_BYTES`.
+- `backend/scripts/demo_sandbox.py`: the default is a dry run, which prints the exact `docker create` arguments and starts nothing. `--run` goes through the real tool and prints the outcome and the recorded `sandbox.*` events. Only the dry run has been executed.
+- Tests: `test_sandbox_policy.py`, `test_sandbox_process.py` (real child processes), `test_sandbox_docker_args.py`, `test_sandbox_runner.py` (fake CLI), `test_sandbox_tool.py`, and `tests/integration/test_sandbox_docker.py` (9 real-container tests, skipped unless `RUN_DOCKER_TESTS=true`; **not run**).
+
+**Tests (offline):** 528 passed, 10 skipped (9 real-container tests and the live OpenAI test), 0 failed. Coverage 97%. ruff and mypy are not installed in the venv, so they were not run.
+
+**Remaining Phase 3 issues:**
+1. Real-container checks are not run (see the steps above). Until they pass, the isolation controls are unverified (see SECURITY.md §11).
+2. The install step with a package-registry proxy is not built. Only `--network none` exists.
+3. Images are pinned by tag (`python:3.12-alpine`), not digest. Record the digest after the first pull.
+4. The tool is not reachable from GPT yet, because the orchestrator pauses at IMPLEMENTING until Phase 4.
+5. A per-run cancel from the API is not wired. Only backend shutdown cancels containers.
+6. An empty folder `D:\DOWNLOAD_NEW_D` was created by a mistyped path during this work. It holds nothing, and the tools refused to delete it. Delete it by hand.

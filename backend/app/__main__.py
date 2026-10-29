@@ -6,6 +6,7 @@ import uvicorn
 
 from app.config import get_settings
 from app.main import create_app
+from app.sandbox.runner import DockerSandbox
 
 
 def main() -> None:
@@ -14,7 +15,7 @@ def main() -> None:
     # access_log=False: uvicorn's access line includes the query string; the app's own
     # request log records the path only.
     uvicorn.run(
-        create_app(settings),
+        create_app(settings, sandbox=DockerSandbox.from_settings(settings)),
         host=settings.devpilot_host,
         port=settings.devpilot_port,
         log_config=None,

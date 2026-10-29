@@ -307,6 +307,14 @@ The initial stacks are `python-fastapi`, `python-cli`, `react-vite` and `static-
 - A wall-clock timeout kills the container.
 - **Dependency install** is the only step with network access. Dependencies are installed into the workspace mount (`.devpilot/deps`, `node_modules`) so that later containers without network can reuse them.
 - **App health checks and e2e tests** run inside the same container as the app, against localhost. The network namespace therefore stays `none`.
+- **Phase 3 build (2026-10-29), as implemented.** Code: `app/sandbox/` and `app/tools/adapters/sandbox.py`.
+  - `policy.py` is the approval table. `APPROVED_IMAGES` holds exact references with a version tag (never `latest`). `APPROVED_COMMANDS` holds fixed argument lists with no shell. GPT names a command and, where the command needs one, a workspace file. Python builds the argument list.
+  - `docker_cli.py` builds `docker create` in one place, `build_create_args`. Every container gets `--pull never` (an image is never downloaded implicitly), `--network none`, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--read-only`, a non-executable tmpfs at `/tmp`, user `65534:65534`, memory with no swap, CPU and PID limits, `--init`, and `HOME=/tmp` as the only environment variable. The workspace is the only mount, and it is read-only.
+  - `runner.py` runs `create`, `start -a`, `inspect` and `rm -f` in that order, and removes the container in a `finally` block. Statuses are SUCCEEDED, FAILED, TIMEOUT, OUTPUT_LIMIT, MEMORY_LIMIT, CANCELLED, ERROR and UNAVAILABLE. Containers carry the label `devpilot.sandbox=true`, and `sweep_orphans` removes leftovers at startup.
+  - `process.py` runs the Docker CLI with `subprocess` and an argument list, never a shell. It enforces the wall-clock limit, a cancel signal and an output cap. Each stream keeps 64 KB by default; output beyond 16 times that kills the process.
+  - Cancellation: the orchestrator's stop signal (backend shutdown) is passed to every sandbox run, so shutdown kills running containers. A per-run cancel from the API waits for Phase 4.
+  - The tool `run_sandbox_command` is registered only when a sandbox is supplied, and only in state IMPLEMENTING. Sandbox outcomes, including timeouts and exit codes, are returned as data with a status. Only requests that break the rules are tool errors, and those run nothing.
+  - The orchestrator still pauses at IMPLEMENTING, so GPT cannot call the tool until Phase 4 changes that state.
 
 ### 7.3 Test results
 
@@ -570,7 +578,7 @@ StackRegistry.validate(entry) -> ValidationResult
 
 `GET /api/v1/runs/{id}/events/stream` sends `text/event-stream` messages. Each event has:
 - `id`: its per-project `seq`
-- `event`: the event type, such as `run.state_changed`, `llm.request`, `llm.response`, `llm.error`, `llm.stopped`, `tool.called`, `tool.result`, `approval.requested`, `approval.decided`, `run.paused` or `run.stopped`
+- `event`: the event type, such as `run.state_changed`, `llm.request`, `llm.response`, `llm.error`, `llm.stopped`, `sandbox.started`, `sandbox.finished`, `tool.called`, `tool.result`, `approval.requested`, `approval.decided`, `run.paused` or `run.stopped`
 - `data`: the redacted event as JSON
 
 Delivery rules:

@@ -49,7 +49,9 @@ from app.orchestrator.budget import LimitHit, RunGuard, turn_cost_usd
 from app.orchestrator.llm_client import LLMClient, LLMError, LLMErrorKind, LLMRequest, LLMResponse
 from app.orchestrator.run_control import change_state, end_run, pause_run
 from app.orchestrator.state_machine import ORCHESTRATED_STATES, REQUIRED_PHASE
+from app.sandbox.runner import SandboxRunner
 from app.stacks.catalog import StackCatalog
+from app.tools.adapters.workspace_fs import WorkspaceFS
 from app.tools.base import ErrorClass, ToolContext, ToolResult
 from app.tools.executor import PreparedCall, ToolExecutor
 from app.tools.policy import Decision
@@ -73,6 +75,8 @@ class Orchestrator:
         catalog: StackCatalog,
         redactor: Redactor,
         llm_provider: LLMProvider,
+        sandbox: SandboxRunner | None = None,
+        workspace: WorkspaceFS | None = None,
     ) -> None:
         self._settings = settings
         self._sessions = session_factory
@@ -82,6 +86,8 @@ class Orchestrator:
         self._catalog = catalog
         self._redactor = redactor
         self._llm_provider = llm_provider
+        self._sandbox = sandbox
+        self._workspace = workspace
         self._guard = RunGuard(settings)
         self._stop = threading.Event()
 
@@ -214,7 +220,15 @@ class Orchestrator:
                 project = s.get(Project, run.project_id)
                 assert project is not None
                 ctx = ToolContext(
-                    session=s, run=run, project=project, settings=self._settings, events=self._events, catalog=self._catalog
+                    session=s,
+                    run=run,
+                    project=project,
+                    settings=self._settings,
+                    events=self._events,
+                    catalog=self._catalog,
+                    sandbox=self._sandbox,
+                    workspace=self._workspace,
+                    cancel=self._stop,  # backend shutdown stops any container still running
                 )
                 before = run.state
                 result = self._executor.invoke(ctx, prepared)

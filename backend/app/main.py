@@ -22,7 +22,10 @@ from app.db.session import create_db_engine, create_session_factory, init_db
 from app.orchestrator.llm_client import LLMClient, OpenAIResponsesClient, llm_config_problem
 from app.orchestrator.loop import Orchestrator
 from app.orchestrator.run_manager import RunManager
+from app.sandbox.docker_cli import SandboxError
+from app.sandbox.runner import SandboxRunner
 from app.stacks.catalog import StackCatalog
+from app.tools.adapters.sandbox import register_sandbox_tools
 from app.tools.adapters.workspace_fs import WorkspaceFS
 from app.tools.executor import ToolExecutor
 from app.tools.gates import register_phase2_tools
@@ -34,8 +37,14 @@ API_PREFIX = "/api/v1"
 logger = logging.getLogger("devpilot.http")
 
 
-def create_app(settings: Settings | None = None, *, llm: LLMClient | None = None) -> FastAPI:
-    """Build the app. `llm` replaces the OpenAI client (tests and the offline demo use FakeLLM)."""
+def create_app(
+    settings: Settings | None = None, *, llm: LLMClient | None = None, sandbox: SandboxRunner | None = None
+) -> FastAPI:
+    """Build the app. `llm` replaces the OpenAI client (tests and the offline demo use FakeLLM).
+
+    `sandbox` enables the Docker sandbox tool. Without it no container is ever started, so
+    tests never touch Docker.
+    """
     settings = settings or get_settings()
     redactor = Redactor(settings.secret_values())
     configure_logging(settings.log_level, redactor)
@@ -55,6 +64,8 @@ def create_app(settings: Settings | None = None, *, llm: LLMClient | None = None
 
     registry = ToolRegistry()
     register_phase2_tools(registry)
+    if sandbox is not None:
+        register_sandbox_tools(registry)
     executor = ToolExecutor(registry, PolicyEngine(), redactor, max_output_chars=settings.tool_output_max_chars)
     llm_provider, llm_problem = _llm_wiring(settings, egress, llm)
     orchestrator = Orchestrator(
@@ -66,12 +77,16 @@ def create_app(settings: Settings | None = None, *, llm: LLMClient | None = None
         catalog=catalog,
         redactor=redactor,
         llm_provider=llm_provider,
+        sandbox=sandbox,
+        workspace=workspace_fs,
     )
     run_manager = RunManager(orchestrator)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         logger.info("startup", extra={"version": __version__, "workspaces": str(workspace_fs.root)})
+        if sandbox is not None:
+            _sweep_sandbox(sandbox)
         await run_manager.start()
         yield
         await run_manager.stop()
@@ -99,6 +114,7 @@ def create_app(settings: Settings | None = None, *, llm: LLMClient | None = None
     app.state.orchestrator = orchestrator
     app.state.run_manager = run_manager
     app.state.llm_problem = llm_problem
+    app.state.sandbox = sandbox
 
     app.add_middleware(
         CORSMiddleware,
@@ -132,6 +148,17 @@ def create_app(settings: Settings | None = None, *, llm: LLMClient | None = None
     app.include_router(runs.router, prefix=API_PREFIX)
     app.include_router(approvals.router, prefix=API_PREFIX)
     return app
+
+
+def _sweep_sandbox(sandbox: SandboxRunner) -> None:
+    """Containers left by a crashed earlier process are removed before new work starts."""
+    try:
+        removed = sandbox.sweep_orphans()
+    except SandboxError as exc:
+        logger.warning("sandbox sweep skipped: %s", exc)
+        return
+    if removed:
+        logger.warning("removed %d sandbox container(s) left by an earlier process", removed)
 
 
 def _llm_wiring(
