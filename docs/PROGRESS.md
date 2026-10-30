@@ -1,6 +1,14 @@
 # DevPilot AI: Progress
 
-**Current phase:** Phase 4 (OpenCode) in progress. The foundation and the Phase 4B contract checks are tested and committed (2026-10-30). The OpenCode adapter itself is **untested** and not committed, and nothing calls OpenCode yet. The next step, a real-server contract check, waits for approval. Phase 3 is verified in real containers.
+**Current phase:** Phase 4 (OpenCode) in progress. The foundation and the Phase 4B contract checks are tested and committed (2026-10-30).
+
+Phase 4C (2026-10-30):
+- The official 1.19.5 binary is verified on D:, and the check image is built.
+- **The baseline contract check against the real server passes: 20 PASS, 0 FAIL, 1 NOT VERIFIED (C13, unknown paths, which depend on the API filter).** This is after the fix round that judges rule order from `/agent`.
+- Committed.
+- The precedence test is not approved yet.
+
+The OpenCode adapter itself is still **untested** and not committed, and nothing calls OpenCode yet. Phase 3 is verified in real containers.
 
 ## Phase tracker
 
@@ -10,7 +18,7 @@
 | 1 | Backend foundation | ✅ Done (2026-10-29) | Python 3.12.9 at `D:\python.exe` |
 | 2 | GPT orchestrator | ✅ Done (2026-10-29), verified with FakeLLM; first live GPT call verified (analysis accepted, 1 call, 919 tokens) | OpenAI API key (user) for live use |
 | 3 | Docker sandbox | 🟡 Isolation controls verified in real containers (2026-10-30); install proxy and orphan-sweep test on a real container still open | Docker Desktop running, data on D:, `python:3.12-alpine` present |
-| 4 | OpenCode integration | 🟡 Foundation tested and committed (2026-10-30); adapter untested; not wired into runs | OpenCode container image, model gateway, approval for live use |
+| 4 | OpenCode integration | 🟡 Foundation tested and committed (2026-10-30); official binary verified; real-server baseline passes 20/0/1 (4C); adapter untested; A1/A2 open; not wired into runs | Precedence run (approval), A1/A2 fixes, API filter, model gateway, approval for live use |
 | 5 | Verification-guided development | ⏳ Not started | — |
 | 6 | Failure classification and recovery | ⏳ Not started | — |
 | 7 | Adaptive tool selection | ⏳ Not started | — |
@@ -517,3 +525,115 @@ This stage was read-only investigation and preparation. No OpenCode server was s
 **Still not committed:** `app/tools/adapters/opencode.py` (untested) and the egress line `127.0.0.1:4096`. The line is safe, but it is premature until the launcher and gateway design is fixed.
 
 **Next, needs your approval:** the real-server contract check in ARCHITECTURE_OPTIMIZATION.md. It downloads the official 1.19.5 musl binary (about 0.3 GB on D:), runs it with no network, no credentials and no prompts inside the existing `python:3.12-alpine` image, and then cleans up.
+
+### Phase 4C: official OpenCode binary verified; real-server check prepared (2026-10-30)
+
+**Not done in this stage:**
+- No OpenCode server was started and no check container was run.
+- No image was built or pulled, and no paid call was made.
+- The adapter is still **untested** (0%) and unchanged. Full details are in [ARCHITECTURE_OPTIMIZATION.md](ARCHITECTURE_OPTIMIZATION.md), section "Phase 4C".
+
+**Done:**
+- **Download** (authorized): `opencode-linux-x64-musl@1.19.5` from registry.npmjs.org.
+  - The 79,167,835-byte tarball matches the published SHA-512 integrity, the value pinned in 4B, and the SHA-1 shasum.
+  - Both archive entries passed the safety checks before unpacking.
+  - Binary: `D:\DevPilotCache\opencode\1.19.5\extracted\package\bin\opencode`, 221,590,952 bytes, SHA-256 `528058cf…acc8`. Manifest beside it. 0.30 GB on D:. It was never executed.
+- **Finding:** the binary needs `libstdc++.so.6` (from its ELF headers), and `python:3.12-alpine` (Alpine 3.24.3) has neither `libstdc++` nor `libgcc`. I checked this by reading a `docker save` export on the host, with no container. A Dockerfile for a check image (the pinned base plus those two packages) is written, **not built**.
+- **Prepared and dry-run, not executed:**
+  - `backend/scripts/opencode_contract_check.py` (the host runner)
+  - `backend/scripts/opencode_check/probe.py` (the in-container probe: standard library only, allowlisted requests, no prompts)
+  - the check container: no network, no port, read-only root, no capabilities, user 65534, limits, the binary mounted read-only, a fresh workspace, and a fresh password passed by name
+  - the inert precedence test
+- **New finding, tested offline:** a project `opencode.json` that names keys first fixes the merged key order. Its later wildcard rules (for example `b*sh: allow`) then beat managed denials under last-match-wins. DevPilot's effective-config check catches this. Run 2 measures what the real server does.
+
+**Files:**
+
+| File | Status |
+|---|---|
+| `app/coding/opencode_artifact.py`: registry metadata, SHA-512 and archive checks, ELF reader, manifest | New, 42 tests |
+| `app/coding/opencode_check.py`: check container arguments, `docker inspect` isolation check, image provenance, report analysis (C0–C14), precedence analysis (P1–P5) | New, tested in `test_opencode_check.py` |
+| `app/coding/opencode_policy.py`: `ruleset_problems` for one reported rule set | Changed, 1 test |
+| `scripts/fetch_opencode.py` | New; ran once (the download) |
+| `scripts/opencode_contract_check.py`, `scripts/opencode_check/probe.py`, `scripts/opencode_check/image/Dockerfile` | New; dry run only. The probe's allowlist and helpers are unit-tested without a server. |
+
+**Tests:** 799 passed, 10 skipped (the 9 Docker tests and the live OpenAI test, all opt-in), 0 failed. Coverage is 86% including the untested adapter (0%, 497 statements) and 96% without it.
+
+**Prepared plans** (ARCHITECTURE_OPTIMIZATION.md):
+- the A1 and A2 fixes, with 10 regression tests that use a `SessionControl` fake (no HTTP mocking)
+- the API filter and model gateway: interfaces and a per-project topology
+- the final network architecture: the `127.0.0.1:4096` line stays uncommitted until the filter publishes there
+
+**Not committed:** everything in this stage, as well as the adapter and the egress line from earlier.
+
+**Next, each step needs your approval:**
+1. Build the check image (apk downloads about 1.5 MB).
+2. Run the baseline check.
+3. After a passing baseline, run the precedence check.
+
+### Phase 4C: check image built, baseline run executed (2026-10-30)
+
+**Approved and done:** the image build, one baseline run and the offline tests.
+
+**Not done:** the precedence test, `--allow-tmp-exec`, prompts, OpenAI and the gateway. Details are in [ARCHITECTURE_OPTIMIZATION.md](ARCHITECTURE_OPTIMIZATION.md), section "Phase 4C baseline run".
+
+**Image.** `devpilot/opencode-check:1.19.5`:
+- ID `sha256:c380fdb5d0cb5cd9a59322029b665bd9c484d7bf861e0d9842893ecde0470bd6`
+- the local pinned base plus one layer, user 65534
+- `libgcc 15.2.0-r5` and `libstdc++ 15.2.0-r5` only, installed with `--no-scripts` and signatures checked
+- about 4.9 MB of new data on D:
+
+**Baseline.** 7.7 s, cleaned up. **Not passed:** of 21 checks, 18 PASS, 1 FAIL and 2 NOT VERIFIED. That run's first report said 17 PASS, a counting mistake corrected from the saved summary.
+
+**Confirmed on the real server:**
+- the isolation, through `docker inspect`
+- version 1.19.5
+- basic auth required everywhere tested, including `/event` and `POST /session`
+- `/doc` is **JSON** (OpenAPI 3.1.0, 162 paths)
+- session create (rules echoed exactly), get, status (idle means absent), messages, abort (200 `true`), and unknown id (404)
+- `server.connected` as the first SSE event
+- the build agent's merged rules pass
+- 59 sensitive operations inventoried, none called
+- both permission-reply forms present
+- `messageID` accepted
+- the workspace untouched
+
+**C8 FAIL.** `GET /config` re-orders permission keys, so DevPilot's last-match-wins check cannot use it. The minimum fix is to judge rule order from `GET /agent`, which passed (C9).
+
+**NOT VERIFIED:**
+- **C12:** the unreviewed tools `apply_patch`, `invalid` and `question`. GPT models edit through `apply_patch`, which the adapter does not allow yet.
+- **C13:** unknown paths serve the web UI, so the API filter must refuse them.
+
+**Incident.** The first attempt completed and cleaned up, but the runner crashed while printing, before saving. The runner was fixed to save first, and the identical run was repeated.
+
+**Tests:** 803 passed, 10 skipped, 0 failed. Coverage is 96% without the adapter and 86% with it (the adapter is 0%).
+
+**Commit:** none. The baseline did not fully pass. All Phase 4C work is preserved in the working tree, as are the adapter and the egress line.
+
+**Still open:** A1 and A2 (plan ready, not applied). The adapter is untested.
+
+### Phase 4C fix round: effective-policy check corrected, baseline passes (2026-10-30)
+
+**Approved and done:** the C8 fix, the tool review, the reporting fixes, one baseline re-run, the offline tests and this commit.
+
+**Not done:** the precedence test, prompts, OpenAI, the gateway and Phase 4D. Details are in [ARCHITECTURE_OPTIMIZATION.md](ARCHITECTURE_OPTIMIZATION.md), section "Phase 4C fix round".
+
+**What changed:**
+- **C8 fix.** Allow and deny decisions are judged only from the ordered rules in `GET /agent`. `GET /config` is checked where order does not matter (settings, declared rules as key/value sets, disabled agents). Without `/agent` the check fails closed. Unreviewed permission names, wildcard permission names that allow, and external-folder allows other than OpenCode's own tool-output folder all fail.
+- **Tools** (read from the 1.19.5 binary). `edit`, `write` and `apply_patch` ask the `edit` permission.
+  - `apply_patch` names only each change's source path, so a move's destination escapes the edit rules. DevPilot's audit of every changed path catches it (new test).
+  - Minimum allowlist: read, glob, grep, edit, write, apply_patch, todowrite, invalid.
+- **C12 is now verified (read-only).** Every listed tool is reviewed, and the enforced rules allow or deny and hide it as reviewed.
+- **C13 stays NOT VERIFIED.** Unknown paths get 200 with the web interface; refusing them is the API filter's job, and the filter is not built.
+- **Reporting.** Evidence is saved before printing, in UTF-8, atomically. The console replaces characters it cannot encode, and analysis errors are saved with a bounded reason. Tested against a strict cp1252 console.
+
+**Baseline re-run.** Same image (ID matched; not rebuilt), same binary and same hardening. **20 PASS, 0 FAIL, 1 NOT VERIFIED (C13).** Changes from the previous run: C8 FAIL → PASS and C12 NOT VERIFIED → PASS. 7.1 s, cleaned up. Evidence is in `D:\DevPilotCache\opencode-check\reports\20261030T074203Z-*`.
+
+**Tests:** 828 passed, 10 skipped, 0 failed, in 59.6 s. Coverage is 97% without the adapter and 86% with it (the adapter is 0%, 497 statements).
+
+**Committed:** Phase 4C's tested modules, scripts, tests and docs. **Not committed:** `tools/adapters/opencode.py` (untested) and the `127.0.0.1:4096` egress line (premature).
+
+**Still open:**
+- A1 and A2 (plan ready, not applied)
+- the adapter's own tests, and wiring it to the new checker, `/agent` and the allowlist
+- the API filter and the model gateway
+- the precedence run (needs approval)

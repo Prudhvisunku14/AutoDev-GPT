@@ -47,7 +47,7 @@ Design: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Security: [docs/SECURITY.m
   - Node.js v24.14.1 and npm 11.11.0 at `D:\DOWNLOAND_NEW_D\`.
 - **Not installed as of 2026-10-29:** Docker Desktop, WSL2 and OpenCode. Check before relying on any of them:
   - Phase 3 and later need Docker Desktop with WSL2, with its data on D:.
-  - Phase 4 needs OpenCode. It runs in a container and is not installed on the host.
+  - Phase 4 needs OpenCode. It runs in a container and is not installed on the host. The official `opencode-linux-x64-musl` 1.19.5 binary is cached (verified, not installed) at `D:\DevPilotCache\opencode\1.19.5`, with `manifest.json`. Never run it on the host. It needs `libstdc++`, which `python:3.12-alpine` lacks.
   - Phase 9 needs Node.js, which is present.
 - **Inkscape:** not installed. Do not reference it.
 - **PowerShell 5.1:** there is no `&&` or `||`. Chain commands with `;` and check `$?`.

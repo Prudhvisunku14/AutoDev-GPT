@@ -231,13 +231,18 @@ Model IDs come only from configuration (`OPENAI_MODEL`, `OPENCODE_MODEL`).
 
 ## 6. Coding engine: OpenCode
 
-> **Status (2026-10-30):** the policy, the audit, the brief and the transaction-free tool path are built and tested. The HTTP adapter is written but untested and uncommitted. The container, the model gateway and the `generate_code` tool are not built. [ARCHITECTURE_OPTIMIZATION.md](ARCHITECTURE_OPTIMIZATION.md) lists the open P0 items.
+> **Status (2026-10-30):** the policy, the audit, the brief and the transaction-free tool path are built and tested. The official 1.19.5 binary is downloaded and verified on D:. The real-server baseline contract check passes (20 PASS, 0 FAIL, 1 NOT VERIFIED: unknown paths, which wait for the API filter). The effective policy is judged from the rules OpenCode enforces (`GET /agent`). The HTTP adapter is written but untested and uncommitted. The container launcher, the API filter, the model gateway and the `generate_code` tool are not built. [ARCHITECTURE_OPTIMIZATION.md](ARCHITECTURE_OPTIMIZATION.md) lists the open P0 items and the Phase 4C design.
 
 **Deployment (design, not built)**
-- One `opencode serve` container per active project, from an image that pins `opencode-ai` (1.19.5 when checked).
-- Only that project's workspace is mounted, at `/workspace`. Every API call carries `directory=/workspace`, because the API accepts any folder the container can see.
-- No port is published on the host. HTTP basic auth uses a fresh random `OPENCODE_SERVER_PASSWORD` per start, passed through the environment.
-- The container uses the sandbox's hardening flags (§7.2). Its only network peer is the model gateway.
+- **Binary.** The official `opencode-linux-x64-musl` binary, verified against its npm SHA-512 integrity and mounted read-only (`coding/opencode_artifact.py`). The runtime image is Alpine with `libstdc++` and `libgcc`.
+- **Containers per active project:**
+  - an API filter, the only thing the backend reaches, at `127.0.0.1:4096`
+  - the OpenCode server, on internal networks only
+  - a model gateway that holds the key
+- **API filter.** It forwards an explicit allowlist of methods, paths, query keys and bodies. Everything else, including unknown paths, gets 403.
+- **Workspace.** Only that project's workspace is mounted, at `/workspace`. Every API call carries `directory=/workspace`, because the API accepts any folder the container can see.
+- **No port of OpenCode is published.** HTTP basic auth uses a fresh random `OPENCODE_SERVER_PASSWORD` per start, passed to docker by name.
+- **Hardening.** The OpenCode container uses the sandbox's hardening flags (§7.2). Its only network peers are the filter and the model gateway.
 
 **Model access (design, not built)**
 - OpenCode uses its OpenAI provider (`OPENCODE_MODEL=openai/<model>`), so the stack stays GPT-only.
@@ -247,7 +252,7 @@ Model IDs come only from configuration (`OPENAI_MODEL`, `OPENCODE_MODEL`).
 **Policy** (`coding/opencode_policy.py`, built and tested)
 - A project `opencode.json` or a `.opencode/` folder overrides global configuration and can add plugins or MCP servers, which run code. So DevPilot does three things:
   1. It mounts `managed_config()` as managed configuration (`/etc/opencode/opencode.json`), which projects cannot override. It has a catch-all deny first, then allows reading, editing (except protected paths), glob, grep, list and todos. bash, webfetch, websearch, codesearch, external directories, subagents, skills, questions and doom-loop are denied. LSP, formatters, plugins and MCP are off, sharing and auto-update are off, and only the openai provider is enabled.
-  2. It checks the *effective* configuration (`GET /config`) before every task by evaluating OpenCode's rules on sample inputs, including per-agent overrides.
+  2. Before every task it checks the *effective* policy. Decisions are taken from the build agent's ordered, enforced rules (`GET /agent`) evaluated on sample inputs. `GET /config` is used only for order-independent settings, because the server re-orders its keys.
   3. It refuses a workspace that already holds such files, and reverts any task that creates them.
 
 **Adapter flow** (`tools/adapters/opencode.py`, written, untested)

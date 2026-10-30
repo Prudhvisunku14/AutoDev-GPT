@@ -4,9 +4,9 @@ These are the checks the HTTP adapter needs before it may talk to a server. The 
 (tools/adapters/opencode.py, untested and uncommitted) does not use this module yet.
 Every check fails closed: anything unexpected stops the task before a prompt is sent.
 
-Sources: the published opencode-ai 1.19.5 SDK types and the server docs (checked
-2026-10-30). Nothing here has been confirmed against a running server yet; see
-docs/ARCHITECTURE_OPTIMIZATION.md for which parts are verified, inferred or unknown.
+Sources: the published opencode-ai 1.19.5 SDK types and the server docs (2026-10-30), then the
+Phase 4C baseline run against the real 1.19.5 server and the binary's bundled source. See
+docs/ARCHITECTURE_OPTIMIZATION.md for which parts are verified on the server.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ REQUIRED_OPERATIONS = frozenset(
         ("get", "/global/health"),
         ("get", "/event"),
         ("get", "/config"),
+        ("get", "/agent"),  # the enforced, ordered rules: /config re-orders permission keys (Phase 4C)
         ("post", "/session"),
         ("get", "/session/{}"),
         ("get", "/session/status"),
@@ -56,9 +57,34 @@ _SENSITIVE_PREFIXES = ("/mcp", "/tui", "/pty", "/experimental", "/instance")
 _HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete"})
 _VERSION = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)")
 
-# Tools the build agent needs to read and edit files. Any other tool that runs means the policy
-# did not hold (a newer OpenCode adding a tool is treated the same way until reviewed).
-ALLOWED_TOOLS = frozenset({"read", "write", "edit", "patch", "multiedit", "glob", "grep", "list", "todowrite", "todoread"})
+# Tool id → the permission OpenCode 1.19.5 checks before the tool acts, read from the pinned binary's
+# bundled source (Phase 4C fix). `edit`, `write` and `apply_patch` all ask "edit"; `write` and
+# `apply_patch` also ask "external_directory" for a path outside the project. `apply_patch` asks "edit"
+# only for each change's source path: a move's destination is checked only for leaving the project, so
+# DevPilot's own audit of every changed path is what catches a move onto a protected file. `invalid`
+# only reports a malformed call. A tool whose last rule for its permission is `* deny` is not offered to
+# the model at all (`hidden_from_model` in opencode_policy.py).
+TOOL_PERMISSIONS: dict[str, str | None] = {
+    "read": "read",
+    "glob": "glob",
+    "grep": "grep",
+    "edit": "edit",
+    "write": "edit",
+    "apply_patch": "edit",
+    "todowrite": "todowrite",
+    "invalid": None,
+    "bash": "bash",
+    "task": "task",
+    "question": "question",
+    "webfetch": "webfetch",
+    "websearch": "websearch",
+    "skill": "skill",
+    "lsp": "lsp",
+    "codesearch": "codesearch",
+}
+# The minimum the build agent needs to read and edit project files. Any other tool that runs means the
+# policy did not hold; a tool a newer OpenCode adds is treated the same way until it is reviewed.
+ALLOWED_TOOLS = frozenset({"read", "glob", "grep", "edit", "write", "apply_patch", "todowrite", "invalid"})
 
 
 class ContractError(Exception):

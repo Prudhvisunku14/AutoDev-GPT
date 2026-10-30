@@ -234,6 +234,8 @@ These are findings only. The adapter file was not changed in this stage.
 
 ## Real-server verification plan (awaiting approval; nothing has been run)
 
+> **Superseded by Phase 4C below.** Two things changed. The binary cannot run in `python:3.12-alpine` alone, because it needs `libstdc++`. And run 2 no longer adds an MCP server: only inert permission and agent text is used.
+
 **Scope.** Startup, health and version, `/doc` format, the session API, effective configuration, and authentication. No prompts, no model, no generated code.
 
 1. **Version and source.** `opencode-linux-x64-musl@1.19.5`, the official platform binary of `opencode-ai` 1.19.5, from `registry.npmjs.org`. It is checked against the published sha512 before use.
@@ -290,3 +292,494 @@ These are findings only. The adapter file was not changed in this stage.
 | P1 | **Task-level context:** the brief already carries only the task's own requirements, plus the criteria. Keep repair briefs to the failing tests and the diagnosis. |
 | P1 | **Independent verification:** after each accepted task, run the project's tests in the sandbox inside the same tool call (item 8). The verdict comes from the sandbox, never from OpenCode's own report. |
 | P2 | Cache the contract while the server version is unchanged, notify cancellation directly, use a git-based checkpoint, and build the install proxy (items 12 to 14). |
+
+---
+
+# Phase 4C: OpenCode binary verification and check preparation (2026-10-30)
+
+**What happened in this stage:**
+- The official binary was downloaded and verified.
+- The real-server check was written and dry-run.
+
+**What did not happen:**
+- No OpenCode server was started and no check container was run.
+- No image was built or pulled, and no paid call was made.
+- The HTTP adapter is still **untested** (0%) and unchanged. Downloading and statically checking the binary does not verify the adapter.
+
+## Binary download (done, verified)
+
+| Item | Value |
+|---|---|
+| Source | `https://registry.npmjs.org/opencode-linux-x64-musl/1.19.5` (version document), then its canonical tarball `…/-/opencode-linux-x64-musl-1.19.5.tgz`. No redirects were followed. |
+| Tarball | `opencode-linux-x64-musl-1.19.5.tgz`, 79,167,835 bytes (matches Content-Length) |
+| SHA-512 integrity | `sha512-y6nUbH3ViajN37KaVVy0/KnWv/i48Bx5QPv9Ul9ONJya1ossV7CHVb+ZNFc61M5GqlVtjCvZV7T0eBMqhJG7mg==`. **Matches** the registry value and the value pinned in Phase 4B. |
+| SHA-1 shasum | `75a1a1be2d1ac95c4c07e4681524846dd0ce85d5` (matches) |
+| Tarball SHA-256 | `33fc5689591cbb65049b193ff84f2cb248fe7e3e4052ff54ae12526009e1a4d2` |
+| Archive | 2 plain files (`package/package.json`, `package/bin/opencode`). No links, devices, absolute paths or `..`. Unpacked with Python's `data` filter after DevPilot's own entry check. |
+| Binary | `D:\DevPilotCache\opencode\1.19.5\extracted\package\bin\opencode`, 221,590,952 bytes, SHA-256 `528058cf8f2a7196ec94dc113052b785f8f94f6802ced3980ad7359369ddacc8` |
+| ELF headers | x86-64. Loader `/lib/ld-musl-x86_64.so.1`. Needs `libstdc++.so.6` and `libc.musl-x86_64.so.1`. Read from the headers; never executed. |
+| Manifest | `D:\DevPilotCache\opencode\1.19.5\manifest.json`. The check re-hashes the binary against it before every mount. |
+| Disk | 300,761,614 bytes (0.30 GB) on D:, covering the tarball, the metadata, the unpacked files and the manifest. Nothing on C:. |
+| Not verified | The npm registry's ECDSA signature: no crypto library is installed, and adding one is a new dependency. The SHA-512 integrity comes from the same registry over TLS. |
+
+Code: [`opencode_artifact.py`](../backend/app/coding/opencode_artifact.py) (42 tests), and [`fetch_opencode.py`](../backend/scripts/fetch_opencode.py), which ran once. `--verify-only` re-checks the binary with no network.
+
+**CPU note.** OpenCode's own image uses the "baseline" (non-AVX2) musl build. The plain build here needs AVX2. This laptop's i5-1155G7 has AVX2, so this is low risk. If a run fails with "Illegal instruction", the baseline package is a separate download that needs approval.
+
+## Runtime compatibility: `python:3.12-alpine` cannot run the binary as it is
+
+- **Evidence:** I exported the local image with `docker save` and read it on the host; no container was started. It is Alpine 3.24.3 (ID `sha256:e6dae589…`) with 38 apk packages. **It has no `libstdc++` and no `libgcc`.** The binary needs `libstdc++.so.6`, which in turn needs `libgcc_s.so.1`. OpenCode's own Dockerfile installs `libgcc libstdc++ ripgrep` on Alpine.
+- **Proposal: build a check image.** The [Dockerfile](../backend/scripts/opencode_check/image/Dockerfile) is the pinned base (`python:3.12-alpine@sha256:e6dae589…`) plus `apk add --no-cache libstdc++ libgcc`, with user 65534.
+  - apk verifies package signatures with the Alpine keys already in the base image.
+  - The download is about 1.5 MB, and the new layer is a few MB.
+  - The image holds **no OpenCode code**: the verified binary is mounted read-only.
+  - After the build, the check confirms that the image is exactly the pinned base plus one layer.
+  - **Building needs approval:** it is a package download and a build container with network access.
+- **Alternatives (not recommended now):**
+  - `ghcr.io/anomalyco/opencode:1.19.5` pinned by digest. It is a new image pull of unknown size, and it has no Python, so the probe would need a sidecar container.
+  - Fetching the two `.apk` files and checking their signatures with custom code.
+
+## Container configuration (prepared, not run)
+
+One container per server start, built by `build_run_args` (tested). `docker inspect` is checked against every row below after the start (`isolation_problems`, tested). Results from a container that fails this check are not trusted.
+
+| Setting | Value | Why |
+|---|---|---|
+| Image | `devpilot/opencode-check:1.19.5`, `--pull never` | Nothing is downloaded implicitly |
+| Network | `--network none`, no `-p`, no published port | Only loopback inside. The server is unreachable from the host and the internet. |
+| Root filesystem | `--read-only`, plus `--tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777` | HOME, XDG folders and TMPDIR live in the tmpfs, which is RAM and gone on removal |
+| Privileges | `--cap-drop ALL`, `--security-opt no-new-privileges`, `--user 65534:65534`, `--init` | Non-root and no capabilities |
+| Limits | `--memory 1g --memory-swap 1g --cpus 1 --pids-limit 256 --ulimit nofile=1024:1024` | Bounded resources |
+| Mounts | Binary folder → `/opt/opencode` (ro); managed `opencode.json` → `/etc/opencode` (ro); probe and `input.json` → `/checks` (ro); a fresh empty folder → `/workspace` (the only writable mount) | No Docker socket, no repository, no real workspace, no `.env`. `mount_problems` refuses anything else. |
+| Server | `/opt/opencode/opencode serve --hostname 127.0.0.1 --port 4096 --print-logs`, workdir `/workspace` | Loopback only |
+| Password | `secrets.token_urlsafe(32)`, fresh per start, passed as `--env OPENCODE_SERVER_PASSWORD` **by name**, so docker reads it from its own environment | It never appears on a command line, in the report or in saved logs (logs are redacted, including the base64 auth token) |
+| Environment | HOME and XDG under `/tmp/home`, `BUN_RUNTIME_TRANSPILER_CACHE_PATH=0`, `OPENCODE_DISABLE_AUTOUPDATE`, `_MODELS_FETCH`, `_LSP_DOWNLOAD`, `_DEFAULT_PLUGINS`, `_CLAUDE_CODE`, `_EXTERNAL_SKILLS`, `OPENCODE_PURE`, and `OPENCODE_DISABLE_PROJECT_CONFIG` (except run 2a) | No credentials. The flags come from the current CLI docs, which may describe a newer release; an unknown flag is ignored, and the probe observes the effect. |
+| Managed config | `managed_config()` with placeholder model `openai/devpilot-contract-check` and gateway `http://devpilot-model-gateway.invalid/v1` | No key. No prompt is sent, and with no network nothing could be reached. |
+
+**Authentication and networking.**
+- The Windows host makes **no** HTTP request to port 4096.
+- The host runs `docker exec --user 65534:65534 <container> python3 -I /checks/probe.py --wait 60`. The [probe](../backend/scripts/opencode_check/probe.py) is a separate process that uses only the standard library. Its script is mounted read-only and kept apart from the application under test.
+- The probe calls `127.0.0.1:4096` inside the container's own network namespace, using HTTP basic auth with the password from the container environment.
+- It has a fixed allowlist (tested). Its only POSTs are `/session` and `/session/{id}/abort`. It never sends a prompt or a command, and never calls the shell, config-change, auth, MCP, TUI or PTY endpoints. It never follows links.
+- It prints raw observations as JSON. The judgment is made on the host by [`opencode_check.analyze`](../backend/app/coding/opencode_check.py) (tested), which reuses `check_health`, `spec_from_doc`, `check_spec`, `SSEParser`, `verify_effective_config` and `ruleset_problems`.
+
+## Commands for later (each step needs its own approval)
+
+```powershell
+cd D:\DOWNLOAND_NEW_D\AI\AI; . .\scripts\dev-env.ps1; cd backend
+& $env:DEVPILOT_PYTHON -I scripts\opencode_contract_check.py                      # dry run: prints the exact docker arguments (done, starts nothing)
+& $env:DEVPILOT_PYTHON -I scripts\opencode_contract_check.py --build-image        # A: docker build of the check image (apk downloads ~1.5 MB)
+& $env:DEVPILOT_PYTHON -I scripts\opencode_contract_check.py --run baseline       # B: one server start, the probe, cleanup
+& $env:DEVPILOT_PYTHON -I scripts\opencode_contract_check.py --run precedence     # C: two server starts; refused unless B passed for this binary
+& $env:DEVPILOT_PYTHON -I scripts\opencode_contract_check.py --cleanup            # removes this check's containers and run folders only
+```
+
+What each run does, in order:
+1. Re-hash the binary against the manifest.
+2. Check both images and the check image's provenance.
+3. Remove leftover containers that carry the label `devpilot.opencode-check=true`.
+4. Create `D:\DevPilotCache\opencode-check\runs\<stamp>-<label>-<random>\{etc-opencode,checks,workspace}`.
+5. Start the container with `docker run`, then check the applied isolation with `docker inspect`.
+6. Run the probe with `docker exec`.
+7. Read the server log tail (redacted), its state, and the workspace changes.
+8. In `finally`: `docker rm --force`, confirm that no container is left, delete the run folder, and drop the password.
+9. Save the report and summary under `D:\DevPilotCache\opencode-check\reports\`.
+
+Exit codes: 0 means no FAILED check; 2 means a check failed; 1 means the run stopped before the server started.
+
+## Contract checklist and expected outputs
+
+Expected values come from the 1.19.5 SDK types and the docs, so they are inferred until a run confirms them.
+
+| ID | Check | Expected | Status rule |
+|---|---|---|---|
+| C0 | Isolation applied (`docker inspect`) | Every row of the table above | Any difference: FAILED, and the run is not trusted |
+| C1 | Server starts | `/global/health` answers 200 within 60 s | Otherwise FAILED, and every later check is UNKNOWN |
+| C2 | Exact version | `{"healthy": true, "version": "1.19.5"}` | Any other version: FAILED |
+| C3 | Authentication required | 401 for health without a password, health with a wrong password, `/doc` without a password, `POST /session` without a password, and `/event` without a password | Any 2xx: FAILED. A timeout or odd status: UNKNOWN. |
+| C4 | Health endpoint | 200 JSON, `healthy: true` | — |
+| C5 | `/doc` | JSON OpenAPI 3.1 with `paths` (per the code), or an HTML page (per the docs table) | JSON: VERIFIED. HTML: UNSUPPORTED (the links found are recorded, not followed). Otherwise FAILED. |
+| C6a–f | Sessions | Create with DevPilot's rule list → `{id: "ses_…"}`. Get by id. Status is an object keyed by id. Messages `[]`. Abort while idle → 2xx. An unknown id → 404. | Rules refused but a plain session works: UNSUPPORTED (that layer is lost). An unknown id answered as found: FAILED. |
+| C7 | Event stream | `text/event-stream`, first event `server.connected` | Wrong content type: FAILED. Other first event: UNKNOWN. |
+| C8 | Effective configuration | `GET /config` passes `verify_effective_config` | Any problem: FAILED |
+| C9 | Build agent's merged rules | `GET /agent` → the build agent's rules pass, and plan, general and explore are not listed as enabled | Unknown format: UNKNOWN |
+| C10 | Sensitive endpoints | Inventory from the spec: shell, command, `PATCH /config`, auth, MCP, TUI, PTY, experimental, instance | Recorded for the API filter |
+| C11 | Adapter operations | `check_spec` passes. Which permission-reply form exists. The prompt body fields, and whether a client `messageID` is accepted (for the A1 fix). | Missing operation: FAILED |
+| C12 | Tool inventory | `GET /experimental/tool/ids` lists only reviewed tools | Unreviewed tools: UNKNOWN, needs review |
+| C13 | Unknown paths | 404 | Served or forwarded (for example the web UI): UNKNOWN, and the API filter must refuse such paths |
+| C14 | Workspace untouched | No file created, changed or deleted by starting and probing | Any change: FAILED |
+
+## Configuration-precedence test (run 2, inert)
+
+**Workspace files.** Text only, with no plugin, MCP server, command, hook or code:
+- An `opencode.json` that allows `*`, `bash`, `b*sh`, `external_directory` and `webfetch`, allows editing `opencode.json` and `.env`, gives the build agent `*`, `bash` and `b*sh`, re-enables `general`, and sets the marker `username: devpilot-precedence-marker`.
+- The same inert agent file, `devpilot-hostile.md`, in both `.opencode/agent/` and `.opencode/agents/`.
+
+**Hypothesis being tested (new finding).** OpenCode merges configuration key by key, and JavaScript keeps a key at the position where it first appeared. The project file can therefore name keys first:
+- Managed config still wins every key it sets: `bash` stays `deny`.
+- But the merged order is the project's. Under last-match-wins, the project's later `b*sh: allow` beats the managed `bash: deny`.
+- An offline test reproduces the merge and confirms that DevPilot's effective-config check **catches** it: bash is not denied, and editing `opencode.json` and `.env` is not denied.
+
+**Runs:**
+- **2a:** project configuration allowed. This measures managed precedence alone.
+- **2b:** the same files with `OPENCODE_DISABLE_PROJECT_CONFIG=1`.
+
+| ID | Question | Possible results |
+|---|---|---|
+| P1 | Was the project file loaded (marker present, 2a)? | If not, P2 and P3 are UNKNOWN |
+| P2 | Does managed config alone hold? | VERIFIED, or FAILED with the problems and the merged key order |
+| P3 | Is any weakening visible to the `/config` check? | FAILED if `/agent` shows weaker build rules than `/config` (the adapter would then also have to check `/agent`) |
+| P4 | Is an agent added through `.opencode/` visible to the config check? | FAILED if `/agent` lists it but `/config` does not |
+| P5 | Does `OPENCODE_DISABLE_PROJECT_CONFIG` ignore both files (2b)? | VERIFIED, or UNSUPPORTED (marker still loaded), or FAILED |
+
+Whatever the outcome, DevPilot keeps its other layers: it refuses a workspace that holds these files, re-checks the effective config before each task, denies edits to them, and audits and reverts every task.
+
+## Failure handling
+
+The script never retries with weaker settings. Each change below needs approval.
+
+| Symptom | Meaning | Action |
+|---|---|---|
+| `docker run` fails | Image missing or invalid argument | Stop. Fix and ask again. |
+| C1 FAILED, log says `Error loading shared library` | Runtime library missing | Stop. Image problem. |
+| `Illegal instruction` | CPU lacks AVX2 | Download the baseline package (approval) |
+| C1 FAILED, log shows a `dlopen`/`mmap` failure under `/tmp` | The binary unpacks a native module and needs exec on the tmpfs | Re-run with `--allow-tmp-exec`, which affects that tmpfs only (approval) |
+| `EROFS` on a path outside `/tmp` | The server writes somewhere unexpected | Record the path; decide on another tmpfs (approval) |
+| Container state shows `OOMKilled` | 1 GB is not enough | Decide on more memory (approval) |
+| Probe timeout or crash | Partial report | The partial report is kept; the `finally` block still cleans up |
+| C0 FAILED | Isolation not as specified | Results discarded; stop |
+| C3 FAILED | Server answers without the password | Stop; never deploy without the filter |
+| Cleanup reports a container left | Removal failed | `--cleanup`, then `docker ps -a --filter label=devpilot.opencode-check=true` |
+
+## Disk-space impact
+
+| Item | Size | Where |
+|---|---|---|
+| Verified binary cache (kept) | 0.30 GB | `D:\DevPilotCache\opencode\1.19.5` |
+| Check image (after approval) | One new layer of a few MB on top of the existing 74.7 MB base | Docker data on D: |
+| Per run | Under 1 MB of run folder (deleted). Up to 256 MB of tmpfs in RAM (gone with the container). | D:, RAM |
+| Reports (kept) | Probably under 2 MB per run (`/doc` and config JSON); unknown until a run | `D:\DevPilotCache\opencode-check\reports` |
+| `docker save` export used for the library check | 18.7 MB, deleted | `D:\DevPilotCache\temp` |
+
+## A1 and A2: fix and regression-test plan (prepared, not applied)
+
+**Approach.** Move session stopping out of the HTTP code into a small module that DevPilot tests through a `SessionControl` Protocol:
+- operations: `statuses()`, `abort(id)`, `messages(id)`
+- tests use an in-memory fake, like `FakeSandbox` — no HTTP server and no HTTP mocking
+- the HTTP client implements the Protocol
+- no real coding is enabled until these tests pass
+
+**A1, ambiguous submission** (`opencode.py` lines 415–436). Today a failed `prompt_async` leaves `prompt_sent = False`, so line 436 re-raises it as UNAVAILABLE with no abort.
+1. Classify a `prompt_async` failure:
+   - **REJECTED:** an HTTP 4xx other than 408 or 429. The server did not accept it.
+   - **AMBIGUOUS:** a timeout, a transport error after the request was written, a 5xx, a 408 or a 429.
+2. If the server accepts a client-chosen `messageID` (C11 checks this), send one per attempt, derived from `(run_id, call_id)`. Reconciliation then looks for exactly that message. Otherwise compare the session's message list with the one recorded just before the send.
+3. **AMBIGUOUS is never resent.** Instead:
+   - Read the status and messages. A busy session, or a new user message, means the prompt started.
+   - In both cases, send an abort and wait for quiescence (below).
+   - Report UNAVAILABLE with "the submission was ambiguous; the session was stopped and confirmed quiet", or with "could not be confirmed quiet", which leads to quarantine.
+   - Any retry is a new attempt with a new `call_id`, counted against `OPENCODE_MAX_ATTEMPTS_PER_TASK` and decided by GPT through the tool.
+4. **REJECTED:** check the status once anyway. Busy means AMBIGUOUS. Otherwise report the error, with nothing to stop.
+
+**A2, restoring before quiescence** (`_abort`, lines 498–521; also A3 at lines 364–371). Today the abort is sent and the outcome returned at once, and the caller restores the checkpoint.
+1. Add `settle(control, session_id, workspace_fingerprint, clock, sleep, timeout_s=30, poll_s=0.5, stable_polls=2) -> Quiescence(confirmed, waited_s, polls, last_state, abort_errors)`. It:
+   - Sends the abort. An abort is idempotent, so a failed abort request is retried at most 3 times.
+   - Polls until, on `stable_polls` consecutive polls, all of these hold: the session is idle or absent, the last assistant message has `time.completed` or an error, and the message and part counts are unchanged.
+   - Also requires the workspace fingerprint (paths, sizes, mtimes) to be unchanged across the same window.
+2. `CodingOutcome` gains `quiescent: bool`. In `generate_code.run`, the checkpoint is restored **only** when `quiescent` is true.
+3. Otherwise the launcher stops the OpenCode container (`docker rm --force`), which is definitive quiescence. The workspace is then re-fingerprinted and restored.
+4. If the container cannot be stopped:
+   - The workspace is **quarantined**: the `coding_tasks` row becomes QUARANTINED and the project refuses further coding tasks until a person clears it.
+   - The tool reports a failure to GPT. It does not restore while writes may continue.
+5. `abort_first` (A3) uses `settle` before the busy check.
+6. **Late results.** The loop already stores a result that arrives after the run ended as `DISCARDED`. `finish` additionally refuses to mark a plan task DONE unless its `coding_tasks` row is still RUNNING for an active run.
+
+**Regression tests** (fake `SessionControl`, fake clock):
+1. A timeout on submit → the prompt is sent exactly once, an abort is sent, polling settles to idle, and the result is UNAVAILABLE with "confirmed quiet".
+2. An ambiguous submit where the session was actually busy → abort, wait for idle, "the prompt had started".
+3. An HTTP 400 on submit with an idle session → no abort and no restore race. A 400 with a busy session → treated as ambiguous.
+4. The abort is accepted but the session stays busy past the time limit → `quiescent` is false, so no restore. The launcher stops the container, and only then does the restore run. If the stop fails, the result is QUARANTINED.
+5. The abort request keeps failing → at most 3 retries, then `quiescent` is false.
+6. The session is idle but the workspace fingerprint is still changing → not quiescent until it is stable.
+7. `abort_first` on a busy session → idle first, and a prompt is never sent while busy.
+8. Order: `Checkpoint.restore` is called strictly after `settle` confirms (checked with a call-order spy).
+9. A reconnect after an ambiguous submit → still exactly one prompt.
+10. The run is cancelled during `settle` → the result is DISCARDED, and the restore still waits for quiescence.
+
+## API filter and model gateway (approved in principle; design only)
+
+```
+Windows host                                Docker (one set per active project)
+DevPilot backend ──127.0.0.1:4096──▶ [api-filter]  on dp-<p>-ingress (bridge, port published on loopback only)
+  (filter token)                          │           and dp-<p>-core (internal)
+                                          ▼ basic auth (fresh password)
+                                    [opencode]     on dp-<p>-core and dp-<p>-model (both internal): no route out
+                                          │ gateway token (fresh, in managed config as apiKey)
+                                          ▼
+                                    [model-gateway] on dp-<p>-model (internal) and dp-egress (bridge)
+                                          │ OpenAI key (only here)
+                                          ▼
+                                    https://api.openai.com
+```
+
+Why the filter is a container: a container attached only to internal networks cannot publish a port. The filter is therefore the single bridge between the host and OpenCode. It is DevPilot's own small code and holds no OpenAI key.
+
+**API filter interface:**
+- `POST/GET <allowlisted path>` with `Authorization: Bearer <filter token>`. The token is random per start and held in backend memory. It is compared in constant time.
+- Upstream is `http://opencode:4096` with basic auth.
+- Allowlist (method, path template, query keys, body rule):
+  - `GET /global/health`, `GET /doc` (or the confirmed spec path), `GET /config`, `GET /agent`, `GET /session/status`
+  - `POST /session` (body only `title` and `permission`)
+  - `GET /session/{id}`, `GET /session/{id}/message`
+  - `POST /session/{id}/prompt_async`: `agent` must be `build`, `model` must be the configured one, only text parts, at most 64 KB
+  - `POST /session/{id}/abort`
+  - `GET /event`: streamed, with a per-event size cap
+  - the permission reply (whichever form C11 confirms), whose body can only reject
+  - `POST /question/{id}/reject`
+- The only query key allowed is `directory=/workspace`.
+- Everything else, including unknown paths (C13), gets 403 and an audit line. It is never forwarded.
+- Response size caps apply. `GET /devpilot/health` reports the filter's own health.
+
+**Model gateway interface:**
+- `POST /v1/<model endpoint OpenCode's OpenAI provider uses>`, with `Authorization: Bearer <gateway token>`. The endpoint (Responses or Chat Completions) is to be confirmed by a later check.
+- Rules:
+  - The model must equal `OPENCODE_MODEL`.
+  - Only `function` tools are allowed. Hosted tools (web search, file search, code interpreter, computer use) are refused.
+  - The output-token cap is enforced.
+- Budgets:
+  - tokens per task (`OPENCODE_MAX_TOKENS_PER_TASK`)
+  - requests per run
+  - a timeout per request
+- Over budget, it answers HTTP 429 so that OpenCode stops, and records the event.
+- Upstream is only `https://api.openai.com`: TLS verified, no redirects, proxy environment variables ignored.
+- The key reaches the gateway by name from the backend. It is never logged, and every output is redacted.
+- **Usage:** one JSONL line per request goes to a write-only ledger mount. Each line has the time, request id, model, input, cached and output tokens, cost in USD (prices from settings) and status, but no prompt text. The backend reads the ledger into the run's token and cost totals.
+
+**Backend interface** (Protocol, faked in tests):
+`OpenCodeDeployment.start(project_id, workspace) -> Endpoint(base_url, token)`, `.stop(project_id) -> bool` (also the A2 quarantine step), and `.usage(project_id) -> list[UsageRecord]`.
+
+**Residual risks:**
+- The gateway's destination allowlist is enforced in code. Docker cannot restrict a bridge network by destination. P1: route it through the same allowlisting proxy planned for installs.
+- The key is visible to `docker inspect` on the host, which is the same trust boundary as `.env`.
+
+## Network architecture and the `127.0.0.1:4096` egress rule
+
+| Component | Listens on | Reached by | Can reach |
+|---|---|---|---|
+| Backend (host process) | `127.0.0.1:8000` | The browser on this machine | `api.openai.com` (GPT), and the filter at `127.0.0.1:4096` |
+| API filter (container) | `:8080`, published as `127.0.0.1:4096` only | The backend, with the filter token | `opencode:4096` |
+| OpenCode (container) | `:4096` on the internal core network | The filter, with the password | `model-gateway:8081` only (internal networks have no route out) |
+| Model gateway (container) | `:8081` on the internal model network | OpenCode, with the gateway token | `api.openai.com:443` (code allowlist) |
+| Contract-check container (Phase 4C) | `127.0.0.1:4096` **inside its own network namespace** | Only the probe, through `docker exec` | Nothing (`--network none`) |
+
+**Recommendations:**
+- **The offline contract check does not need the host egress rule**, and does not use it.
+- Keep `127.0.0.1:4096` **uncommitted**. Once the API filter exists and publishes on `127.0.0.1:4096`, commit it with the comment "the API filter in front of OpenCode (loopback only)". It will then name the filter, not OpenCode.
+- At the same time:
+  - change the `opencode` component's allowlist to empty
+  - add a `model_gateway` component with `api.openai.com`
+
+That makes the file match who actually connects where.
+
+---
+
+# Phase 4C baseline run against the real server (2026-10-30)
+
+**Approved and done:** the check image was built, and the baseline ran once to completion.
+
+**Not run:** the precedence test, `--allow-tmp-exec`, prompts, models and OpenAI.
+
+**Evidence** (redacted; no password, token or key):
+- `D:\DevPilotCache\opencode-check\reports\20261030T071728Z-baseline.json`: the full record, including the 480 KB OpenAPI document and `/config`
+- `…-baseline-summary.json`
+- `build-image.json`, `build-image.log`
+
+**Overall result: not passed.** Of 21 checks, 18 PASS, 1 FAIL (C8) and 2 NOT VERIFIED (C12, C13). The first report of this run said "17 PASS"; that was a counting mistake, corrected from the saved summary. The single failure is a wrong assumption in DevPilot about the `/config` response, not a server security problem (see C8). Fixed and re-run in the "Phase 4C fix round" below.
+
+## Image build
+
+| Item | Value |
+|---|---|
+| Image | `devpilot/opencode-check:1.19.5`, ID `sha256:c380fdb5d0cb5cd9a59322029b665bd9c484d7bf861e0d9842893ecde0470bd6`, 78,330,261 bytes |
+| Base | Local `python:3.12-alpine@sha256:e6dae589…`. It resolved from the local store: no download lines, metadata in 0.0 s. |
+| Packages | `libgcc 15.2.0-r5` and `libstdc++ 15.2.0-r5`, nothing else installed or upgraded. Installed with `apk add --no-cache --no-scripts`, with signature checks on (no `--allow-untrusted`). |
+| Provenance | Exactly the base layers plus one; user `65534:65534`; linux/amd64 |
+| Disk | New unique data about 4.9 MB (the rest shares the base). Docker's data disk `D:\DockerData\disk\docker_data.vhdx` grew by 67 MB. C: is unchanged (5.91 GB free). |
+
+## Baseline results
+
+The run took 7.7 s from creation to removal.
+- **Isolation:** `docker inspect` confirmed network `none`, no port bindings, a read-only root, `CapDrop ALL`, no-new-privileges, user 65534, 1 GiB memory with swap equal to memory, 1 CPU, 256 PIDs, and only `/tmp` as a `noexec,nosuid,nodev` tmpfs of 256 MB. There were four mounts: three read-only and the fresh workspace.
+- **Environment:** no secret-like variable names apart from the server password.
+- **Time limit:** the runner's timeouts plus a forced `docker rm` bounded the container's life.
+
+| ID | Check | Verdict | Observed |
+|---|---|---|---|
+| C0 | Isolation applied | PASS | As listed above |
+| C1 | Startup | PASS | Healthy after 4.0 s (1.6 s on the first, lost run) |
+| C2 | Version | PASS | `{"healthy": true, "version": "1.19.5"}` |
+| C3 | Authentication | PASS | 401 with `WWW-Authenticate: Basic realm="Secure Area"` for health without a password, health with a wrong password, `/doc` without a password, `POST /session` without a password, and `/event` without a password |
+| C4 | Health | PASS | 200 JSON |
+| C5 | `/doc` format | PASS | **JSON**, `application/json`, OpenAPI 3.1.0, 162 paths, 479,667 bytes (`info.version` is "1.0.0"). The docs' "HTML page" description is wrong for 1.19.5. |
+| C6a | Session create, no prompt | PASS | 200. Fields: `id` (`ses_…`), slug, projectID `global`, directory `/workspace`, cost, tokens, title, version, time, permission. **DevPilot's rule list was echoed exactly.** |
+| C6b | Session get | PASS | 200, same id |
+| C6c | Session status | PASS | `{}`: idle sessions are absent, as the adapter assumes |
+| C6d | Message list | PASS | `[]` |
+| C6e | Abort without a prompt | PASS | 200 `true`; status still `{}` |
+| C6f | Unknown session | PASS | 404 `{"name": "NotFoundError", …}` |
+| C7 | Event stream | PASS | `text/event-stream`. First event `data: {"id":"evt_…","type":"server.connected","properties":{}}`, followed by a blank line. |
+| C8 | Effective configuration (`GET /config`) | **FAIL** | See below |
+| C9 | Managed permissions (build agent, `GET /agent`) | PASS | The 101 merged rules pass DevPilot's rule check. Agents listed: build, compaction, summary, title. Plan, general and explore are disabled. |
+| C10 | Sensitive operations present | PASS (inventory) | **59**, including `/pty/*` (interactive terminals), `/session/{id}/shell` and `/command`, `PATCH /config`, `PUT /auth/{id}`, `/mcp/*`, `/tui/*`, `/instance/dispose`, and `/experimental/worktree`, `/workspace`, `/console` and `/control-plane`. None was called. |
+| C11 | Adapter operations | PASS | Every required operation is present. **Both** permission-reply forms exist (`/permission/{id}/reply` and `/session/{id}/permissions/{id}`), and `/question/{id}/reject` exists. `prompt_async` answers 204. **`messageID` is accepted in the prompt body.** |
+| C12 | Tool inventory | NOT VERIFIED | 14 tools: invalid, question, bash, read, glob, grep, edit, write, task, webfetch, todowrite, websearch, skill, **apply_patch**. Not yet reviewed: `apply_patch`, `invalid`, `question`. |
+| C13 | Unknown paths | NOT VERIFIED | 200 `text/html`: the embedded web UI answers any path |
+| C14 | Workspace untouched | PASS | No file created, changed or deleted |
+| C15 | Cleanup | PASS | `docker rm --force` succeeded, no container was left, and the run folder was deleted |
+
+## C8: why it failed, and the smallest fix
+
+**What the server returns.**
+- `GET /config` returns the merged permission object with its keys **re-ordered**: `read, edit, glob, grep, list, bash, task, external_directory, todowrite, question, webfetch, websearch, lsp, doom_loop, skill, "*", codesearch`. The declared permission names appear to come first and the rest after.
+- DevPilot evaluates that object with last-match-wins. With `"*": "deny"` near the end, it concludes that reading and editing project files are denied, which is wrong and fails closed.
+
+**What the server enforces.**
+- The build agent's merged rule list from `GET /agent` keeps DevPilot's **original order**:
+  1. OpenCode's built-in defaults (rules 0–13)
+  2. DevPilot's global rules with `* deny` first (14–56)
+  3. DevPilot's pinned build-agent rules (57–99)
+  4. one rule OpenCode appends (100)
+- That list passes (C9): bash, web, subagents and external folders are denied, and reading and editing project files are allowed.
+
+**Conclusion.** `/config` is a re-serialized view whose key order does not show evaluation order, so DevPilot cannot judge rule order from it.
+
+**Minimum change (not made; needs approval).**
+1. `verify_effective_config` evaluates permission rules only from the build agent's merged list (`GET /agent`). It keeps `/config` only for keys where order does not matter: LSP, formatters, plugins, MCP, share, autoupdate, providers and disabled agents.
+2. `GET /agent` joins the adapter's required operations and the API filter's allowlist.
+3. Offline tests, then a re-run of the baseline (approval).
+
+This also affects run 2: P2 and P3 must judge rule order from `/agent`, not `/config`.
+
+## Other findings
+
+1. **OpenCode adds rules of its own.** It has an allow-all base (rule 0), `read *.env ask`, and new permission names `plan_enter` and `plan_exit`, all overridden by DevPilot's later `* deny`. It also **appends** `external_directory /tmp/home/.local/share/opencode/tool-output/* allow` after all configured rules. Managed config cannot remove that rule. It covers only OpenCode's own tool-output folder inside the container's RAM tmpfs, so it is accepted and recorded here.
+2. **Tools.** GPT models edit through `apply_patch`, which the adapter's `ALLOWED_TOOLS` lacks; the adapter would abort every GPT task. 1.19.5 has no `list`, `patch`, `multiedit` or `todoread` tool. `question` is denied by permission, and `invalid` is OpenCode's handler for malformed tool calls. Review these and update the allowlist with the adapter work.
+3. **Unknown paths serve the web UI,** and 59 sensitive operations include interactive terminals. The API filter (P0) is required before any non-test deployment.
+4. **Timing.** `/doc` takes 1.4 s for 480 KB, and `/config` 0.3 s. Caching the contract per server version (P2) saves about 1.7 s per task.
+5. **`messageID` is accepted,** so the A1 fix can match an ambiguous submission exactly.
+6. **The first baseline attempt** ran fully and cleaned up, but the runner crashed while printing a non-cp1252 character, before saving. That evidence was lost. The runner now saves evidence before printing and replaces characters the console cannot show. The identical run was then repeated, with no change to isolation, probe or server.
+
+## Remaining uncertainties
+- The real merge in the precedence case (run 2, not approved yet).
+- Whether `OPENCODE_DISABLE_PROJECT_CONFIG` and the other environment flags take effect. No project file was present, and the log shows no project config being loaded.
+- How long a busy session takes from abort to idle (no prompt was sent).
+- Event types during real work.
+- Which model endpoint OpenCode's OpenAI provider calls (needed for the gateway).
+
+---
+
+# Phase 4C fix round: effective-policy check corrected, baseline passed (2026-10-30)
+
+**Not done:** the precedence test, prompts, models, OpenAI, the gateway and Phase 4D. The image was not rebuilt; its ID matched the recorded one. The adapter is unchanged and still untested.
+
+## C8: root cause and fix
+
+**Root cause.** DevPilot judged allow and deny decisions from `GET /config` with last-match-wins. On 1.19.5, `/config` returns permission keys re-ordered, with `"*"` second to last, so that order says nothing about evaluation. The order the server enforces is the build agent's merged rule list in `GET /agent`.
+
+**Fix** ([`opencode_policy.py`](../backend/app/coding/opencode_policy.py)):
+
+1. **`agent_rule_problems(GET /agent)`** judges every decision from the ordered, enforced rules. It requires:
+   - a list of named agents, with no duplicates
+   - only the build agent plus the hidden system agents (compaction, summary, title)
+   - a well-formed rule list with known actions
+   - the existing must-deny and must-allow samples, now also in the worktree-relative `workspace/…` form OpenCode matches
+   - **every permission name DevPilot has not reviewed ends denied** (for example `plan_enter` and `plan_exit` on 1.19.5)
+   - no wildcard permission name that allows anything
+   - `external_directory` allowed only for OpenCode's own tool-output folder in the tmpfs
+2. **`config_problems(GET /config)`** checks only what does not depend on order:
+   - LSP, formatters, plugins, MCP, sharing, autoupdate and providers
+   - the declared rules, which must equal DevPilot's managed rules **as key/value sets**: no missing key, no changed value, no added key
+   - plan, general and explore disabled, and no other agent enabled
+3. **`verify_effective_config(config, agents)`** combines both. Called without `/agent`, it **fails closed**, so the untested adapter's old one-argument call refuses every task until it is updated.
+4. `GET /agent` joins the adapter's required operations.
+
+**Regression tests (all passing):**
+- reordered `/config` keys pass C8, and the test shows why order cannot be read from them
+- the correct enforced rules pass (101 rules, as on the server)
+- a malicious later allow fails
+- an agent-specific override fails even when the declarations look right
+- a missing build agent fails
+- unexpected permission names (`pty`, `plan_enter` set to ask) fail
+- a wildcard permission name fails
+- an `external_directory` allow elsewhere fails
+- added, duplicate and visible system agents fail
+- malformed agent lists and rule lists fail closed
+- an empty list, or OpenCode's defaults alone, fail
+
+## `apply_patch` and the tool allowlist (verified in the pinned binary)
+
+The 1.19.5 binary embeds its JavaScript bundle. I read the tool code from it as bytes; nothing was run.
+
+| Tool | Permission it asks | Notes |
+|---|---|---|
+| `read` | `read` (path relative to the worktree) | `external_directory` first if the path is outside the project |
+| `glob`, `grep` | `glob`, `grep` (the search pattern) | |
+| `edit` | `edit` (path relative to the worktree) | |
+| `write` | `edit` | `external_directory` first for a path outside the project |
+| **`apply_patch`** | **`edit`, one pattern per change** (add, update, move, delete) | `external_directory` for every path and every move destination. **The edit patterns list only each change's source path:** a move's destination is never matched against edit rules. |
+| `todowrite` | `todowrite` (`*`) | Session storage only |
+| `invalid` | none | Returns "the arguments provided to the tool are invalid"; changes nothing |
+| `bash` | `bash` (`var Tw="bash"`) | Plus `external_directory` for directories its commands touch |
+| `task`, `question`, `webfetch`, `websearch`, `skill`, `lsp` | Their own names | |
+
+- **Hiding from the model.** OpenCode's own function maps `edit`, `write` and `apply_patch` to `edit`. It removes a tool from the model's tool list when the last rule matching its permission is `* deny`. DevPilot's `hidden_from_model` reproduces this.
+- **Minimum allowlist** (`ALLOWED_TOOLS`): read, glob, grep, edit, write, apply_patch, todowrite, invalid. `patch`, `multiedit`, `list` and `todoread` were dropped, because 1.19.5 does not have them. No wildcard authorizes anything. bash, terminals, plugins, MCP and subagents remain denied by name and by the catch-all.
+- **Auditing every path.** Because a move's destination escapes the edit rules, DevPilot's own snapshot diff is the control.
+  - A new test performs one patch's worth of changes on real files: an add, an update, a move onto `opencode.json`, a move into `.opencode/plugin/`, and a delete.
+  - The audit lists all six paths and flags both protected destinations and the new protected folder.
+- **Matching paths.** Edit and read patterns are relative to the worktree, which is `/` for `/workspace` without git, so rules see `workspace/<file>`. The managed `*/…` deny forms cover this, and the samples now include it.
+
+## C12 and C13
+
+- **C12, tool inventory: now VERIFIED, read-only.** It uses the existing `GET /experimental/tool/ids` and `GET /agent` answers, and invokes no tool.
+  - Every listed tool must be in the reviewed mapping.
+  - Each allowed tool must be offered and allowed.
+  - Each denied tool must be denied and hidden.
+  - These decisions are derived from the enforced rules with the logic read from the binary; they are not observed directly.
+  - An unreviewed tool still makes C12 NOT VERIFIED.
+- **C13, unknown paths: still NOT VERIFIED.** OpenCode answers unknown paths with 200 and its embedded web interface. Refusing unknown methods and paths, whatever status OpenCode returns, is the API filter's job. The filter is not built, so the protection cannot be verified within this scope.
+
+## Reporting reliability
+
+1. **Order.** The raw record is written first, then the summary. Only then is anything printed, so a console failure cannot lose evidence.
+2. **Format.** Reports are UTF-8 (`ensure_ascii=False`) and written atomically: a temporary file in the same folder is flushed and fsynced, then renamed over the target. A failure leaves an earlier file intact and no temporary file.
+3. **Console.** The console is set to replace characters it cannot encode.
+4. **Analysis errors.** If the analysis itself fails, a summary with a bounded reason (2,000 characters) is saved next to the evidence.
+5. **Tests.** Regression tests use a strict cp1252 console:
+   - unguarded, printing still fails, but only after both files exist intact
+   - guarded, it prints `?`
+
+## Baseline re-run against the real server
+
+- **Same assets:** image `sha256:c380fdb5…0bd6` and binary `528058cf…acc8`.
+- **Same hardened configuration:** no network, no port, read-only root, no capabilities, user 65534, limits, a fresh workspace, and a fresh password.
+- **Evidence:** `reports\20261030T074203Z-baseline.json` and `…-summary.json`. No password, token or key.
+
+| | Previous run (07:17Z) | This run (07:42Z) |
+|---|---|---|
+| PASS | 18 | **20** |
+| FAIL | 1 (C8) | **0** |
+| NOT VERIFIED | 2 (C12, C13) | **1 (C13)** |
+| Changes | — | C8: FAIL → PASS; C12: NOT VERIFIED → PASS |
+| Duration | 7.7 s | 7.1 s (healthy after 3.6 s) |
+| Cleanup | complete | complete (no container, no run folder) |
+
+Re-analysing the previous run's saved evidence with the fixed checker gives the same 20 / 0 / 1, so the change comes from the checker, not from a different server.
+
+## Static findings for the precedence test
+
+These were read from the binary and are not yet observed:
+- **Project files.** `OPENCODE_DISABLE_PROJECT_CONFIG` is honoured by 1.19.5. It skips project `opencode.json` files and workspace `.opencode/` folders, and with them their agents, commands and plugins. It also skips `AGENTS.md` and `CLAUDE.md` instructions.
+- **Config folders.** Without the flag, every `.opencode/` folder between the workspace and the worktree is loaded. OpenCode also starts a dependency install (`@opencode-ai/plugin`) inside each such folder, which would write `node_modules` and `package.json` into the workspace if one existed. This makes the flag, the workspace pre-check and the audit all necessary.
+
+Run 2 confirms the effect.

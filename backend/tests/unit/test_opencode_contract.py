@@ -15,6 +15,7 @@ from pydantic import SecretStr
 from app.coding.opencode_contract import (
     ALLOWED_TOOLS,
     REQUIRED_OPERATIONS,
+    TOOL_PERMISSIONS,
     ContractError,
     SSEParser,
     check_health,
@@ -231,12 +232,22 @@ def test_workspace_containment(path: str, inside: bool) -> None:
 
 
 def test_only_allowlisted_tools_may_run() -> None:
-    assert tool_violation("write", "completed") is None
+    for tool in ("write", "edit", "apply_patch", "read", "glob", "grep", "todowrite", "invalid"):
+        assert tool_violation(tool, "completed") is None
     assert tool_violation("bash", "pending") is None  # requested, not run: the permission system decides
-    for tool in ("bash", "webfetch", "task", "interactive_shell", "some_future_tool"):
+    # bash and friends, plus tools 1.19.5 does not have (a newer release adding one is refused until reviewed)
+    for tool in ("bash", "webfetch", "task", "question", "interactive_shell", "multiedit", "patch", "list", "some_future_tool"):
         assert "does not allow" in (tool_violation(tool, "running") or "")
         assert "does not allow" in (tool_violation(tool, "completed") or "")
-    assert {"bash", "webfetch", "websearch", "task", "skill"}.isdisjoint(ALLOWED_TOOLS)
+    assert {"bash", "webfetch", "websearch", "task", "skill", "question", "lsp", "codesearch"}.isdisjoint(ALLOWED_TOOLS)
+
+
+def test_every_allowed_tool_maps_to_a_reading_or_editing_permission() -> None:
+    # From the 1.19.5 binary: edit, write and apply_patch ask "edit"; invalid asks nothing.
+    assert {TOOL_PERMISSIONS[t] for t in ALLOWED_TOOLS} == {"read", "glob", "grep", "edit", "todowrite", None}
+    assert [t for t in ("edit", "write", "apply_patch") if TOOL_PERMISSIONS[t] != "edit"] == []
+    assert ALLOWED_TOOLS <= TOOL_PERMISSIONS.keys()
+    assert all(TOOL_PERMISSIONS[t] == t for t in TOOL_PERMISSIONS.keys() - ALLOWED_TOOLS)
 
 
 # --- Configuration ------------------------------------------------------------------------

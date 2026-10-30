@@ -52,6 +52,31 @@ def test_a_snapshot_records_every_file_with_hash_and_size(root: Path) -> None:
     assert snap.dirs == ["pkg"] and snap.links == []
 
 
+def test_a_multi_file_patch_is_audited_path_by_path(root: Path) -> None:
+    # One OpenCode 1.19.5 apply_patch call can add, update, move and delete files together. Its "edit"
+    # permission request names only each change's source path, so a move onto a protected name is not
+    # seen by the managed edit rules. DevPilot's own diff of every path is what catches it.
+    before = take_snapshot(root)
+    (root / "pkg" / "new_module.py").write_text("Y = 2\n", encoding="utf-8")  # add
+    (root / "calculator.py").write_text("def add(a, b):\n    return b + a\n", encoding="utf-8")  # update
+    (root / "README.md").rename(root / "opencode.json")  # move onto a protected name
+    (root / ".opencode" / "plugin").mkdir(parents=True)
+    (root / "pkg" / "util.py").rename(root / ".opencode" / "plugin" / "util.js")  # move into a protected folder
+    report = _audit(root, before)
+    assert {c.path: c.kind for c in report.changes} == {
+        "pkg/new_module.py": "added",
+        "calculator.py": "modified",
+        "README.md": "deleted",
+        "opencode.json": "added",
+        "pkg/util.py": "deleted",
+        ".opencode/plugin/util.js": "added",
+    }
+    assert "opencode.json: protected path (added); it could change the engine's configuration" in report.violations
+    assert ".opencode/plugin/util.js: protected path (added); it could change the engine's configuration" in report.violations
+    assert ".opencode/: protected folder created" in report.violations
+    assert not report.clean
+
+
 def test_the_diff_lists_added_modified_and_deleted_files(root: Path) -> None:
     before = take_snapshot(root)
     (root / "calculator.py").write_text("def add(a, b):\n    return b + a\n", encoding="utf-8")
