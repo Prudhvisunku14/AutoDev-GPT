@@ -130,6 +130,11 @@ class WorkspaceFS:
         return self._root / project_id
 
 
+def check_relative_path(rel_path: str) -> None:
+    """Raise PathRejected unless `rel_path` passes the same name rules as every WorkspaceFS path."""
+    _validated_parts(rel_path)
+
+
 def _validated_parts(rel_path: str) -> list[str]:
     if not isinstance(rel_path, str) or not rel_path.strip():
         raise PathRejected("path is empty")

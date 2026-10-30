@@ -8,6 +8,8 @@ a request that breaks the rules is a tool error, and nothing runs for it.
 
 from __future__ import annotations
 
+import threading
+from dataclasses import dataclass
 from typing import Literal
 
 from pydantic import Field
@@ -15,8 +17,9 @@ from pydantic import Field
 from app.db.models import RunState
 from app.sandbox.docker_cli import SandboxError, SandboxUnavailable
 from app.sandbox.policy import APPROVED_COMMANDS, SandboxPolicyError, build_spec
+from app.sandbox.runner import SandboxRunner
 from app.sandbox.spec import ExecResult, ExecSpec
-from app.tools.base import ErrorClass, RiskLevel, ToolArgs, ToolContext, ToolError, ToolSpec
+from app.tools.base import ErrorClass, ExternalStep, Progress, RiskLevel, ToolArgs, ToolContext, ToolError, ToolSpec
 from app.tools.registry import ToolRegistry
 
 COMMAND_NAMES = tuple(sorted(APPROVED_COMMANDS))
@@ -32,7 +35,14 @@ class RunSandboxCommandArgs(ToolArgs):
     )
 
 
-def run_sandbox_command(ctx: ToolContext, args: RunSandboxCommandArgs) -> dict[str, object]:
+@dataclass(frozen=True)
+class _Plan:
+    sandbox: SandboxRunner
+    spec: ExecSpec
+
+
+def begin_sandbox_command(ctx: ToolContext, args: RunSandboxCommandArgs) -> _Plan:
+    """In a transaction: check the request against the approval table and record the start."""
     if ctx.sandbox is None or ctx.workspace is None:
         raise ToolError(ErrorClass.TOOL_ERROR, "the Docker sandbox is not configured for this backend")
     try:
@@ -42,12 +52,20 @@ def run_sandbox_command(ctx: ToolContext, args: RunSandboxCommandArgs) -> dict[s
     except SandboxPolicyError as exc:
         raise ToolError(ErrorClass.INVALID_ARGS, str(exc)) from exc
     _record(ctx, "sandbox.started", _spec_payload(spec))
+    return _Plan(sandbox=ctx.sandbox, spec=spec)
+
+
+def run_sandbox_container(plan: _Plan, cancel: threading.Event | None, progress: Progress) -> ExecResult:
+    """With no transaction open: run the container, which can take up to SANDBOX_TIMEOUT_SECONDS."""
     try:
-        result = ctx.sandbox.run(spec, cancel=ctx.cancel)
+        return plan.sandbox.run(plan.spec, cancel=cancel)
     except SandboxUnavailable as exc:
-        result = ExecResult.unavailable(spec, str(exc))
+        return ExecResult.unavailable(plan.spec, str(exc))
     except SandboxError as exc:
         raise ToolError(ErrorClass.TOOL_ERROR, str(exc)) from exc
+
+
+def finish_sandbox_command(ctx: ToolContext, plan: _Plan, result: ExecResult) -> dict[str, object]:
     _record(ctx, "sandbox.finished", _result_payload(result))
     return result.to_dict()
 
@@ -62,7 +80,8 @@ def sandbox_tool_spec() -> ToolSpec:
         args_model=RunSandboxCommandArgs,
         risk=RiskLevel.SANDBOX_EXEC,
         states=frozenset({RunState.IMPLEMENTING}),
-        handler=run_sandbox_command,
+        handler=None,
+        external=ExternalStep(begin=begin_sandbox_command, run=run_sandbox_container, finish=finish_sandbox_command),
     )
 
 

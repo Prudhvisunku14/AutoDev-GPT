@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -16,7 +17,7 @@ from pydantic import ValidationError
 
 from app.core.redaction import Redactor
 from app.db.models import RunState
-from app.tools.base import ErrorClass, ToolArgs, ToolContext, ToolError, ToolResult, ToolSpec
+from app.tools.base import ErrorClass, Progress, ToolArgs, ToolContext, ToolError, ToolResult, ToolSpec
 from app.tools.policy import Decision, PolicyEngine
 from app.tools.registry import ToolRegistry
 
@@ -64,9 +65,20 @@ class ToolExecutor:
         return PreparedCall(spec, args, policy.decision, policy.reason)
 
     def invoke(self, ctx: ToolContext, call: PreparedCall) -> ToolResult:
-        """Run the handler in a savepoint: a failed tool leaves no partial DB changes."""
-        assert call.spec.handler is not None, "human-input tools are answered, not invoked"
+        """Run the handler in a savepoint: a failed tool leaves no partial DB changes.
+
+        An external tool runs all three steps here, inside the caller's transaction. The
+        orchestrator loop instead calls begin/run/finish separately, so that no transaction
+        is open during the slow step.
+        """
         started = time.perf_counter()
+        if call.spec.external is not None:
+            begun = self.begin_external(ctx, call)
+            if isinstance(begun, ToolResult):
+                return self._stamp(begun, ctx, started)
+            outcome, error = self.run_external(call, begun, ctx.cancel, lambda t, p: self._progress(ctx, t, p))
+            return self.finish_external(ctx, call, begun, outcome, error, started=started)
+        assert call.spec.handler is not None, "human-input tools are answered, not invoked"
         savepoint = ctx.session.begin_nested()
         try:
             data = call.spec.handler(ctx, call.args)
@@ -79,6 +91,74 @@ class ToolExecutor:
             savepoint.rollback()
             logger.exception("tool %s raised", call.spec.name)
             result = ToolResult.failure(call.spec.name, ErrorClass.TOOL_ERROR, "internal error while running the tool")
+        return self._stamp(result, ctx, started)
+
+    # --- External tools (slow work outside any transaction) ------------------------
+
+    def begin_external(self, ctx: ToolContext, call: PreparedCall) -> Any:
+        """Step 1, inside a transaction. Returns the plan, or a failure ToolResult."""
+        assert call.spec.external is not None
+        savepoint = ctx.session.begin_nested()
+        try:
+            plan = call.spec.external.begin(ctx, call.args)
+            savepoint.commit()
+            return plan
+        except ToolError as exc:
+            savepoint.rollback()
+            return ToolResult.failure(call.spec.name, exc.error_class, exc.summary, exc.details)
+        except Exception:
+            savepoint.rollback()
+            logger.exception("tool %s raised while starting", call.spec.name)
+            return ToolResult.failure(call.spec.name, ErrorClass.TOOL_ERROR, "internal error while starting the tool")
+
+    def run_external(
+        self, call: PreparedCall, plan: Any, cancel: threading.Event | None, progress: Progress
+    ) -> tuple[Any, BaseException | None]:
+        """Step 2, with no transaction open. Never raises: an exception is handed to `finish_external`."""
+        assert call.spec.external is not None
+        try:
+            return call.spec.external.run(plan, cancel, progress), None
+        except Exception as exc:
+            if not isinstance(exc, ToolError):
+                logger.exception("tool %s raised while running", call.spec.name)
+            return None, exc
+
+    def finish_external(
+        self,
+        ctx: ToolContext,
+        call: PreparedCall,
+        plan: Any,
+        outcome: Any,
+        error: BaseException | None,
+        *,
+        started: float,
+    ) -> ToolResult:
+        """Step 3, inside a new transaction: record the outcome and build the result."""
+        assert call.spec.external is not None
+        savepoint = ctx.session.begin_nested()
+        try:
+            if isinstance(error, ToolError):
+                raise error
+            if error is not None:
+                raise RuntimeError("the external step failed") from error
+            data = call.spec.external.finish(ctx, plan, outcome)
+            savepoint.commit()
+            result = ToolResult(ok=True, tool=call.spec.name, data=data)
+        except ToolError as exc:
+            savepoint.rollback()
+            result = ToolResult.failure(call.spec.name, exc.error_class, exc.summary, exc.details)
+        except Exception:
+            savepoint.rollback()
+            if error is None:
+                logger.exception("tool %s raised while finishing", call.spec.name)
+            result = ToolResult.failure(call.spec.name, ErrorClass.TOOL_ERROR, "internal error while running the tool")
+        return self._stamp(result, ctx, started)
+
+    def _progress(self, ctx: ToolContext, event_type: str, payload: dict[str, Any]) -> None:
+        ctx.events.record(ctx.session, project_id=ctx.project.id, run_id=ctx.run.id, type=event_type, payload=payload)
+
+    @staticmethod
+    def _stamp(result: ToolResult, ctx: ToolContext, started: float) -> ToolResult:
         result.state = ctx.run.state.value
         result.meta["latency_ms"] = int((time.perf_counter() - started) * 1000)
         return result

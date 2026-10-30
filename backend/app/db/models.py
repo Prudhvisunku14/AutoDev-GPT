@@ -93,6 +93,7 @@ class InvocationStatus(StrEnum):
     DENIED = "DENIED"
     INTERRUPTED = "INTERRUPTED"  # found STARTED after a crash; never re-executed
     SKIPPED = "SKIPPED"  # the run ended before the call ran
+    DISCARDED = "DISCARDED"  # finished after the run ended: kept for the audit, never sent to GPT
 
 
 # Statuses whose output must be delivered to GPT as a function_call_output.

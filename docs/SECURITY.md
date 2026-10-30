@@ -143,5 +143,22 @@ The unit tests use a fake Docker CLI and real child processes, so they never sta
 
 Residual risks specific to Phase 3:
 - The Docker CLI runs on the host. Its own bugs are outside this sandbox.
-- Images are pinned by version tag only. The digest should be recorded after the first pull.
+- Images are pinned by version tag only. The digest is recorded above but is not yet enforced in the approval table ([ARCHITECTURE_OPTIMIZATION.md](ARCHITECTURE_OPTIMIZATION.md) item 9).
 - Docker Desktop's VM shares its kernel with other Windows workloads (§5).
+
+## 12. Phase 4 coding engine: status of each control (2026-10-30)
+
+OpenCode is **not running anywhere** and is not called by any run. The table shows what is tested at this checkpoint.
+
+| Control | Where | Status |
+|---|---|---|
+| OpenCode's configuration cannot be overridden from the workspace: DevPilot ships managed config (catch-all deny; bash, web, subagents, skills and questions denied; LSP, formatters, plugins and MCP off; sharing off; OpenAI only) | `coding/opencode_policy.py` | Config generator tested. **Not deployed** (no container). |
+| The *effective* configuration is checked before each task by evaluating OpenCode's rules (last match wins, wildcards, per-agent overrides), not by reading single flags | `verify_effective_config` | Tested, including bash re-allowed by a later pattern, an agent override, a re-enabled subagent, plugins, MCP, and the list rule format |
+| A workspace that already contains `opencode.json`, `.opencode/`, `AGENTS.md`, `.git/`, `.env` or links is refused before OpenCode sees it | `coding/audit.preexisting_violations` | Tested |
+| Python audits every change itself after a task: protected paths, new symlinks or junctions, invalid names, size and count limits, native executables, configured secrets | `coding/audit.audit` | Tested with real files, symlinks and junctions |
+| Any violation, or any outcome other than COMPLETED, restores the workspace exactly (a task is kept or dropped as a whole) | `coding/audit.Checkpoint` | Tested, including removing a link without touching its target |
+| The brief comes from the saved plan; GPT's instructions and plan text are fenced as untrusted data | `coding/brief.py` | Tested, including attempts to close the fence |
+| Slow tools hold no database lock; a cancelled run or a backend shutdown stops them; late results never reach GPT | orchestrator loop | Tested |
+| The adapter rejects every permission request and question, aborts on a forbidden tool, an edit outside the project, a timeout, a cancel or a token overrun, never calls the command endpoints, and checks the server's version and API | `tools/adapters/opencode.py` | **Untested; not committed** |
+| OpenCode reaches its model only through a DevPilot gateway that holds the key; the container has no other network | design only | **Not built** ([ARCHITECTURE_OPTIMIZATION.md](ARCHITECTURE_OPTIMIZATION.md) item 3) |
+| One OpenCode container per project, only that workspace mounted, no published port, fresh password per start | design only | **Not built** (item 4) |

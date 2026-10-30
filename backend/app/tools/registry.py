@@ -37,8 +37,10 @@ class ToolRegistry:
             raise ToolRegistrationError(f"invalid tool name {spec.name!r}")
         if spec.name in self._specs:
             raise ToolRegistrationError(f"tool {spec.name!r} is already registered")
-        if spec.handler is None and not spec.asks_human:
+        if spec.handler is None and not spec.asks_human and spec.external is None:
             raise ToolRegistrationError(f"tool {spec.name!r} has no handler")
+        if spec.handler is not None and spec.external is not None:
+            raise ToolRegistrationError(f"tool {spec.name!r} has both a handler and an external step")
         _require_all_fields(spec.args_model, spec.name)
         self._schemas[spec.name] = {
             "type": "function",

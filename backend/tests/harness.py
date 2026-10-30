@@ -18,7 +18,10 @@ from app.orchestrator import approvals
 from app.orchestrator.fake_llm import FakeLLM
 from app.orchestrator.llm_client import LLMClient
 from app.orchestrator.loop import Orchestrator
+from app.orchestrator.state_machine import ORCHESTRATED_STATES
+from app.sandbox.runner import SandboxRunner
 from app.stacks.catalog import StackCatalog
+from app.tools.adapters.workspace_fs import WorkspaceFS
 from app.tools.base import RiskLevel, ToolArgs, ToolContext, ToolSpec
 from app.tools.executor import ToolExecutor
 from app.tools.gates import register_phase2_tools
@@ -36,8 +39,19 @@ class PublishArgs(ToolArgs):
 class Harness:
     """Real Settings, DB, registry, executor and orchestrator; GPT is a FakeLLM."""
 
-    def __init__(self, tmp_path: Path, llm: LLMClient | None = None, *, risky_tool: bool = False, **overrides: Any) -> None:
+    def __init__(
+        self,
+        tmp_path: Path,
+        llm: LLMClient | None = None,
+        *,
+        risky_tool: bool = False,
+        extra_tools: list[ToolSpec] | None = None,
+        sandbox: SandboxRunner | None = None,
+        orchestrated_states: frozenset[RunState] = ORCHESTRATED_STATES,
+        **overrides: Any,
+    ) -> None:
         self.settings = make_settings(tmp_path, **overrides)
+        self.workspace = WorkspaceFS(self.settings.workspaces_dir, max_file_bytes=100_000, max_files=100)
         self.engine = create_db_engine(self.settings)
         init_db(self.engine)
         self.sessions = create_session_factory(self.engine)
@@ -58,6 +72,8 @@ class Harness:
                     handler=self._publish,
                 )
             )
+        for spec in extra_tools or []:
+            self.registry.register(spec)
         self.executor = ToolExecutor(
             self.registry, PolicyEngine(), self.redactor, max_output_chars=self.settings.tool_output_max_chars
         )
@@ -71,6 +87,9 @@ class Harness:
             catalog=self.catalog,
             redactor=self.redactor,
             llm_provider=lambda: self.llm,
+            sandbox=sandbox,
+            workspace=self.workspace,
+            orchestrated_states=orchestrated_states,
         )
 
     def _publish(self, ctx: ToolContext, args: PublishArgs) -> dict[str, object]:

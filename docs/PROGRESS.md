@@ -1,6 +1,6 @@
 # DevPilot AI: Progress
 
-**Current phase:** Phase 3 built and tested offline (2026-10-29). The real-container checks are **pending** a verified Docker engine (see the Phase 3 log). Phase 4 has **not started**.
+**Current phase:** Phase 4 (OpenCode) in progress. Its foundation is tested and committed (2026-10-30). The OpenCode adapter itself is **untested** and not committed, and nothing calls OpenCode yet. Phase 3 is verified in real containers.
 
 ## Phase tracker
 
@@ -10,7 +10,7 @@
 | 1 | Backend foundation | ✅ Done (2026-10-29) | Python 3.12.9 at `D:\python.exe` |
 | 2 | GPT orchestrator | ✅ Done (2026-10-29), verified with FakeLLM; first live GPT call verified (analysis accepted, 1 call, 919 tokens) | OpenAI API key (user) for live use |
 | 3 | Docker sandbox | 🟡 Isolation controls verified in real containers (2026-10-30); install proxy and orphan-sweep test on a real container still open | Docker Desktop running, data on D:, `python:3.12-alpine` present |
-| 4 | OpenCode integration | ⏳ Not started | OpenCode container image, Git |
+| 4 | OpenCode integration | 🟡 Foundation tested and committed (2026-10-30); adapter untested; not wired into runs | OpenCode container image, model gateway, approval for live use |
 | 5 | Verification-guided development | ⏳ Not started | — |
 | 6 | Failure classification and recovery | ⏳ Not started | — |
 | 7 | Adaptive tool selection | ⏳ Not started | — |
@@ -438,3 +438,49 @@ Recorded events: `sandbox.started` and `sandbox.finished` for each command, with
 5. `tests/docker_fake.py` was reported as changed on disk. Git shows no difference from the committed version, so no change is pending.
 
 **Readiness:** Phase 3 is verified on real containers for every isolation control in the table in SECURITY.md §11, except the orphan sweep and the install proxy. Phase 4 has not started and waits for your approval.
+
+### Phase 4 foundation checkpoint (2026-10-30)
+
+Phase 4 is **not complete**. This checkpoint commits the parts that are built and tested. Nothing calls OpenCode yet: there is no `generate_code` tool, no container and no model route.
+
+**OpenCode research (from the published opencode-ai 1.19.5 SDK and docs, 2026-10-30):**
+- The latest release is 1.19.5.
+- The public docs and the SDK disagree on the permission reply endpoint, so the adapter reads the server's own `/doc` at run time.
+  - The SDK has `POST /permission/{id}/reply` with `{reply}`.
+  - The docs have `POST /session/{id}/permissions/{id}` with `{response}`.
+- A project `opencode.json` or `.opencode/` folder overrides global configuration and can add plugins or MCP servers, which run code. Only managed configuration (`/etc/opencode/`) cannot be overridden.
+- The API includes command-running endpoints (`/session/{id}/shell`, `/session/{id}/command`) and a per-request `directory` parameter.
+
+**Committed and tested:**
+
+| Component | File | Tests |
+|---|---|---|
+| OpenCode policy: managed config, effective-config check (last-match-wins wildcards, agent overrides, list and object rule forms), protected paths | `app/coding/opencode_policy.py` | `test_opencode_policy.py` |
+| Task brief from the saved plan, with untrusted text fenced | `app/coding/brief.py` | `test_coding_brief.py` |
+| Workspace snapshot, change audit (protected paths, links, size, executables, secrets, file count, invalid names), checkpoint and exact restore | `app/coding/audit.py` | `test_coding_audit.py` (real files, symlinks and junctions) |
+| Provider contract types | `app/coding/types.py` | used by the above |
+| Slow tools run with no database transaction open (`ExternalStep`), per-run cancel watcher, recovery hook, late results stored as `DISCARDED` | `tools/base.py`, `tools/executor.py`, `tools/registry.py`, `orchestrator/loop.py`, `db/models.py` | `test_external_tools.py` |
+| `run_sandbox_command` moved to the transaction-free path | `tools/adapters/sandbox.py` | `test_external_tools.py`, existing sandbox tests |
+| Settings for OpenCode and checkpoints (OpenCode is off by default) | `config.py`, `.env.example` | existing config tests |
+
+**Bugs found and fixed:**
+1. **SQLite write lock held during tools (Phase 3).** Every tool handler ran inside the orchestrator's write transaction, so a sandbox run over 30 s would have made API writes, such as a cancel, fail with "database is locked". A test shows that a handler tool still holds the lock and that an external tool does not.
+2. **A cancelled run kept its tool running.** A per-run watcher now stops slow tools when the run is cancelled. A test cancels a run through the real API while a tool runs.
+3. **Late results.** A result that finished after its run ended was recorded as an ordinary result. It is now `DISCARDED`, never sent to GPT, and no GPT call follows.
+4. **A GPT call after shutdown.** A backend shutdown during a slow tool was followed by one more GPT request (a paid call with the real client). The loop now checks the stop flag after the tool queue.
+5. **Test isolation.** The new `OPENCODE_*` settings were not cleared from the developer's environment in tests.
+
+**Not committed (kept in the working tree):**
+- `app/tools/adapters/opencode.py`, the OpenCode HTTP adapter: **0% tested**. Its HTTP-mock tests were stopped by a safety filter during generation and were not retried.
+- The egress allowlist line `127.0.0.1:4096` for the backend. It only serves that adapter.
+
+**Tests:** 637 passed, 10 skipped (the 9 Docker tests and the live OpenAI test, all opt-in), 0 failed. Coverage: 84% including the untested adapter, 96% without it. Run time varied between 43 s and 115 s for the same suite on this laptop.
+
+**Remaining Phase 4 work:** see [ARCHITECTURE_OPTIMIZATION.md](ARCHITECTURE_OPTIMIZATION.md) for the P0 items.
+1. Agree how to test the adapter (P0 1).
+2. Confirm `/doc` on a real server (P0 2).
+3. Build the model gateway (P0 3).
+4. Build the per-project OpenCode container launcher (P0 4).
+5. Add `call_id` to the tool context (P0 5).
+6. Build the `generate_code` and `submit_implementation` tools, the `coding_tasks` table and the IMPLEMENTING prompt, then wire them into `create_app`.
+7. Write the offline demo, then do a live test after approval.

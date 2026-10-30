@@ -49,10 +49,11 @@ from app.orchestrator.budget import LimitHit, RunGuard, turn_cost_usd
 from app.orchestrator.llm_client import LLMClient, LLMError, LLMErrorKind, LLMRequest, LLMResponse
 from app.orchestrator.run_control import change_state, end_run, pause_run
 from app.orchestrator.state_machine import ORCHESTRATED_STATES, REQUIRED_PHASE
+from app.coding.types import CodingProvider
 from app.sandbox.runner import SandboxRunner
 from app.stacks.catalog import StackCatalog
 from app.tools.adapters.workspace_fs import WorkspaceFS
-from app.tools.base import ErrorClass, ToolContext, ToolResult
+from app.tools.base import ErrorClass, RecoveryInfo, ToolContext, ToolResult
 from app.tools.executor import PreparedCall, ToolExecutor
 from app.tools.policy import Decision
 from app.tools.registry import ToolRegistry
@@ -77,6 +78,8 @@ class Orchestrator:
         llm_provider: LLMProvider,
         sandbox: SandboxRunner | None = None,
         workspace: WorkspaceFS | None = None,
+        coding: CodingProvider | None = None,
+        orchestrated_states: frozenset[RunState] = ORCHESTRATED_STATES,
     ) -> None:
         self._settings = settings
         self._sessions = session_factory
@@ -88,6 +91,8 @@ class Orchestrator:
         self._llm_provider = llm_provider
         self._sandbox = sandbox
         self._workspace = workspace
+        self._coding = coding
+        self._orchestrated = orchestrated_states
         self._guard = RunGuard(settings)
         self._stop = threading.Event()
 
@@ -107,6 +112,10 @@ class Orchestrator:
                     self._pause(run_id, "backend_shutdown", "The backend stopped; start the run again to continue.")
                     return
                 if not self._process_queue(run_id, session_start):
+                    return
+                # A tool can run for minutes; a shutdown requested meanwhile must not be followed by a GPT call.
+                if self._stop.is_set():
+                    self._pause(run_id, "backend_shutdown", "The backend stopped; start the run again to continue.")
                     return
                 prepared = self._next_request(run_id, session_start)
                 if prepared is None:
@@ -154,11 +163,19 @@ class Orchestrator:
             )
         ).all()
         for inv in stale:
-            result = ToolResult.failure(
-                inv.tool,
-                ErrorClass.INTERRUPTED,
-                "The backend stopped while this call was running. Its changes were rolled back; call the tool again if it is still needed.",
-            )
+            summary = "The backend stopped while this call was running. Its changes were rolled back; call the tool again if it is still needed."
+            spec = self._registry.get(inv.tool)
+            if spec is not None and spec.external is not None and spec.external.recover is not None:
+                info = RecoveryInfo(settings=self._settings, run_id=run.id, project_id=run.project_id, call_id=inv.call_id)
+                try:
+                    note = spec.external.recover(info)
+                except Exception:
+                    logger.exception("recovery of %s (%s) failed", inv.tool, inv.call_id)
+                    note = "Its side effects could not be undone automatically; check the workspace."
+                if note:
+                    summary = f"The backend stopped while this call was running. {note}"
+                self._record(s, run, "tool.recovered", {"call_id": inv.call_id, "tool": inv.tool, "note": note})
+            result = ToolResult.failure(inv.tool, ErrorClass.INTERRUPTED, summary)
             self._finish(s, run, inv, result, status=InvocationStatus.INTERRUPTED)
 
     def _process_queue(self, run_id: str, session_start: float) -> bool:
@@ -217,24 +234,69 @@ class Orchestrator:
                 if isinstance(prepared, ToolResult):
                     self._finish(s, run, inv, prepared)
                     continue
-                project = s.get(Project, run.project_id)
-                assert project is not None
-                ctx = ToolContext(
-                    session=s,
-                    run=run,
-                    project=project,
-                    settings=self._settings,
-                    events=self._events,
-                    catalog=self._catalog,
-                    sandbox=self._sandbox,
-                    workspace=self._workspace,
-                    cancel=self._stop,  # backend shutdown stops any container still running
+                ctx = self._context(s, run)
+                if prepared.spec.external is None:
+                    before = run.state
+                    result = self._executor.invoke(ctx, prepared)
+                    if run.state is not before:
+                        run.nudges = 0
+                    self._finish(s, run, inv, result)
+                    continue
+                started = time.perf_counter()
+                plan = self._executor.begin_external(ctx, prepared)
+                if isinstance(plan, ToolResult):
+                    self._finish(s, run, inv, plan)
+                    continue
+
+            # The slow step runs with no transaction open, so the API can cancel the run or
+            # decide approvals meanwhile. A cancelled run or a backend shutdown stops it.
+            with _CancelWatch(self._sessions, run_id, self._stop) as cancel:
+                outcome, error = self._executor.run_external(
+                    prepared, plan, cancel, lambda event_type, payload: self._progress(run_id, event_type, payload)
                 )
+
+            with self._sessions.begin() as s:
+                run = s.get(Run, run_id)
+                inv = s.get(ToolInvocation, inv_id)
+                assert run is not None and inv is not None
+                ctx = self._context(s, run)
+                ended_meanwhile = run.is_terminal
                 before = run.state
-                result = self._executor.invoke(ctx, prepared)
+                # The tool still records its own outcome (and undoes its side effects if needed).
+                result = self._executor.finish_external(ctx, prepared, plan, outcome, error, started=started)
+                if ended_meanwhile:
+                    self._finish(s, run, inv, result, status=InvocationStatus.DISCARDED)
+                    self._record(s, run, "tool.result_discarded", {"call_id": inv.call_id, "tool": inv.tool, "state": run.state})
+                    return False
                 if run.state is not before:
                     run.nudges = 0
                 self._finish(s, run, inv, result)
+
+    def _context(self, s: Session, run: Run) -> ToolContext:
+        project = s.get(Project, run.project_id)
+        assert project is not None
+        return ToolContext(
+            session=s,
+            run=run,
+            project=project,
+            settings=self._settings,
+            events=self._events,
+            catalog=self._catalog,
+            sandbox=self._sandbox,
+            workspace=self._workspace,
+            cancel=self._stop,  # backend shutdown stops any container still running
+            coding=self._coding,
+        )
+
+    def _progress(self, run_id: str, event_type: str, payload: dict[str, Any]) -> None:
+        """Progress from a running external tool, each in its own short transaction."""
+        try:
+            with self._sessions.begin() as s:
+                run = s.get(Run, run_id)
+                if run is not None:
+                    self._record(s, run, event_type, payload)
+        except Exception:
+            logger.exception("could not record %s for run %s", event_type, run_id)
 
     def _next_request(self, run_id: str, session_start: float) -> tuple[LLMRequest, list[int]] | None:
         with self._sessions.begin() as s:
@@ -242,7 +304,7 @@ class Orchestrator:
             assert run is not None
             if run.is_terminal or run.state is RunState.AWAITING_APPROVAL:
                 return None
-            if run.state not in ORCHESTRATED_STATES:
+            if run.state not in self._orchestrated:
                 needed = REQUIRED_PHASE.get(run.state, "a later phase")
                 pause_run(
                     s,
@@ -519,3 +581,45 @@ def _is_json(text: str) -> bool:
     except (json.JSONDecodeError, TypeError):
         return False
     return True
+
+
+class _CancelWatch:
+    """A cancel signal for one external step: set on backend shutdown or when the run ends.
+
+    The API cancels a run by changing its row. This watcher polls that row so a running
+    container or coding session is stopped, instead of running on for a run nobody wants.
+    """
+
+    POLL_SECONDS = 1.0
+
+    def __init__(self, sessions: sessionmaker[Session], run_id: str, shutdown: threading.Event) -> None:
+        self._sessions = sessions
+        self._run_id = run_id
+        self._shutdown = shutdown
+        self._cancel = threading.Event()
+        self._done = threading.Event()
+        self._thread = threading.Thread(target=self._watch, name=f"cancel-watch-{run_id[:8]}", daemon=True)
+
+    def __enter__(self) -> threading.Event:
+        self._thread.start()
+        return self._cancel
+
+    def __exit__(self, *exc: object) -> None:
+        self._done.set()
+        self._thread.join(timeout=5)
+
+    def _watch(self) -> None:
+        while not self._done.is_set():
+            if self._shutdown.is_set() or self._run_ended():
+                self._cancel.set()
+                return
+            self._done.wait(self.POLL_SECONDS)
+
+    def _run_ended(self) -> bool:
+        try:
+            with self._sessions() as s:
+                run = s.get(Run, self._run_id)
+                return run is None or run.is_terminal
+        except Exception:
+            logger.exception("cancel watch could not read run %s", self._run_id)
+            return False

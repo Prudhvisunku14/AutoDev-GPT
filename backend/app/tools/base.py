@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.orm import Session
 
+    from app.coding.types import CodingProvider
     from app.config import Settings
     from app.core.events import EventRecorder
     from app.db.models import Project, Run
@@ -101,9 +102,39 @@ class ToolContext:
     sandbox: SandboxRunner | None = None
     workspace: WorkspaceFS | None = None
     cancel: threading.Event | None = None
+    # Phase 4: the coding engine (OpenCode, or FakeOpenCode in tests).
+    coding: CodingProvider | None = None
 
 
 Handler = Callable[[ToolContext, Any], dict[str, Any]]
+# Records one progress event in its own short transaction: (event type, payload).
+Progress = Callable[[str, dict[str, Any]], None]
+
+
+@dataclass(frozen=True)
+class RecoveryInfo:
+    """What a tool's `recover` hook gets when the backend died while the tool was running."""
+
+    settings: Settings
+    run_id: str
+    project_id: str
+    call_id: str
+
+
+@dataclass(frozen=True)
+class ExternalStep:
+    """A tool whose slow part (Docker, OpenCode) runs with no database transaction open.
+
+    `begin` validates and records the start inside a transaction and returns a plan.
+    `run` does the slow work with no transaction, so the API can still write meanwhile.
+    `finish` records the outcome inside a new transaction and returns the tool's data.
+    `recover` repairs side effects (such as workspace edits) left by a call that never finished.
+    """
+
+    begin: Callable[[ToolContext, Any], Any]
+    run: Callable[[Any, threading.Event | None, Progress], Any]
+    finish: Callable[[ToolContext, Any, Any], dict[str, Any]]
+    recover: Callable[[RecoveryInfo], str | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -117,3 +148,5 @@ class ToolSpec:
     handler: Handler | None
     # True: the call pauses the run until a person answers (request_human_input).
     asks_human: bool = False
+    # Set for tools that call slow external systems; `handler` is then None.
+    external: ExternalStep | None = None

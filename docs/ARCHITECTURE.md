@@ -231,43 +231,48 @@ Model IDs come only from configuration (`OPENAI_MODEL`, `OPENCODE_MODEL`).
 
 ## 6. Coding engine: OpenCode
 
-**Deployment**
-- `opencode serve --hostname 0.0.0.0 --port 4096` runs inside the `devpilot-opencode` container.
-- The image is built from `sandbox/images/opencode/` and pins the `opencode-ai` version.
-- The project workspace is bind-mounted at `/workspace`.
-- The port is published on `127.0.0.1` only.
-- HTTP basic auth is enabled through `OPENCODE_SERVER_PASSWORD`.
+> **Status (2026-10-30):** the policy, the audit, the brief and the transaction-free tool path are built and tested. The HTTP adapter is written but untested and uncommitted. The container, the model gateway and the `generate_code` tool are not built. [ARCHITECTURE_OPTIMIZATION.md](ARCHITECTURE_OPTIMIZATION.md) lists the open P0 items.
 
-**Model**
-- OpenCode uses its OpenAI provider (`OPENCODE_MODEL=openai/<model>`), so the entire stack is GPT-based.
-- The OpenAI key is injected only into this container.
+**Deployment (design, not built)**
+- One `opencode serve` container per active project, from an image that pins `opencode-ai` (1.19.5 when checked).
+- Only that project's workspace is mounted, at `/workspace`. Every API call carries `directory=/workspace`, because the API accepts any folder the container can see.
+- No port is published on the host. HTTP basic auth uses a fresh random `OPENCODE_SERVER_PASSWORD` per start, passed through the environment.
+- The container uses the sandbox's hardening flags (§7.2). Its only network peer is the model gateway.
 
-**Permissions** (`opencode.json`, shipped in the image)
+**Model access (design, not built)**
+- OpenCode uses its OpenAI provider (`OPENCODE_MODEL=openai/<model>`), so the stack stays GPT-only.
+- The provider's `baseURL` points at DevPilot's model gateway. The gateway holds the OpenAI key, forwards only model requests to `api.openai.com`, and enforces the model allowlist and a token budget.
+- **The key never enters the OpenCode container.** Generated programs never run there: they run only in the Phase 3 sandbox, with no network.
 
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "permission": {
-    "edit": "allow",
-    "external_directory": "deny",
-    "webfetch": "deny",
-    "bash": { "*": "deny" }
-  }
-}
-```
+**Policy** (`coding/opencode_policy.py`, built and tested)
+- A project `opencode.json` or a `.opencode/` folder overrides global configuration and can add plugins or MCP servers, which run code. So DevPilot does three things:
+  1. It mounts `managed_config()` as managed configuration (`/etc/opencode/opencode.json`), which projects cannot override. It has a catch-all deny first, then allows reading, editing (except protected paths), glob, grep, list and todos. bash, webfetch, websearch, codesearch, external directories, subagents, skills, questions and doom-loop are denied. LSP, formatters, plugins and MCP are off, sharing and auto-update are off, and only the openai provider is enabled.
+  2. It checks the *effective* configuration (`GET /config`) before every task by evaluating OpenCode's rules on sample inputs, including per-agent overrides.
+  3. It refuses a workspace that already holds such files, and reverts any task that creates them.
 
-OpenCode can edit files inside `/workspace` but cannot run commands. All execution goes through the DevPilot sandbox.
+**Adapter flow** (`tools/adapters/opencode.py`, written, untested)
+1. Check health and version (1.19.0 up to, not including, 2.0.0), the server's `/doc` operations and the effective config. Nothing is sent if any check fails.
+2. Continue the task's earlier session if it still exists, otherwise `POST /session` with the policy's rules. A busy session is never prompted again.
+3. Open `GET /event`, then send the brief with `POST /session/{id}/prompt_async`.
+4. Follow this session's events:
+   - Progress becomes `coding.*` events.
+   - Every permission request is rejected. The 1.19.5 SDK uses `POST /permission/{id}/reply`; older servers use `POST /session/{id}/permissions/{id}`. The adapter uses whichever the server's `/doc` lists.
+   - Questions are rejected.
+   - A forbidden tool, an edit outside `/workspace` or a token overrun aborts the session.
+5. Completion is confirmed from the session's messages. A dropped stream is reopened. A timeout or a cancelled run sends `POST /session/{id}/abort`.
+6. The adapter never calls `/session/{id}/shell` or `/session/{id}/command`.
 
-**Adapter flow (`tools/adapters/opencode.py`)**
-1. Get or create a session per (project, task) with `POST /session`.
-2. Send a structured brief with `POST /session/:id/prompt_async`. The brief contains the task, linked criteria, failing tests and diagnosis (in repair mode) and the list of frozen tests.
-3. Consume the `GET /event` SSE stream, filtered by session ID, until the session is idle. Progress events are forwarded to the DevPilot event bus. Any permission request is answered by the PolicyEngine through `POST /session/:id/permissions/:permissionID`.
-4. If the call exceeds `OPENCODE_TIMEOUT_SECONDS`, send `POST /session/:id/abort`. The result is classified as TIMEOUT or TOOL_TRANSIENT.
-5. Fetch `GET /session/:id/diff`. The executor runs its post-guards on the changes, and tokens and cost are recorded from the message info.
+**Audit after every task** (`coding/audit.py`, built and tested)
+- Before the task: a snapshot of every file (hash and size) and a checkpoint copy.
+- After the task: DevPilot's own diff. It checks protected paths, new links, invalid names, size and count limits, native executables and secrets.
+- Any violation, or any outcome other than COMPLETED, restores the checkpoint, so a task is kept or dropped as a whole. OpenCode's own diff is informational only.
 
-**Contract safety**
-- At startup the adapter reads `GET /doc` (OpenAPI 3.1) and checks that every endpoint it uses exists.
-- Contract tests mock these endpoints with respx.
+**Long-running tools** (built and tested)
+- A tool with an `ExternalStep` validates and records its start in one transaction, does its slow work with no transaction open, and records the result in a new transaction.
+- A per-run watcher stops the slow step when the run is cancelled or the backend stops.
+- A result that arrives after the run ended is stored as `DISCARDED` and never sent to GPT.
+- After a crash, the tool's `recover` hook undoes side effects once, and the call is reported as INTERRUPTED, never re-run.
+- `run_sandbox_command` uses this path.
 
 **Alternative providers**
 - `gpt_writer`: GPT writes files directly through the jailed WorkspaceFS. It serves as a fallback and as a comparison baseline.
@@ -641,7 +646,7 @@ workspaces/  data/ (gitignored, runtime)
 - **Single-user design.** One bearer token and one run at a time. It is not multi-tenant.
 - **Docker Desktop on Windows** runs containers inside a WSL2 VM. That is a strong isolation layer, but it is not a hardened multi-tenant boundary.
 - **The dependency install step has network access.** A malicious package could run during install. That happens inside the sandbox, with no secrets present.
-- **The OpenCode container holds the OpenAI key and has network egress** so that it can reach OpenAI. bash and webfetch are denied, which limits misuse.
+- **OpenCode needs model access.** In the current design it reaches OpenAI only through DevPilot's model gateway, which holds the key outside the container (§6). Until that gateway exists, OpenCode must not run: the earlier design, which put the key and internet access inside the container, is superseded.
 - **The supported stacks are limited** to the StackCatalog entries.
 - **Google Drive access depends on the user's own OAuth client.** Apps in Google's "Testing" publishing status issue refresh tokens that may expire after about seven days, and only listed test users can sign in. Re-authorization is then required.
 - **Disk space on the current laptop is limited.** C: is nearly full, so Docker and WSL2 data must live on D:.

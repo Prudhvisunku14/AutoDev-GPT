@@ -83,6 +83,22 @@ class Settings(BaseSettings):
     # Per stream. Output beyond this is dropped and marked truncated; a flood kills the container.
     sandbox_max_output_bytes: int = Field(default=65_536, ge=1_024, le=4_194_304)
 
+    # --- OpenCode coding engine (Phase 4; SECURITY T3, T4) -----------------
+    # Off by default: IMPLEMENTING is orchestrated only when the OpenCode container is running.
+    opencode_enabled: bool = False
+    # Must be a loopback address that the egress allowlist lists for the backend.
+    opencode_base_url: str = "http://127.0.0.1:4096"
+    opencode_server_username: str = Field(default="opencode", min_length=1)
+    # provider/model, e.g. openai/<model-id>. Only the openai provider is accepted.
+    opencode_model: str | None = None
+    opencode_timeout_seconds: float = Field(default=600.0, gt=0, le=3600)
+    # The project folder as the OpenCode container sees it. Every API call is pinned to it.
+    opencode_workspace_dir: str = Field(default="/workspace", pattern=r"^/[A-Za-z0-9._/-]*$")
+    opencode_max_tokens_per_task: int = Field(default=200_000, gt=0)
+    opencode_max_attempts_per_task: int = Field(default=3, ge=1, le=10)
+    # Pre-images of the workspace, kept while a coding task runs so it can be reverted.
+    coding_checkpoints_dir: Path = Path("./data/checkpoints")
+
     # --- Credentials used by later phases ---------------------------------
     # Declared here only so the redactor knows their values. Phase 1 never uses them.
     openai_api_key: SecretStr | None = None
@@ -113,6 +129,7 @@ class Settings(BaseSettings):
     @field_validator(
         "openai_model",
         "openai_base_url",
+        "opencode_model",
         "openai_max_output_tokens",
         "openai_price_input_per_mtok",
         "openai_price_output_per_mtok",
@@ -162,6 +179,7 @@ class Settings(BaseSettings):
     def _resolve_paths(self) -> Settings:
         self.workspaces_dir = _from_repo_root(self.workspaces_dir)
         self.egress_allowlist_file = _from_repo_root(self.egress_allowlist_file)
+        self.coding_checkpoints_dir = _from_repo_root(self.coding_checkpoints_dir)
         return self
 
     @property
