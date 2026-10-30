@@ -1,14 +1,12 @@
 # DevPilot AI: Progress
 
-**Current phase:** Phase 4 (OpenCode) in progress. The foundation and the Phase 4B contract checks are tested and committed (2026-10-30).
+**Current phase:** Phase 4 (OpenCode) in progress. The foundation, the contract checks, the verified binary and the precedence experiment are committed (2026-10-30).
 
-Phase 4C (2026-10-30):
-- The official 1.19.5 binary is verified on D:, and the check image is built.
-- **The baseline contract check against the real server passes: 20 PASS, 0 FAIL, 1 NOT VERIFIED (C13, unknown paths, which depend on the API filter).** This is after the fix round that judges rule order from `/agent`.
-- Committed.
-- The precedence test is not approved yet.
+Phase 4D Round 1 (2026-10-31):
+- The production container definition, the install guard and the A1/A2 lifecycle are tested and committed.
+- **The guarded baseline against the real server passes: 22 PASS, 0 FAIL, 2 NOT VERIFIED (C13, unknown paths, which depend on the API filter, and C18, the ripgrep download path, which depends on a runtime image).**
 
-The OpenCode adapter itself is still **untested** and not committed, and nothing calls OpenCode yet. Phase 3 is verified in real containers.
+The OpenCode adapter itself is not committed, and nothing calls OpenCode yet. Phase 3 is verified in real containers.
 
 ## Phase tracker
 
@@ -18,7 +16,7 @@ The OpenCode adapter itself is still **untested** and not committed, and nothing
 | 1 | Backend foundation | ✅ Done (2026-10-29) | Python 3.12.9 at `D:\python.exe` |
 | 2 | GPT orchestrator | ✅ Done (2026-10-29), verified with FakeLLM; first live GPT call verified (analysis accepted, 1 call, 919 tokens) | OpenAI API key (user) for live use |
 | 3 | Docker sandbox | 🟡 Isolation controls verified in real containers (2026-10-30); install proxy and orphan-sweep test on a real container still open | Docker Desktop running, data on D:, `python:3.12-alpine` present |
-| 4 | OpenCode integration | 🟡 Foundation tested and committed (2026-10-30); official binary verified; real-server baseline passes 20/0/1 (4C); adapter untested; A1/A2 open; not wired into runs | Precedence run (approval), A1/A2 fixes, API filter, model gateway, approval for live use |
+| 4 | OpenCode integration | 🟡 Foundation committed; binary verified; precedence verified; Phase 4D Stages 1–4 committed (2026-10-31): production container definition, install guard, A1/A2 lifecycle. Guarded baseline 22 PASS, 0 FAIL, 2 NOT VERIFIED. Adapter not committed; not wired into runs | Stage 5 (adapter reads `GET /agent`), API filter, model gateway, launcher, runtime image with ripgrep, approval for live use |
 | 5 | Verification-guided development | ⏳ Not started | — |
 | 6 | Failure classification and recovery | ⏳ Not started | — |
 | 7 | Adaptive tool selection | ⏳ Not started | — |
@@ -681,3 +679,39 @@ No change was made to the adapter, the policy module or the contract module.
 - C13 (unknown paths) is not verified, and waits for the API filter
 
 **Commit:** this round's tooling, tests and docs were committed after approval. The adapter and the egress line are not included.
+
+### Phase 4D Round 1: configuration hardening and critical recovery fixes (2026-10-31)
+
+**Scope: Stages 1–4 only.** Committed after approval, without the adapter, its test file and the `127.0.0.1:4096` egress line. No prompt, model call, paid API, image build, download or network change was made. The API filter, model gateway and launcher are not built, and `generate_code` is not registered.
+
+**Stage 1, production container** (`coding/opencode_container.py`).
+- One definition with no switch to weaken it. `production_environment()` takes no argument and refuses to return without `OPENCODE_DISABLE_PROJECT_CONFIG=1`.
+- `ProductionContainer` has no field for variables, mounts, ports or networks.
+- The precedence experiment stays in `opencode_check.py`, which no application module imports. A test enforces that.
+- OpenCode sees a private copy of the project. The real workspaces, the repository, the home folder and the checkpoints are refused as mount sources.
+- `deployment_problems` confirms from `docker inspect` that the definition was applied, with an exact allowlist of environment names.
+
+**Stage 2, installation paths** (`INSTALL_PATHS`). Read from the pinned binary as bytes, never by running it.
+- The guard is now part of every baseline. C16 also fails on a logged attempt or a `~/.opencode` folder, and says it is an observation, not proof.
+- New: C17 reads each model's SDK package from `GET /provider`, and `config_problems` refuses any `npm` override and `skills.urls`.
+- **New finding: ripgrep.** With no `rg` on PATH, OpenCode downloads it from github.com on the first use of the grep or glob tool, both of which DevPilot allows. In the check image only the missing network stops that, so the attempt is not prevented. C18 stays NOT VERIFIED and the production builder refuses any image without `rg`. No runtime image is approved yet, so production cannot start. This is deliberate.
+
+**Stages 3 and 4, A1 and A2** (`coding/session_control.py`, `coding/attempt_store.py`, table `coding_attempts`).
+- Lifecycle: `PREPARED → SUBMITTED → RUNNING or AMBIGUOUS → ABORT_REQUESTED → QUIESCENCE_CHECK → SAFE_TO_RESTORE or QUARANTINED`.
+- A prompt is sent at most once. Only a 204 counts as accepted.
+- **Decision: a restore always needs confirmed container termination.** Session and workspace are watched and recorded, but observation alone never permits it. A test shows a delayed prompt fooling the watch.
+- Logical cancellation, confirmed termination and verified restoration are separate recorded facts.
+- Each phase is saved before its step. `recover` finishes any unresolved phase after a crash. A quarantined attempt has no way out and holds its project.
+- The adapter now uses this lifecycle (uncommitted, A1 and A2 only). It still refuses every task until Stage 5, because it does not read `GET /agent` yet.
+
+**Tests of the commit alone, run on an export of the staged files:** 1051 passed, 10 skipped, 0 failed, 97% coverage. With the held-back adapter and its 19 wiring tests: 1070 passed, 93% coverage, the adapter at 59%. A mutation check broke the safety logic in 31 ways in a throwaway copy, and the tests caught all 31. A simulation of 1500 interleavings found no restore with a writer active, given a truthful stop.
+
+**Guarded baseline** (one run, approved): 22 PASS, 0 FAIL, 2 NOT VERIFIED of 24, in 11.8 s. Not verified: C13 (waits for the API filter) and C18 (no `rg` in the check image). `docker inspect` confirmed the hardening, and the container and run folder were removed. The image is unchanged. The probe gained one read-only `GET /provider` and a check for `rg`. Evidence: `D:\DevPilotCache\opencode-check\reports\20261030T201709Z-baseline*`.
+
+**Static checks:** 0 secret-pattern hits, no network or process imports in the new modules, no `anthropic` import. `ruff` and `mypy` are not installed, so they were not run.
+
+**Open:**
+- Stage 10 must wire `recover` into backend startup. Nothing calls it yet.
+- The guarantee rests on `terminate()` telling the truth: a stop that says "gone" while a quiet writer survives cannot be detected. Stage 9 must confirm with an independent `docker inspect`.
+- The adapter's HTTP layer is untested. Abort-to-idle time on a busy session and session-level rule precedence are unmeasured.
+- No code clears a quarantine yet. It needs a person.

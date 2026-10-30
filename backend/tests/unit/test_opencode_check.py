@@ -214,7 +214,7 @@ def _inspect(c: CheckContainer) -> dict[str, Any]:
         },
         "Config": {
             "User": CHECK_USER,
-            "Env": [f"{PASSWORD_ENV}=s3cret-value", "PATH=/usr/local/bin", "GPG_KEY=7169605F", "HOME=/tmp/home"],
+            "Env": [f"{PASSWORD_ENV}=s3cret-value", "PATH=/usr/local/bin", "GPG_KEY=7169605F", *(f"{n}={v}" for n, v in c.environment())],
         },
         "Mounts": [
             {"Type": "bind", "Source": str(host), "Destination": target, "RW": not ro}
@@ -247,6 +247,8 @@ def test_an_inspect_matching_the_requirements_passes(tmp_path: Path) -> None:
         (lambda i: i["Mounts"].pop(), "missing"),
         (lambda i: i["Config"]["Env"].append("OPENAI_API_KEY=sk-x"), "secret-like"),
         (lambda i: i["Config"].update(Env=["PATH=/bin"]), "password variable is missing"),
+        (lambda i: i["Config"]["Env"].append("OPENCODE_CONFIG=/workspace/x.json"), "unexpected environment variables"),
+        (lambda i: i["Config"]["Env"].remove("OPENCODE_DISABLE_PROJECT_CONFIG=1"), "OPENCODE_DISABLE_PROJECT_CONFIG is missing"),
     ],
 )
 def test_each_isolation_deviation_is_reported(tmp_path: Path, change: Any, reason: str) -> None:
@@ -347,7 +349,9 @@ def _good_report() -> dict[str, Any]:
         "doc": _ok(_spec()),
         "config": _ok(_managed()),
         "agents": _ok(opencode_agents(_managed())),
+        "providers": _ok(_providers()),
         "tool_ids": _ok(list(OPENCODE_1_19_5_TOOLS)),
+        "ripgrep": {"on_path": "/usr/bin/rg", "cached": False},
         "session_create_with_rules": _ok({"id": "ses_abc", "permission": session_rules()}),
         "session_get": _ok({"id": "ses_abc"}),
         "session_status": _ok({}),
@@ -359,6 +363,11 @@ def _good_report() -> dict[str, Any]:
         "unknown_path": {"status": 404, "headers": {}, "text": "Not Found"},
         "filesystem": _filesystem(),
     }  # fmt: skip
+
+
+def _providers(package: str = "@ai-sdk/openai", provider: str = "openai") -> dict[str, Any]:
+    model = {"id": "m", "providerID": provider, "api": {"id": "m", "url": "http://x", "npm": package}}
+    return {"all": [{"id": provider, "name": provider, "models": {"m": model}}], "default": {}, "connected": []}
 
 
 def _filesystem(*extra: str) -> dict[str, Any]:
@@ -544,6 +553,70 @@ def test_a_missing_or_truncated_listing_leaves_c16_not_verified() -> None:
     assert _analyze(report)["C16"].status == UNKNOWN
 
 
+def test_c16_says_it_is_an_observation_and_not_a_proof() -> None:
+    check = _analyze(_good_report())["C16"]
+    assert check.verdict == "PASS" and "This is what was observed" in check.detail and "prevents an attempt" in check.detail
+
+
+@pytest.mark.parametrize("line", ["background dependency install failed", "downloading ripgrep"])
+def test_a_logged_attempt_fails_c16_even_with_nothing_on_disk(line: str) -> None:
+    check = _analyze(_good_report(), server_log=f"timestamp=x level=WARN message={line}\n")["C16"]
+    assert check.status == FAILED and "install attempt" in check.detail
+
+
+def test_a_home_config_folder_fails_c16() -> None:
+    report = _good_report()
+    report["filesystem"] = _filesystem(".opencode/agent/x.md")
+    check = _analyze(report)["C16"]
+    assert check.status == FAILED and "/tmp/home/.opencode" in check.detail
+
+
+def test_only_bundled_provider_packages_pass_c17() -> None:
+    check = _analyze(_good_report())["C17"]
+    assert check.status == VERIFIED and "@ai-sdk/openai" in check.detail and "no model was called" in check.detail
+    report = _good_report()
+    report["providers"] = _ok(_providers(package="some-npm-provider"))
+    check = _analyze(report)["C17"]
+    assert check.status == FAILED and "some-npm-provider" in check.detail
+    report["providers"] = _ok(_providers(provider="anthropic"))
+    check = _analyze(report)["C17"]
+    assert check.status == FAILED and "anthropic" in check.detail
+
+
+def test_a_provider_list_that_says_nothing_leaves_c17_not_verified() -> None:
+    report = _good_report()
+    for broken in ({"status": 500, "headers": {}, "text": "boom"}, _ok({"all": []}), _ok({"all": "x"}), None):
+        report["providers"] = broken
+        assert _analyze(report)["C17"].status == UNKNOWN
+
+
+def test_ripgrep_present_passes_c18_and_absent_stays_not_verified() -> None:
+    assert _analyze(_good_report())["C18"].status == VERIFIED
+    report = _good_report()
+    report["ripgrep"] = {"on_path": None, "cached": True}
+    assert _analyze(report)["C18"].status == VERIFIED
+    report["ripgrep"] = {"on_path": None, "cached": False}
+    check = _analyze(report)["C18"]
+    assert check.verdict == "NOT VERIFIED"
+    assert "the artifact is prevented and the attempt is not" in check.detail
+    del report["ripgrep"]
+    assert _analyze(report)["C18"].status == UNKNOWN
+
+
+def test_a_logged_ripgrep_download_fails_c18() -> None:
+    assert _analyze(_good_report(), server_log="message=downloading ripgrep url=x")["C18"].status == FAILED
+
+
+def test_the_baseline_always_runs_with_the_install_guard(runner: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(runner, "_preflight", lambda **_: (tmp_path, "sha"))
+    monkeypatch.setattr(runner, "_sweep", lambda: [])
+    monkeypatch.setattr(runner, "one_run", lambda *a, **k: calls.append({"args": a, **k}) or {})
+    monkeypatch.setattr(runner, "finish_baseline", lambda *a, **k: {"passed": True})
+    assert runner.run("baseline", tmp_exec=False) == 0
+    assert calls[0]["guard"] is True and calls[0]["project_config_off"] is True
+
+
 def test_an_event_stream_without_server_connected_is_unknown() -> None:
     report = _good_report()
     report["event"]["raw_b64"] = base64.b64encode(b": heartbeat\n\n").decode()
@@ -674,6 +747,7 @@ def test_the_probe_allows_no_prompt_command_or_configuration_change(probe: Modul
     risky = [p for _, p in allowed if p.startswith(("/mcp", "/tui", "/pty", "/instance", "/auth", "/config/"))]
     assert risky == []
     assert [p for _, p in allowed if p.startswith("/experimental")] == ["/experimental/tool/ids"]  # one read-only GET
+    assert [(m, p) for m, p in allowed if "provider" in p] == [("GET", "/provider")]  # no provider auth or OAuth call
 
 
 def test_the_probe_refuses_anything_outside_its_allowlist(probe: ModuleType) -> None:

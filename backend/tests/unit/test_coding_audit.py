@@ -220,6 +220,26 @@ def test_restore_undoes_additions_changes_deletions_and_new_folders(root: Path, 
     assert (root / "pkg").is_dir()  # folders that existed before stay
 
 
+def test_a_restored_workspace_matches_its_checkpoint_and_any_difference_is_named(root: Path, tmp_path: Path) -> None:
+    checkpoint = Checkpoint.create(tmp_path / "cp", "run1", "call_abc", root, take_snapshot(root))
+    assert checkpoint.differences(root) == []
+
+    (root / "calculator.py").write_text("broken", encoding="utf-8")
+    (root / "README.md").unlink()
+    (root / "extra.py").write_text("x", encoding="utf-8")
+    assert checkpoint.differences(root) == ["README.md: missing", "extra.py: not in the checkpoint", "calculator.py: different content"]
+
+    checkpoint.restore(root)
+    assert checkpoint.differences(root) == []
+
+
+def test_the_comparison_is_by_content_so_a_touched_file_still_matches(root: Path, tmp_path: Path) -> None:
+    checkpoint = Checkpoint.create(tmp_path / "cp", "run1", "call_abc", root, take_snapshot(root))
+    target = root / "calculator.py"
+    target.write_bytes(target.read_bytes())
+    assert checkpoint.differences(root) == []
+
+
 def test_restore_removes_a_created_symlink_but_not_its_target(root: Path, tmp_path: Path) -> None:
     target = tmp_path / "keep.txt"
     target.write_text("keep\n", encoding="utf-8")

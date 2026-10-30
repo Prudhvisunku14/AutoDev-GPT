@@ -282,7 +282,7 @@ These are findings only. The adapter file was not changed in this stage.
 
 | Priority | Recommendation |
 |---|---|
-| **P0** | Fix A1 and A2 (an ambiguous prompt, an unconfirmed abort) before any live coding task. |
+| **P0** | Fix A1 and A2 (an ambiguous prompt, an unconfirmed abort) before any live coding task. **Done in Phase 4D Round 1;** the adapter's use of it is not committed yet. |
 | **P0** | Put an API filter in front of OpenCode that forwards only the operations the adapter needs. It blocks the command, config, auth and MCP endpoints even for a caller with the password. |
 | **P0** | Run the real-server contract check above, which is the adapter's test route for now. Then confirm `/doc`, the session-status semantics and the time from abort to idle. |
 | **P0** | Run one container and one internal network per active project, and stop it when the run pauses or ends. |
@@ -461,7 +461,7 @@ The script never retries with weaker settings. Each change below needs approval.
 | Reports (kept) | Probably under 2 MB per run (`/doc` and config JSON); unknown until a run | `D:\DevPilotCache\opencode-check\reports` |
 | `docker save` export used for the library check | 18.7 MB, deleted | `D:\DevPilotCache\temp` |
 
-## A1 and A2: fix and regression-test plan (prepared, not applied)
+## A1 and A2: fix and regression-test plan (applied in Phase 4D Round 1; see the end of this file for what changed)
 
 **Approach.** Move session stopping out of the HTTP code into a small module that DevPilot tests through a `SessionControl` Protocol:
 - operations: `statuses()`, `abort(id)`, `messages(id)`
@@ -868,3 +868,60 @@ No coding prompt was sent and no model was called in either run. The containers 
 3. **Use the install guard in the deployment:** a read-only global config folder with `.gitignore`.
 4. **The API filter must force `agent: "build"`** on `prompt_async` and refuse any other agent.
 5. **Not verified:** whether the per-session rule list DevPilot sends is applied after the agent's rules when a tool runs. It would neutralise a reordering at prompt time. Checking it needs a prompt, or more reading of the binary.
+
+---
+
+# Phase 4D Round 1: what was built (2026-10-31)
+
+Stages 1–4 only. Committed, except the adapter's use of the lifecycle. Everything below is tested offline. The items marked as binary-derived were read from the pinned 1.19.5 binary as bytes, never by running it.
+
+## Changes from the plan above
+
+| Plan | Built | Why |
+|---|---|---|
+| Restore when `settle` confirms quiet; stop the container otherwise | **A restore always needs confirmed termination.** Observation is recorded but never permits one. | `/session/status` lists only working sessions, so a prompt the server has not started looks idle. A test shows it fooling the watch. |
+| `messageID` derived from `(run_id, call_id)` | A fresh ID in the server's own shape, saved before the send | Saving it gives the same crash recovery. The server orders messages by time and then ID, so the shape is kept. |
+| A 2xx means accepted | **Only 204 is accepted** | Unknown paths on this server answer 200 with the web page (C13) |
+| `coding_tasks` row | `coding_attempts` table, one row per attempt | Each phase is saved before its step |
+| The project workspace is mounted | **A private copy is mounted.** Real workspaces are refused. | Required by Stage 1. The copy step arrives with the launcher. |
+
+## The lifecycle
+
+```
+PREPARED -> SUBMITTED -> RUNNING or AMBIGUOUS -> ABORT_REQUESTED -> QUIESCENCE_CHECK
+         -> SAFE_TO_RESTORE or QUARANTINED
+```
+
+Also: `ABANDONED` (nothing was sent), `REJECTED` (refused and nothing running), `FINISHED`, `KEPT` and `RESTORED`. `session_control._NEXT` is the complete list of moves.
+
+| Fact | Means | Recorded as |
+|---|---|---|
+| Logical cancellation | The server acknowledged an abort. Writes may continue. | `abort_acknowledged` |
+| Observed quiet | The session and workspace looked still. Evidence only. | `observed_quiet` |
+| Confirmed termination | The container is confirmed gone | `process_terminated` |
+| Verified restoration | The workspace equals the checkpoint, by content | `restore_verified` |
+
+Every stop takes the same path, whatever caused it: abort (at most 3 tries), watch, terminate, then confirm the workspace is still. Without confirmed termination the attempt is QUARANTINED. Nothing leaves that state by itself, and the project refuses new attempts until a person clears it.
+
+## Installation paths
+
+| Path | Trigger | What is known | Evidence |
+|---|---|---|---|
+| Global config folder (`Npm.install`) | Server start | **Attempt prevented:** a read-only folder returns before arborist runs | Observed, guarded baseline (C16) |
+| Project `.opencode/` | Server start, if it exists | **Attempt prevented:** the flag removes it from `ConfigPaths.directories`; a work copy holding it is refused | Observed, precedence run B |
+| `~/.opencode` | Server start, if it exists | **Attempt prevented while absent:** fresh tmpfs, `external_directory` denied, C16 fails if it appears | Observed absent |
+| Provider SDK (`Npm.add`) | First use of an unbundled SDK | **Attempt prevented:** `@ai-sdk/openai` is in the bundled table, checked first. `npm` overrides are refused. All 83 listed models use it (C17). | Binary; the load itself is **not exercised** |
+| Plugin package (`Npm.add`) | A `plugin` entry | **Attempt prevented:** `plugin: []` (C8), `OPENCODE_PURE=1`, `OPENCODE_DISABLE_DEFAULT_PLUGINS=1` | Binary |
+| **Ripgrep download** | First use of the grep or glob tool without `rg` | **Artifact prevented only.** The attempt happens and fails for lack of a network. The production builder refuses images without `rg`. | Binary. **Open:** needs a runtime image (Stage 9). |
+| LSP, model catalog, self-update, skills URLs, remote config | Various | **Attempt prevented** by configuration and flags | Binary |
+
+C16 passing means no artifact and no logged attempt were seen. That is an observation: the install path logs only when it fails. What prevents an attempt is the guard.
+
+Environment variables that would reconfigure OpenCode (`OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, `OPENCODE_CONFIG_CONTENT`, `OPENCODE_PERMISSION`, `OPENCODE_AUTH_CONTENT`, `OPENCODE_MODELS_URL`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `BUN_BE_BUN`) are refused by the exact allowlist in `environment_problems`.
+
+## Residual risks
+
+1. **The stop must tell the truth.** A stop that reports "gone" while a quiet writer survives cannot be detected: a writer that wakes after the last reading is invisible. Stage 9 must confirm with an independent `docker inspect`, not the exit code of `docker rm`.
+2. **`recover` is not wired in.** Stage 10 must call it at backend startup.
+3. **Every failed attempt costs a container.** Termination is required even when everything looks quiet. The cost is about 5 s per restart, accepted until a live run measures abort-to-idle.
+4. **Not measured:** abort-to-idle time on a busy session, session-level rule precedence, and the adapter's HTTP layer.

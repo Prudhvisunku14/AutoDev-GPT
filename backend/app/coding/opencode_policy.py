@@ -88,6 +88,12 @@ _MUST_ALLOW: dict[str, tuple[str, ...]] = {
 }
 _ACTIONS = frozenset({"allow", "ask", "deny"})
 
+# The value of `apiKey`: OpenCode needs one to start, and DevPilot's model gateway ignores it.
+GATEWAY_KEY_PLACEHOLDER = "devpilot-model-gateway"
+# SDK packages the 1.19.5 binary bundles for the openai provider. Any other package name makes OpenCode
+# install it from npm the first time the model is used (Npm.add, read from the binary).
+BUNDLED_PROVIDER_PACKAGES = frozenset({"@ai-sdk/openai"})
+
 Rule = tuple[str, str, str]  # (permission, pattern, action)
 
 
@@ -127,7 +133,7 @@ def managed_config(*, model: str, gateway_base_url: str) -> dict[str, Any]:
         "model": model,
         "small_model": model,
         "enabled_providers": ["openai"],
-        "provider": {"openai": {"options": {"baseURL": gateway_base_url, "apiKey": "devpilot-model-gateway"}}},
+        "provider": {"openai": {"options": {"baseURL": gateway_base_url, "apiKey": GATEWAY_KEY_PLACEHOLDER}}},
         "autoupdate": False,
         "share": "disabled",
         "lsp": False,
@@ -199,7 +205,33 @@ def config_problems(config: Any) -> list[str]:
     providers = config.get("enabled_providers")
     if not isinstance(providers, list) or not providers or any(p != "openai" for p in providers):
         problems.append('enabled_providers must be ["openai"]')
+    return problems + install_source_problems(config)
+
+
+def install_source_problems(config: dict[str, Any]) -> list[str]:
+    """Configuration that would make OpenCode fetch something: a provider package or skills from a URL."""
+    problems: list[str] = []
+    providers = config.get("provider") or {}
+    if not isinstance(providers, dict):
+        return ["the provider configuration is not an object"]
+    extra = sorted(str(name) for name in providers if name != "openai")
+    if extra:
+        problems.append(f"providers other than openai are configured: {', '.join(extra)}")
+    packages = sorted(str(p) for p in _package_names(providers) if p not in BUNDLED_PROVIDER_PACKAGES)
+    if packages:
+        problems.append(f"provider packages OpenCode would install from npm: {', '.join(packages)}")
+    skills = config.get("skills")
+    if isinstance(skills, dict) and skills.get("urls"):
+        problems.append("skills.urls must be empty: OpenCode downloads skills from those addresses")
     return problems
+
+
+def _package_names(value: Any) -> list[Any]:
+    """Every `npm` value at any depth: a provider, one of its models, or a model's own provider block."""
+    if isinstance(value, dict):
+        found = [value["npm"]] if "npm" in value else []
+        return found + [name for item in value.values() for name in _package_names(item)]
+    return [name for item in value for name in _package_names(item)] if isinstance(value, list) else []
 
 
 def _declared(raw: Any, *, scope: str) -> list[str]:

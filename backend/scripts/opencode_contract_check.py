@@ -11,8 +11,9 @@ precedence files. It starts nothing and downloads nothing.
     & $env:DEVPILOT_PYTHON -I backend\\scripts\\opencode_contract_check.py --cleanup       # removes leftovers of this check only
 
 A run: one container per server start, no network, no published port, read-only root, no
-capabilities, user 65534, 1 GB memory, 1 CPU, 256 PIDs, a 256 MB tmpfs, and four mounts (the
-verified binary, DevPilot's managed config, the probe, a fresh empty workspace). A fresh random
+capabilities, user 65534, 1 GB memory, 1 CPU, 256 PIDs, a 256 MB tmpfs, and five mounts (the
+verified binary, DevPilot's managed config, the install guard, the probe, a fresh empty workspace;
+the precedence runs add the workspace's .opencode/ folder, read-only). A fresh random
 password is generated per start and passed to docker by name only. The probe runs inside the
 container through `docker exec` against 127.0.0.1:4096; nothing is exposed to the host. The
 container and the run folder are removed on every path; the redacted report is kept.
@@ -312,6 +313,7 @@ def _analysis(record: dict[str, Any]) -> list[Check]:
             isolation=record.get("isolation_problems") or [],
             workspace_changes=record.get("workspace_changes") or [],
             expected_version=CONTRACT_VERSION,
+            server_log=record.get("server_log_tail") or "",
         )
     return [*checks, cleanup_check(record.get("cleanup") or {})]
 
@@ -358,11 +360,11 @@ def dry_run() -> int:
     binary_dir, _ = ready
     sample = RUNS / "<stamp>-<label>-<random>"
     for label, off, files in (
-        ("Run 1, baseline (empty workspace)", True, {}),
+        ("Run 1, baseline (empty workspace), install guard", True, {}),
         ("Run 2a, precedence: hostile project config, project config allowed, install guard", False, hostile_workspace()),
         ("Run 2b, precedence: same files, OPENCODE_DISABLE_PROJECT_CONFIG=1, install guard", True, hostile_workspace()),
     ):
-        c = _container(sample, binary_dir, project_config_off=off, tmp_exec=False, guard=bool(files), project_opencode=bool(files))
+        c = _container(sample, binary_dir, project_config_off=off, tmp_exec=False, guard=True, project_opencode=bool(files))
         print(f"\n== {label}\ndocker run")
         for line in _pairs(build_run_args(c)[1:]):
             print(f"  {line}")
@@ -386,7 +388,7 @@ def run(mode: str, *, tmp_exec: bool) -> int:
     binary_dir, binary_sha = ready
     _sweep()
     if mode == "baseline":
-        record = one_run("baseline", binary_dir, {}, project_config_off=True, tmp_exec=tmp_exec)
+        record = one_run("baseline", binary_dir, {}, project_config_off=True, tmp_exec=tmp_exec, guard=True)
         summary = finish_baseline(record, binary_sha, stream=sys.stdout)
         return 0 if summary["passed"] else 2
 

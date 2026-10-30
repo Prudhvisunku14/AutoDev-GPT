@@ -1,5 +1,10 @@
 """The real-server contract check (Phase 4C): the check container and the analysis of its report.
 
+Tooling, not the application: only backend/scripts/opencode_contract_check.py imports this module.
+It is the one place allowed to run OpenCode with project configuration enabled, because the
+precedence experiment needs that. The production definition is opencode_container.py, which this
+module shares its hardening with and which has no such setting.
+
 Nothing here talks to a server or starts a container.
 - `build_run_args` gives the docker arguments for one check container: the official binary
   mounted read-only, no network, no published port, read-only root, no capabilities, non-root.
@@ -24,6 +29,28 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
 
+from app.coding.opencode_container import (
+    BINARY_TARGET,
+    CONFIG_TARGET,
+    GLOBAL_CONFIG_TARGET,
+    GUARD_CONFIG_HOME,
+    INSTALL_ARTIFACTS,
+    MEMORY_BYTES,
+    NANO_CPUS,
+    OPENCODE_GITIGNORE,
+    PASSWORD_ENV,
+    PIDS_LIMIT,
+    PROJECT_CONFIG_OFF,
+    RUN_USER,
+    SERVER_ARGV,
+    SERVER_ENV,
+    TMPFS_SIZE,
+    WORKSPACE_TARGET,
+    environment_problems,
+    host_folder_problems,
+    inspect_problems,
+    isolation_flags,
+)
 from app.coding.opencode_contract import (
     ALLOWED_TOOLS,
     TOOL_PERMISSIONS,
@@ -32,11 +59,12 @@ from app.coding.opencode_contract import (
     check_health,
     check_spec,
     operations,
+    prompt_fields,
     sensitive_operations,
     spec_from_doc,
-    template,
 )
 from app.coding.opencode_policy import (
+    BUNDLED_PROVIDER_PACKAGES,
     PROMPTED_AGENT,
     agent_rule_problems,
     config_problems,
@@ -56,49 +84,12 @@ CHECK_IMAGE_ID = "sha256:c380fdb5d0cb5cd9a59322029b665bd9c484d7bf861e0d9842893ec
 # The python:3.12-alpine image already on D: (SECURITY §11). The check image adds only libstdc++ and libgcc.
 BASE_IMAGE = "python:3.12-alpine"
 BASE_IMAGE_ID = "sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8"
-CHECK_USER = "65534:65534"
-MEMORY = "1g"
-MEMORY_BYTES = 1024**3
-NANO_CPUS = 1_000_000_000
-PIDS_LIMIT = 256
-TMPFS_SIZE = "256m"
-PASSWORD_ENV = "OPENCODE_SERVER_PASSWORD"
-BINARY_TARGET = "/opt/opencode"
-CONFIG_TARGET = "/etc/opencode"
+CHECK_USER = RUN_USER
 CHECKS_TARGET = "/checks"
-WORKSPACE_TARGET = "/workspace"
-SERVER_ARGV = (f"{BINARY_TARGET}/opencode", "serve", "--hostname", "127.0.0.1", "--port", "4096", "--print-logs")
-# Fixed and secret-free. The OPENCODE_* flags come from the CLI docs, which may describe a newer
-# release; a flag 1.19.5 does not know is ignored, and the probe observes the effect instead.
-SERVER_ENV: tuple[tuple[str, str], ...] = (
-    ("HOME", "/tmp/home"),
-    ("XDG_CONFIG_HOME", "/tmp/home/.config"),
-    ("XDG_DATA_HOME", "/tmp/home/.local/share"),
-    ("XDG_CACHE_HOME", "/tmp/home/.cache"),
-    ("XDG_STATE_HOME", "/tmp/home/.local/state"),
-    ("TMPDIR", "/tmp"),
-    ("BUN_RUNTIME_TRANSPILER_CACHE_PATH", "0"),
-    ("OPENCODE_DISABLE_AUTOUPDATE", "1"),
-    ("OPENCODE_DISABLE_MODELS_FETCH", "1"),
-    ("OPENCODE_DISABLE_LSP_DOWNLOAD", "1"),
-    ("OPENCODE_DISABLE_DEFAULT_PLUGINS", "1"),
-    ("OPENCODE_PURE", "1"),
-    ("OPENCODE_DISABLE_CLAUDE_CODE", "1"),
-    ("OPENCODE_DISABLE_EXTERNAL_SKILLS", "1"),
-)
-PROJECT_CONFIG_OFF = ("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
-# The install guard (read from the 1.19.5 binary). For every config folder OpenCode first writes a
-# .gitignore unless one exists (Config.ensureGitignore), then starts an in-process npm install of
-# @opencode-ai/plugin unless the folder is not writable (Npm.install returns at once). A read-only
-# folder that already holds that .gitignore therefore gets neither a write nor an install. The global
-# config folder moves out of /tmp/home, because a mount inside it would make /tmp/home root-owned.
-GUARD_CONFIG_HOME = "/opt/devpilot/xdg-config"
-GLOBAL_CONFIG_TARGET = f"{GUARD_CONFIG_HOME}/opencode"
 PROJECT_OPENCODE_TARGET = "/workspace/.opencode"
-OPENCODE_GITIGNORE = "node_modules\npackage.json\npackage-lock.json\nbun.lock\n.gitignore\n"
-INSTALL_ARTIFACTS = frozenset({"node_modules", "package.json", "package-lock.json", "bun.lock", "bun.lockb"})
-_UNSAFE_MOUNT_CHARS = frozenset(',"\'\r\n=')
-_SECRET_NAME_PARTS = ("OPENAI", "ANTHROPIC", "API_KEY", "TOKEN", "SECRET", "AWS_", "GITHUB", "GOOGLE", "DEVPILOT")
+# Log lines from the binary's install and download code. Seeing one proves an attempt was made.
+# Not seeing one proves little: the install path logs only when it fails.
+INSTALL_LOG_LINES = ("dependency install failed", "downloading ripgrep")
 
 # The inert configuration-precedence workspace (run 2). Text only: no plugin, MCP server, command
 # or hook. Keys named first fix their position in OpenCode's merged object, so the managed values
@@ -224,6 +215,7 @@ class CheckContainer:
 
     def environment(self) -> list[tuple[str, str]]:
         env = [(n, GUARD_CONFIG_HOME if n == "XDG_CONFIG_HOME" and self.guard_config_dir else v) for n, v in SERVER_ENV]
+        # Only the precedence experiment turns this off. The production definition has no such setting.
         return env + ([PROJECT_CONFIG_OFF] if self.project_config_off else [])
 
 
@@ -231,20 +223,15 @@ def mount_problems(c: CheckContainer, *, check_root: Path, binary_dir: Path, for
     """Why these host folders must not be mounted. The check gets only fresh folders and the binary."""
     problems: list[str] = []
     root = check_root.resolve()
-    banned = [p.resolve() for p in forbidden]
+    banned = list(forbidden)
     sources = []
     for host, target, _ in c.mounts():
-        if any(ch in _UNSAFE_MOUNT_CHARS for ch in str(host)):
-            problems.append(f"{target}: the host path has characters that cannot be mounted safely")
-            continue
-        if not host.is_absolute() or host.is_symlink() or not host.is_dir():
-            problems.append(f"{target}: the host path is not an existing, absolute, non-link folder")
+        found = host_folder_problems(host, target, banned)
+        problems += found
+        if any("overlaps" not in p for p in found):
             continue
         resolved = host.resolve()
         sources.append(resolved)
-        for ban in banned:
-            if resolved == ban or ban in resolved.parents or resolved in ban.parents:
-                problems.append(f"{target}: {resolved} overlaps a protected folder ({ban})")
         if target == BINARY_TARGET:
             if resolved != binary_dir.resolve():
                 problems.append(f"{target}: only the verified binary's folder may be mounted here")
@@ -268,25 +255,16 @@ def build_run_args(c: CheckContainer) -> list[str]:
     mounts: list[str] = []
     for host, target, read_only in c.mounts():
         mounts += ["--mount", f"type=bind,source={host},target={target}" + (",readonly" if read_only else "")]
-    exec_flag = "exec" if c.tmp_exec else "noexec"
+    flags = isolation_flags()
+    if c.tmp_exec:
+        flags = [flag.replace("/tmp:rw,noexec,", "/tmp:rw,exec,") for flag in flags]
     return [
         "run",
         "--detach",
         "--name", c.name,
         "--pull", "never",
         "--label", f"{CHECK_LABEL}=true",
-        "--network", "none",
-        "--cap-drop", "ALL",
-        "--security-opt", "no-new-privileges",
-        "--read-only",
-        "--tmpfs", f"/tmp:rw,{exec_flag},nosuid,nodev,size={TMPFS_SIZE},mode=1777",
-        "--user", CHECK_USER,
-        "--memory", MEMORY,
-        "--memory-swap", MEMORY,
-        "--cpus", "1",
-        "--pids-limit", str(PIDS_LIMIT),
-        "--ulimit", "nofile=1024:1024",
-        "--init",
+        *flags,
         "--workdir", WORKSPACE_TARGET,
         *env,
         "--env", PASSWORD_ENV,
@@ -303,60 +281,9 @@ def build_exec_args(name: str, *, wait_seconds: int) -> list[str]:
 
 def isolation_problems(inspect: Mapping[str, Any], c: CheckContainer) -> list[str]:
     """Settings from `docker inspect` that differ from what the check requires."""
-    host = inspect.get("HostConfig") or {}
     config = inspect.get("Config") or {}
-    problems: list[str] = []
-    expect = {
-        "NetworkMode": "none",
-        "Privileged": False,
-        "ReadonlyRootfs": True,
-        "PublishAllPorts": False,
-        "Memory": MEMORY_BYTES,
-        "MemorySwap": MEMORY_BYTES,
-        "NanoCpus": NANO_CPUS,
-        "PidsLimit": PIDS_LIMIT,
-    }
-    for key, value in expect.items():
-        if host.get(key) != value:
-            problems.append(f"HostConfig.{key} is {host.get(key)!r}, expected {value!r}")
-    if "ALL" not in [str(cap).upper() for cap in host.get("CapDrop") or []] or host.get("CapAdd"):
-        problems.append("capabilities are not all dropped")
-    if not any("no-new-privileges" in str(opt) for opt in host.get("SecurityOpt") or []):
-        problems.append("no-new-privileges is not set")
-    if host.get("PortBindings"):
-        problems.append("a port is published")
-    for key in ("PidMode", "IpcMode", "UTSMode", "UsernsMode"):
-        if str(host.get(key) or "") == "host":
-            problems.append(f"HostConfig.{key} shares the host's namespace")
-    if host.get("Devices"):
-        problems.append("a device is mapped")
-    tmpfs = host.get("Tmpfs") or {}
-    if set(tmpfs) != {"/tmp"} or ("noexec" not in tmpfs.get("/tmp", "") and not c.tmp_exec):
-        problems.append(f"tmpfs is {tmpfs!r}, expected only /tmp with noexec")
-    if config.get("User") != CHECK_USER:
-        problems.append(f"the user is {config.get('User')!r}, expected {CHECK_USER}")
-    expected = {target: read_only for _, target, read_only in c.mounts()}
-    seen: dict[str, bool] = {}
-    for mount in inspect.get("Mounts") or []:
-        destination = str(mount.get("Destination"))
-        if "docker.sock" in str(mount.get("Source", "")) or "docker.sock" in destination:
-            problems.append("the Docker socket is mounted")
-        if mount.get("Type") != "bind" or destination not in expected:
-            problems.append(f"unexpected mount at {destination} ({mount.get('Type')})")
-            continue
-        seen[destination] = not mount.get("RW", True)
-    for destination, read_only in expected.items():
-        if destination not in seen:
-            problems.append(f"the mount at {destination} is missing")
-        elif seen[destination] != read_only:
-            problems.append(f"the mount at {destination} is {'read-only' if seen[destination] else 'writable'}")
-    names = [str(item).split("=", 1)[0] for item in config.get("Env") or []]
-    leaked = [n for n in names if n != PASSWORD_ENV and any(part in n.upper() for part in _SECRET_NAME_PARTS)]
-    if leaked:
-        problems.append(f"secret-like variables reached the container: {', '.join(sorted(leaked))}")
-    if PASSWORD_ENV not in names:
-        problems.append("the server password variable is missing, so the server would not require one")
-    return problems
+    problems = inspect_problems(inspect, mounts={target: read_only for _, target, read_only in c.mounts()}, tmp_exec=c.tmp_exec)
+    return problems + environment_problems(config.get("Env") or [], fixed=c.environment())
 
 
 def isolation_summary(inspect: Mapping[str, Any]) -> dict[str, Any]:
@@ -402,6 +329,7 @@ def analyze(
     isolation: list[str],
     workspace_changes: list[str],
     expected_version: str,
+    server_log: str = "",
 ) -> list[Check]:
     checks = [
         Check("C0", "Isolation applied (docker inspect)", FAILED if isolation else VERIFIED,
@@ -414,7 +342,7 @@ def analyze(
         detail = report.get("probe_error") or f"not healthy after {startup.get('seconds')} s: {startup.get('last')}"
         checks.append(Check("C1", "Server starts", FAILED, str(detail)))
         checks += [Check(i, t, UNKNOWN, "the server did not start") for i, t in _AFTER_STARTUP]
-        checks += [_workspace(workspace_changes), _installs(report.get("filesystem"))]
+        checks += [_workspace(workspace_changes), _installs(report.get("filesystem"), server_log)]
         return checks
 
     spec = _spec(report.get("doc"))
@@ -432,7 +360,9 @@ def analyze(
         _tools(report.get("tool_ids"), report.get("agents")),
         _unknown_path(report.get("unknown_path")),
         _workspace(workspace_changes),
-        _installs(report.get("filesystem")),
+        _installs(report.get("filesystem"), server_log),
+        _provider_packages(report.get("providers")),
+        _ripgrep(report.get("ripgrep"), server_log),
     ]
     return checks
 
@@ -450,6 +380,8 @@ _AFTER_STARTUP = (
     ("C11", "Operations the adapter assumes"),
     ("C12", "Tool inventory"),
     ("C13", "Unknown paths"),
+    ("C17", "Provider packages"),
+    ("C18", "Ripgrep download path"),
 )
 
 
@@ -676,21 +608,6 @@ def _operations(spec: dict[str, Any] | None, version: str) -> Check:
                  f"prompt body fields {fields}; client messageID accepted: {message_id}")  # fmt: skip
 
 
-def prompt_fields(spec: Mapping[str, Any]) -> list[str] | None:
-    """The property names of the prompt_async request body, following one $ref. None when not stated."""
-    for path, item in (spec.get("paths") or {}).items():
-        if not isinstance(item, Mapping) or template(str(path)) != "/session/{}/prompt_async":
-            continue
-        body = ((item.get("post") or {}).get("requestBody") or {}).get("content") or {}
-        schema = (body.get("application/json") or {}).get("schema")
-        if isinstance(schema, Mapping) and isinstance(schema.get("$ref"), str):
-            name = schema["$ref"].removeprefix("#/components/schemas/")
-            schema = ((spec.get("components") or {}).get("schemas") or {}).get(name)
-        properties = schema.get("properties") if isinstance(schema, Mapping) else None
-        return sorted(properties) if isinstance(properties, Mapping) else None
-    return None
-
-
 # A value each allowed tool's permission must allow for ordinary project work.
 _TOOL_SAMPLES = {"read": "workspace/calculator.py", "edit": "workspace/calculator.py", "glob": "**/*.py",
                  "grep": "def add", "todowrite": "*"}  # fmt: skip
@@ -754,9 +671,15 @@ def _workspace(changes: list[str]) -> Check:
     return Check("C14", title, VERIFIED, "no file in the workspace was created, changed or deleted")
 
 
-def _installs(filesystem: Any) -> Check:
-    """No dependency install left anything behind: the probe's read-only file listing, taken after the API calls."""
+def _installs(filesystem: Any, server_log: str = "") -> Check:
+    """Nothing was installed: the probe's read-only file listing, taken after the API calls, and the server log.
+
+    A pass means no artifact and no logged attempt were seen. That is an observation, not proof that no
+    attempt was made: what prevents the attempt is the guard, and INSTALL_PATHS records how that is known."""
     title = "No dependency installation"
+    logged = [line for line in INSTALL_LOG_LINES if line in server_log]
+    if logged:
+        return Check("C16", title, FAILED, "the server log shows an install attempt: " + ", ".join(logged))
     if not isinstance(filesystem, Mapping) or not filesystem:
         return Check("C16", title, UNKNOWN, "the probe recorded no file listing")
     found: list[str] = []
@@ -768,14 +691,54 @@ def _installs(filesystem: Any) -> Check:
             continue
         for entry in entries:
             path = str(entry.get("path", "")) if isinstance(entry, Mapping) else ""
-            if INSTALL_ARTIFACTS.intersection(path.split("/")):
+            parts = path.split("/")
+            if INSTALL_ARTIFACTS.intersection(parts) or (root == "/tmp/home" and parts[0] == ".opencode"):
                 found.append(f"{root}/{path}")
     if found:
-        return Check("C16", title, FAILED, "install artifacts present: " + ", ".join(found[:8]))
+        return Check("C16", title, FAILED, "install artifacts or an install folder present: " + ", ".join(found[:8]))
     if unreadable:
         return Check("C16", title, UNKNOWN, f"the listing is missing or truncated for {', '.join(unreadable)}")
     return Check("C16", title, VERIFIED,
-                 f"no node_modules, package.json, package-lock.json or bun.lock under {', '.join(sorted(filesystem))}")  # fmt: skip
+                 f"no node_modules, package.json, package-lock.json, bun.lock or ~/.opencode under {', '.join(sorted(filesystem))}, "
+                 "and no logged attempt. This is what was observed; the guard, not this listing, is what prevents an attempt.")  # fmt: skip
+
+
+def _provider_packages(record: Any) -> Check:
+    """Each model's SDK package, from GET /provider. A package outside the bundled table would be installed from npm."""
+    title = "Provider packages"
+    body = _json(record)
+    listed = body.get("all") if isinstance(body, Mapping) else None
+    if _status(record) != 200 or not isinstance(listed, list):
+        return Check("C17", title, UNKNOWN, f"GET /provider answered {_status(record)} without a provider list")
+    providers = [p for p in listed if isinstance(p, Mapping)]
+    others = sorted(str(p.get("id")) for p in providers if p.get("id") != "openai")
+    if others:
+        return Check("C17", title, FAILED, f"providers other than openai are available: {', '.join(others[:8])}")
+    models = [m for p in providers if isinstance(p.get("models"), Mapping) for m in p["models"].values() if isinstance(m, Mapping)]
+    if not models:
+        return Check("C17", title, UNKNOWN, "no model is listed for openai, so no package could be read")
+    packages = {str((m.get("api") or {}).get("npm")) if isinstance(m.get("api"), Mapping) else "unknown" for m in models}
+    unbundled = sorted(packages - BUNDLED_PROVIDER_PACKAGES)
+    if unbundled:
+        return Check("C17", title, FAILED, f"packages OpenCode would install from npm: {', '.join(unbundled)}")
+    return Check("C17", title, VERIFIED,
+                 f"{len(models)} openai models all use {', '.join(sorted(packages))}, which the binary bundles, so no package "
+                 "is needed. Read from GET /provider; no model was called, so the load itself was not exercised.")  # fmt: skip
+
+
+def _ripgrep(record: Any, server_log: str = "") -> Check:
+    """Whether the grep or glob tool would make OpenCode download ripgrep from github.com."""
+    title = "Ripgrep download path"
+    if "downloading ripgrep" in server_log:
+        return Check("C18", title, FAILED, "the server log shows OpenCode trying to download ripgrep")
+    if not isinstance(record, Mapping) or "on_path" not in record:
+        return Check("C18", title, UNKNOWN, "the probe recorded nothing about ripgrep")
+    if record.get("on_path") or record.get("cached"):
+        return Check("C18", title, VERIFIED, f"`rg` is present ({record.get('on_path') or 'cached'}), so nothing would be downloaded")
+    return Check("C18", title, UNKNOWN,
+                 "this image has no `rg`. The grep or glob tool would attempt the download; only the missing network stops "
+                 "it. So the artifact is prevented and the attempt is not. The production builder refuses any image without "
+                 "`rg`; no tool was invoked here.")  # fmt: skip
 
 
 # --- Configuration precedence (run 2) ------------------------------------------------------------

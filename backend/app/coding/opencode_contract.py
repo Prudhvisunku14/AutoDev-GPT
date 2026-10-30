@@ -182,6 +182,21 @@ def template(path: str) -> str:
     return re.sub(r"\{[^}]+\}", "{}", path).rstrip("/") or "/"
 
 
+def prompt_fields(spec: dict[str, Any]) -> list[str] | None:
+    """The property names of the prompt_async request body, following one $ref. None when not stated."""
+    for path, item in (spec.get("paths") or {}).items():
+        if not isinstance(item, dict) or template(str(path)) != "/session/{}/prompt_async":
+            continue
+        body = ((item.get("post") or {}).get("requestBody") or {}).get("content") or {}
+        schema = (body.get("application/json") or {}).get("schema")
+        if isinstance(schema, dict) and isinstance(schema.get("$ref"), str):
+            name = schema["$ref"].removeprefix("#/components/schemas/")
+            schema = ((spec.get("components") or {}).get("schemas") or {}).get(name)
+        properties = schema.get("properties") if isinstance(schema, dict) else None
+        return sorted(properties) if isinstance(properties, dict) else None
+    return None
+
+
 def tool_violation(tool: str, status: str) -> str | None:
     """A message when a tool outside the allowlist starts or finishes, otherwise None."""
     if status in ("running", "completed") and tool not in ALLOWED_TOOLS:

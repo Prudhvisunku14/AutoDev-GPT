@@ -168,6 +168,32 @@ def test_disabled_mcp_servers_are_accepted() -> None:
     assert config_problems(_with({"mcp": {"tool": {"type": "local", "enabled": False}}})) == []
 
 
+def _provider(**entry: Any) -> dict[str, Any]:
+    return {"provider": {"openai": {"options": {"baseURL": "http://gw.invalid/v1", "apiKey": "x"}, **entry}}}
+
+
+@pytest.mark.parametrize(
+    ("change", "expected"),
+    [
+        (_provider(npm="evil-provider"), "install from npm: evil-provider"),
+        (_provider(models={"m": {"provider": {"npm": "nested-provider"}}}), "install from npm: nested-provider"),
+        (_provider(models={"m": {"npm": "model-provider"}}), "install from npm: model-provider"),
+        ({"provider": {"local": {"options": {}}}}, "providers other than openai are configured: local"),
+        ({"provider": ["openai"]}, "not an object"),
+        ({"skills": {"urls": ["https://example.com/skills/"]}}, "skills.urls must be empty"),
+    ],
+)
+def test_configuration_that_would_install_or_fetch_something_is_refused(change: dict[str, Any], expected: str) -> None:
+    problems = config_problems(_with(change))
+    assert any(expected in p for p in problems), problems
+
+
+def test_the_bundled_openai_package_and_local_skill_paths_are_accepted() -> None:
+    assert config_problems(_with(_provider(npm="@ai-sdk/openai"))) == []
+    assert config_problems(_with({"skills": {"paths": ["skills"]}})) == []
+    assert config_problems(_with({"provider": None})) == []
+
+
 def test_a_declared_value_that_differs_from_the_managed_one_is_caught() -> None:
     config = _config()
     config["permission"]["bash"] = "allow"

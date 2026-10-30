@@ -208,6 +208,16 @@ class Checkpoint:
                 folder.rmdir()
         return touched
 
+    def differences(self, root: Path) -> list[str]:
+        """Where the workspace differs from this checkpoint. Empty means an exact match, by content."""
+        saved: dict[str, str] = json.loads((self._path / "manifest.json").read_text(encoding="utf-8"))["files"]
+        current = take_snapshot(root)
+        found = [f"{link}: a link" for link in current.links]
+        found += [f"{rel}: missing" for rel in sorted(saved.keys() - current.files.keys())]
+        found += [f"{rel}: not in the checkpoint" for rel in sorted(current.files.keys() - saved.keys())]
+        found += [f"{rel}: different content" for rel, state in current.files.items() if rel in saved and state.sha256 != saved[rel]]
+        return found
+
     def discard(self) -> None:
         shutil.rmtree(self._path, ignore_errors=True)
 

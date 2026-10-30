@@ -4,13 +4,13 @@ It sends a fixed list of requests to the OpenCode server on the container's own 
 (127.0.0.1:4096) and prints one JSON report of what it saw. It judges nothing: the host
 analyses the report with DevPilot's tested checks (backend/app/coding/opencode_check.py).
 
-Scope, enforced by ALLOWED: health, /doc, configuration, agents, tool ids, creating one empty
-session and reading it, its status and messages, aborting it while idle, the event stream, and
-one unknown path. It never sends a prompt or a command and never calls the shell, config-change,
+Scope, enforced by ALLOWED: health, /doc, configuration, agents, providers, tool ids, creating one
+empty session and reading it, its status and messages, aborting it while idle, the event stream,
+and one unknown path. It never sends a prompt or a command and never calls the shell, config-change,
 auth, MCP, TUI or PTY endpoints. It never follows links found in responses. At the end it lists
 file names (never contents) under LISTED_ROOTS, to show whether a dependency install left
-anything. Standard library only, run as `python3 -I`. The password comes from the container's
-environment and is never written to the report.
+anything, and records whether `rg` exists. Standard library only, run as `python3 -I`. The password
+comes from the container's environment and is never written to the report.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import http.client
 import json
 import os
 import re
+import shutil
 import socket
 import sys
 import time
@@ -43,6 +44,7 @@ SSE_SECONDS = 4.0
 LISTED_ROOTS = ("/tmp/home", "/workspace", "/opt/devpilot/xdg-config")
 LIST_MAX_ENTRIES = 400
 LIST_MAX_DEPTH = 6
+RIPGREP_CACHE = "/tmp/home/.cache/opencode/bin/rg"  # where OpenCode keeps the copy it downloads
 
 ALLOWED = frozenset(
     {
@@ -50,6 +52,7 @@ ALLOWED = frozenset(
         ("GET", "/doc"),
         ("GET", "/config"),
         ("GET", "/agent"),
+        ("GET", "/provider"),
         ("GET", "/experimental/tool/ids"),
         ("GET", "/session/status"),
         ("POST", "/session"),
@@ -235,6 +238,7 @@ def run(wait: float, report: dict[str, Any]) -> None:
     report["doc"] = call("GET", "/doc")
     report["config"] = call("GET", "/config", query=scoped)
     report["agents"] = call("GET", "/agent", query=scoped)
+    report["providers"] = call("GET", "/provider", query=scoped)
     report["tool_ids"] = call("GET", "/experimental/tool/ids", query=scoped)
     report["status_before"] = call("GET", "/session/status", query=scoped)
 
@@ -275,6 +279,7 @@ def main() -> int:
         report["filesystem"] = {root: listing(root) for root in LISTED_ROOTS}
     except OSError as exc:
         report["filesystem_error"] = f"{type(exc).__name__}: {exc}"
+    report["ripgrep"] = {"on_path": shutil.which("rg"), "cached": os.path.isfile(RIPGREP_CACHE)}
     sys.stdout.write(json.dumps(report))
     sys.stdout.flush()
     return code

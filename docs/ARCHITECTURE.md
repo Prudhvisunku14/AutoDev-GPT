@@ -231,7 +231,7 @@ Model IDs come only from configuration (`OPENAI_MODEL`, `OPENCODE_MODEL`).
 
 ## 6. Coding engine: OpenCode
 
-> **Status (2026-10-30):** the policy, the audit, the brief and the transaction-free tool path are built and tested. The official 1.19.5 binary is downloaded and verified on D:. The real-server baseline contract check passes (20 PASS, 0 FAIL, 1 NOT VERIFIED: unknown paths, which wait for the API filter). The effective policy is judged from the rules OpenCode enforces (`GET /agent`). The HTTP adapter is written but untested and uncommitted. The container launcher, the API filter, the model gateway and the `generate_code` tool are not built. [ARCHITECTURE_OPTIMIZATION.md](ARCHITECTURE_OPTIMIZATION.md) lists the open P0 items and the Phase 4C design.
+> **Status (2026-10-31):** the policy, the audit, the brief and the transaction-free tool path are built and tested. The official 1.19.5 binary is downloaded and verified on D:. The guarded real-server baseline passes (22 PASS, 0 FAIL, 2 NOT VERIFIED: unknown paths, which wait for the API filter, and the ripgrep download path). The effective policy is judged from the rules OpenCode enforces (`GET /agent`). The production container definition (`coding/opencode_container.py`) and the attempt lifecycle (`coding/session_control.py`) are built, tested and committed. The HTTP adapter uses that lifecycle, but it is not committed yet. The container launcher, the API filter, the model gateway and the `generate_code` tool are not built. [ARCHITECTURE_OPTIMIZATION.md](ARCHITECTURE_OPTIMIZATION.md) lists the open P0 items and the Phase 4C design.
 
 **Deployment (design, not built)**
 - **Binary.** The official `opencode-linux-x64-musl` binary, verified against its npm SHA-512 integrity and mounted read-only (`coding/opencode_artifact.py`). The runtime image is Alpine with `libstdc++` and `libgcc`.
@@ -240,7 +240,7 @@ Model IDs come only from configuration (`OPENAI_MODEL`, `OPENCODE_MODEL`).
   - the OpenCode server, on internal networks only
   - a model gateway that holds the key
 - **API filter.** It forwards an explicit allowlist of methods, paths, query keys and bodies. Everything else, including unknown paths, gets 403.
-- **Workspace.** Only that project's workspace is mounted, at `/workspace`. Every API call carries `directory=/workspace`, because the API accepts any folder the container can see.
+- **Workspace.** Only a private copy of the project is mounted, at `/workspace`, never the real workspace. DevPilot audits the copy before taking anything from it. Every API call carries `directory=/workspace`, because the API accepts any folder the container can see.
 - **No port of OpenCode is published.** HTTP basic auth uses a fresh random `OPENCODE_SERVER_PASSWORD` per start, passed to docker by name.
 - **Hardening.** The OpenCode container uses the sandbox's hardening flags (§7.2). Its only network peers are the filter and the model gateway.
 
@@ -532,6 +532,7 @@ S(t,k) = w_s·Suit(t,k) + w_r·Rel(t,c) + w_l·(1 − L̂(t)) + w_c·(1 − Ĉ(t
 | `requirements` | run_id, code (R-xxx), text, kind (functional / non-functional) |
 | `tasks` | run_id, order, title, capability, features_json, status |
 | `acceptance_criteria` | run_id, code, given, when, then, priority, method, status, test_refs_json, frozen_hash |
+| `coding_attempts` | project_id, run_id, call_id (unique per run), task_key, phase, session_id, message_id, known_messages_json, reconciliation, failure_reason (redacted), abort_acknowledged, observed_quiet, process_terminated, workspace_stable, restore_verified, late_results, detail (redacted). One coding attempt's safety lifecycle, saved before each step. |
 | `tool_invocations` | run_id, seq, call_id (unique per run), response_id, tool, arguments_json (redacted), fingerprint, state_at_call, status (QUEUED → AWAITING_APPROVAL/APPROVED → STARTED → SUCCEEDED/FAILED/DENIED/INTERRUPTED, or SKIPPED), ok, error_class, output_json (exactly what GPT receives), delivered, latency_ms, capability, provider; later phases add cost, tokens, selection_json |
 | `tool_stats` | provider, category, successes, failures, ewma_latency_ms, ewma_cost_usd, consecutive_failures, breaker_until |
 | `test_runs` / `test_cases` | suite, passed, failed, errors, duration, junit_path / name, criterion_code, outcome, message |

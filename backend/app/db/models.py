@@ -4,6 +4,7 @@ Phase 1: `projects`, `runs`, `events`.
 Phase 2: `requirements`, `tasks`, `acceptance_criteria`, `tool_invocations`, `approvals`,
 plus orchestration columns on `runs`. Columns added after Phase 1 carry a server default
 so `init_db` can add them to an existing database (see db/session.py).
+Phase 4: `coding_attempts`.
 """
 
 from __future__ import annotations
@@ -26,6 +27,8 @@ from sqlalchemy import (
 from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import TypeDecorator
+
+from app.coding.types import AttemptPhase
 
 
 def new_id() -> str:
@@ -267,6 +270,35 @@ class Approval(Base):
     response_text: Mapped[str | None] = mapped_column(Text, default=None)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     decided_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
+
+
+class CodingAttempt(Base):
+    """One coding attempt's safety lifecycle (app/coding/session_control.py). `(run_id, call_id)` is
+    unique, so a call never sends a second prompt. Saved before each step, so a crash can be finished."""
+
+    __tablename__ = "coding_attempts"
+    __table_args__ = (UniqueConstraint("run_id", "call_id", name="uq_coding_attempts_run_call"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), index=True)
+    call_id: Mapped[str] = mapped_column(String(128))
+    task_key: Mapped[str] = mapped_column(String(128))
+    phase: Mapped[AttemptPhase] = mapped_column(Enum(AttemptPhase, native_enum=False, length=24), index=True)
+    session_id: Mapped[str | None] = mapped_column(String(128), default=None)
+    message_id: Mapped[str | None] = mapped_column(String(64), default=None)
+    known_messages_json: Mapped[str] = mapped_column(Text, default="[]")
+    reconciliation: Mapped[str | None] = mapped_column(String(16), default=None)
+    failure_reason: Mapped[str | None] = mapped_column(Text, default=None)  # redacted before storage
+    abort_acknowledged: Mapped[bool] = mapped_column(Boolean, default=False)
+    observed_quiet: Mapped[bool] = mapped_column(Boolean, default=False)
+    process_terminated: Mapped[bool] = mapped_column(Boolean, default=False)
+    workspace_stable: Mapped[bool] = mapped_column(Boolean, default=False)
+    restore_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    late_results: Mapped[int] = mapped_column(Integer, default=0)
+    detail: Mapped[str | None] = mapped_column(Text, default=None)  # redacted before storage
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
 
 
 class Event(Base):
