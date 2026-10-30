@@ -9,7 +9,7 @@
 | 0 | Architecture and initialization | ✅ Done (2026-10-29, revised the same day) | none |
 | 1 | Backend foundation | ✅ Done (2026-10-29) | Python 3.12.9 at `D:\python.exe` |
 | 2 | GPT orchestrator | ✅ Done (2026-10-29), verified with FakeLLM; first live GPT call verified (analysis accepted, 1 call, 919 tokens) | OpenAI API key (user) for live use |
-| 3 | Docker sandbox | 🟡 Built and tested offline; real-container checks pending (Docker not running, data not on D:) | Docker Desktop running, data on D:, `python:3.12-alpine` present |
+| 3 | Docker sandbox | 🟡 Isolation controls verified in real containers (2026-10-30); install proxy and orphan-sweep test on a real container still open | Docker Desktop running, data on D:, `python:3.12-alpine` present |
 | 4 | OpenCode integration | ⏳ Not started | OpenCode container image, Git |
 | 5 | Verification-guided development | ⏳ Not started | — |
 | 6 | Failure classification and recovery | ⏳ Not started | — |
@@ -388,3 +388,53 @@ The calculator was **not** generated, run or tested.
 4. The tool is not reachable from GPT yet, because the orchestrator pauses at IMPLEMENTING until Phase 4.
 5. A per-run cancel from the API is not wired. Only backend shutdown cancels containers.
 6. An empty folder `D:\DOWNLOAD_NEW_D` was created by a mistyped path during this work. It holds nothing, and the tools refused to delete it. Delete it by hand.
+
+### Phase 3 finalization: real Docker verification (2026-10-30)
+
+**Docker environment (checked by the engine and disk files, not by Docker Root Dir alone):**
+
+| Item | Result |
+|---|---|
+| Docker Desktop program | **D:**: `D:\DockerDesktop\Docker Desktop.exe`. Nothing remains under `C:\Users\prudh\AppData\Local\Programs\DockerDesktop`. |
+| Docker CLI | `D:\DockerDesktop\resources\bin\docker.exe`, on PATH, version 29.9.2. `.env` now has `DOCKER_CLI=D:\DockerDesktop\resources\bin\docker.exe` (a path, not a secret). |
+| Engine | Running. `docker version`: server 29.9.2, OS linux, amd64. Pipe `\\.\pipe\docker_engine` present. Driver overlayfs. |
+| Linux containers through WSL2 | Yes. WSL distro `docker-desktop` (VERSION 2) has `BasePath = \\?\D:\DockerData\main`. |
+| Disk image location | **On D:.** `D:\DockerData\disk\docker_data.vhdx` (about 1.48 GB) and `D:\DockerData\main\ext4.vhdx` (about 104 MB). No Docker VHDX was found under C:. |
+| Docker's own Root Dir | `/var/lib/docker`, inside the VM. It does not show the host location, so the VHDX files and the WSL base path were used as proof. |
+| WSL | 3.0.3.0. Default version 2. No `.wslconfig`, so WSL uses its defaults. |
+| Free space after setup | C: 6.70 GB, D: 144.02 GB. |
+
+**Image:** `python:3.12-alpine` pulled once (authorized). Digest `sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8`. No other image was downloaded.
+
+**Real container tests (`RUN_DOCKER_TESTS=true`): 9 passed, 0 failed, 0 skipped.**
+- Python version runs and the container is removed.
+- The workspace script runs and prints `14`.
+- No network: the probe prints `blocked`. A control with `--network bridge` prints `connected`, so the block is real.
+- Read-only workspace: the write fails. The file is not created.
+- Non-root: uid 65534, gid 65534. `CapEff` is all zeros.
+- Memory: a 512 MB allocation under a 128 MB limit is OOM-killed (`oom_killed`).
+- Timeout: a 60-second sleep is killed at 3 seconds. No container is left.
+- Output limit: 8000 characters are truncated to 1024 and marked.
+- Cancel: a running container is killed after 2 seconds. No container is left.
+
+**Hardened container audit (`docker inspect` on a freshly created container):** NetworkMode `none`, Privileged `false`, ReadonlyRootfs `true`, CapDrop `[ALL]`, SecurityOpt `[no-new-privileges]`, Memory and swap both 128 MB, PidsLimit 64. The audit container was removed.
+
+**Demonstration (`demo_sandbox.py --run`), exit 0:**
+
+| Command | Status | Exit | Duration | Output | Cleanup |
+|---|---|---|---|---|---|
+| python-version | SUCCEEDED | 0 | 1093 ms | `Python 3.12.16` | removed |
+| python-script calc.py | SUCCEEDED | 0 | 1000 ms | `14` then `sandbox arithmetic ok` | removed |
+
+Recorded events: `sandbox.started` and `sandbox.finished` for each command, with the container name, image, status, exit code, duration, and cleanup. No host path is recorded.
+
+**Full suite (with `RUN_DOCKER_TESTS=true`):** 537 passed, 1 skipped (the live OpenAI test, which stays off), 0 failed. Coverage 97%. Without the Docker flag: 528 passed, 10 skipped.
+
+**Open items:**
+1. The full run took about 7.5 minutes, while the suite without the Docker tests took about 40 seconds and the nine Docker tests alone took about 24 seconds. The cause is not yet known. It is not a failure, but it should be checked before Phase 4 adds more container tests.
+2. The startup sweep of leftover containers is tested only against the fake CLI. It has not been run on a real leftover container.
+3. The install step with a registry-only proxy (T13) is not built. The install step cannot run until then.
+4. ruff and mypy are still not installed in the venv.
+5. `tests/docker_fake.py` was reported as changed on disk. Git shows no difference from the committed version, so no change is pending.
+
+**Readiness:** Phase 3 is verified on real containers for every isolation control in the table in SECURITY.md §11, except the orphan sweep and the install proxy. Phase 4 has not started and waits for your approval.

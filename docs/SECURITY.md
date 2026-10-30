@@ -2,7 +2,7 @@
 
 > Status: **design approved in Phase 0 (2026-10-29) and revised the same day** for Google Drive OAuth, repository and document import, the network policy and test validation. These controls are not implemented yet. Each control is built and tested in the phase listed in [PROGRESS.md](PROGRESS.md).
 >
-> Phase 3 sandbox controls (T1, T2, T13) are implemented and checked offline. The checks that need a real Docker engine are **not yet run**. §11 lists each one with its status.
+> Phase 3 sandbox controls (T1, T2, T13) are implemented. The isolation controls (network, read-only, non-root, capabilities, memory, timeout, cancel, output limit) were verified in real containers on 2026-10-30. The install step's proxy (T13) is not built yet. §11 lists each one with its status.
 
 DevPilot runs code it did not write, written by an LLM, from requirements it did not author. The security model assumes that **generated code, model output, uploaded documents and tool logs are untrusted**.
 
@@ -123,20 +123,21 @@ Applies to Google Drive now and to any later OAuth provider.
 
 ## 11. Phase 3 sandbox: what is verified
 
-The unit tests use a fake Docker CLI and real child processes, so they never start a container. The real-container tests (`tests/integration/test_sandbox_docker.py`, marker `docker`) need a Docker engine that has been verified. As of 2026-10-29 no real-container test has run.
+The unit tests use a fake Docker CLI and real child processes, so they never start a container. The real-container tests (`tests/integration/test_sandbox_docker.py`, marker `docker`, opt-in with `RUN_DOCKER_TESTS=true`) ran on 2026-10-30 against Docker Desktop 4.97.0 (engine 29.9.2, Linux, WSL2 backend) with the image `python:3.12-alpine` (digest `sha256:e6dae589c1c05976188fd3bd019afd091445fc533ed2ea29001beddc7368a9c8`). All 9 passed.
 
 | Control | Checked by | Status |
 |---|---|---|
 | Only approved images and commands (T1, T9) | `test_sandbox_policy.py`, `test_sandbox_docker_args.py` | Verified offline |
 | No shell; argument lists only | `test_sandbox_process.py` (real child processes) | Verified offline |
-| Every hardening flag is present; no privileged, host-network, socket, device or extra-volume options | `test_sandbox_docker_args.py` | Verified offline (the flags themselves are not yet enforced by a real engine) |
+| Every hardening flag is present; no privileged, host-network, socket, device or extra-volume options | `test_sandbox_docker_args.py`; `docker inspect` of a hardened container (2026-10-30) | Verified offline and on the real engine: NetworkMode none, Privileged false, read-only rootfs, CapDrop ALL, no-new-privileges, memory = swap, PID limit set |
 | Workspace is the only mount, read-only, inside the approved folder; no symlink; no mount-breaking characters | `test_sandbox_docker_args.py` | Verified offline |
 | Wall-clock timeout kills the process; cancel kills it; output flood kills it; excess output is dropped and marked | `test_sandbox_process.py`, `test_sandbox_runner.py` | Verified offline for the CLI process. Killing a real container is not yet verified. |
-| Container removed on every path (success, failure, timeout, cancel, exception); leftovers swept at startup | `test_sandbox_runner.py` | Verified against the fake CLI. Real `docker rm -f` not yet run. |
-| No network inside the container (T2) | `test_the_container_has_no_network` | **Not run** (needs Docker) |
-| Read-only workspace; non-root; no capabilities | `test_the_workspace_mount_is_read_only`, `test_the_process_is_non_root_with_no_capabilities` | **Not run** (needs Docker) |
-| Memory limit enforced by the kernel | `test_the_memory_limit_is_enforced` | **Not run** (needs Docker) |
-| Timeout and cancel against a real container | `test_the_time_limit_kills_and_removes_the_container`, `test_cancellation_removes_the_container` | **Not run** (needs Docker) |
+| Container removed on every path (success, failure, timeout, cancel, exception); leftovers swept at startup | `test_sandbox_runner.py`; real: timeout, cancel and OOM tests assert no leftover containers | Verified on the real engine (no `devpilot.sandbox` containers left after the run). The startup sweep is verified only against the fake CLI. |
+| No network inside the container (T2) | `test_the_container_has_no_network`; control probe with `--network bridge` connects | **Verified in a real container** |
+| Read-only workspace; non-root; no capabilities | `test_the_workspace_mount_is_read_only` (write fails with Errno 30), `test_the_process_is_non_root_with_no_capabilities` (uid 65534, CapEff all zero) | **Verified in real containers** |
+| Memory limit enforced by the kernel | `test_the_memory_limit_is_enforced` (512 MB allocation under a 128 MB limit: OOM-killed) | **Verified in a real container** |
+| Timeout and cancel against a real container | `test_the_time_limit_kills_and_removes_the_container`, `test_cancellation_removes_the_container` | **Verified in real containers** |
+| Output limit and truncation against a real container | `test_output_over_the_limit_is_truncated` | **Verified in a real container** |
 | Install step reaches only listed registries through a proxy (T13, §9) | none | **Not implemented.** Only `--network none` exists. |
 | The container cannot reach an unlisted host (§9) | none | **Not verified** (depends on the install proxy) |
 
