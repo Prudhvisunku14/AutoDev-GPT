@@ -1,6 +1,6 @@
 # DevPilot AI: Progress
 
-**Current phase:** Phase 4 (OpenCode) in progress. Its foundation is tested and committed (2026-10-30). The OpenCode adapter itself is **untested** and not committed, and nothing calls OpenCode yet. Phase 3 is verified in real containers.
+**Current phase:** Phase 4 (OpenCode) in progress. The foundation and the Phase 4B contract checks are tested and committed (2026-10-30). The OpenCode adapter itself is **untested** and not committed, and nothing calls OpenCode yet. The next step, a real-server contract check, waits for approval. Phase 3 is verified in real containers.
 
 ## Phase tracker
 
@@ -484,3 +484,36 @@ Phase 4 is **not complete**. This checkpoint commits the parts that are built an
 5. Add `call_id` to the tool context (P0 5).
 6. Build the `generate_code` and `submit_implementation` tools, the `coding_tasks` table and the IMPLEMENTING prompt, then wire them into `create_app`.
 7. Write the offline demo, then do a live test after approval.
+
+### Phase 4B: OpenCode contract and security review (2026-10-30)
+
+This stage was read-only investigation and preparation. No OpenCode server was started, nothing was downloaded, no image was pulled and no paid call was made. Full findings are in [ARCHITECTURE_OPTIMIZATION.md](ARCHITECTURE_OPTIMIZATION.md), section "Phase 4B".
+
+**Findings:**
+- **Versions.** 1.19.5 is still the stable release (npm `latest`, GitHub Latest, GHCR `latest`). A 2.x line exists on GitHub and GHCR with changed permission checks and a new configuration layer. The adapter keeps refusing 2.x.
+- **`/doc` format is unknown.** The docs call it both an OpenAPI 3.1 spec and an HTML page. The adapter accepts JSON only, so it fails closed.
+- **Contracts are inferred, not verified.** Every operation the adapter needs appears in the published 1.19.5 SDK types. The permission-reply endpoint differs between the docs and the SDK. Nothing has been confirmed on a server.
+- **Static review of the untested adapter.** Two P0 defects:
+  - A1: a prompt whose send fails ambiguously is not aborted.
+  - A2: an abort is not confirmed before the workspace is restored.
+
+  There are also several P1 items. The adapter file was not changed.
+- **Managed config protects only the keys it sets.** OpenCode merges configuration key by key, so a project could add MCP servers, agents or patterns. The workspace pre-check, the effective-config check and the audit cover this. The build agent's rules are now pinned in managed config.
+
+**Committed and tested in this stage:**
+- `app/coding/opencode_contract.py` with 65 tests. It contains the adapter's pure checks:
+  - health and version range
+  - `/doc` classification (HTML is refused, never scraped)
+  - OpenAPI operation checks, with the permission-reply choice and an inventory of sensitive operations
+  - a size-capped SSE parser
+  - workspace path containment
+  - a tool allowlist
+  - the configuration check
+
+  The adapter does not use this module yet.
+- `managed_config` pins the build agent's permission rules (2 new tests).
+- `ToolContext.call_id`: tools get the invocation's call id, the same key `recover` receives (test added).
+
+**Still not committed:** `app/tools/adapters/opencode.py` (untested) and the egress line `127.0.0.1:4096`. The line is safe, but it is premature until the launcher and gateway design is fixed.
+
+**Next, needs your approval:** the real-server contract check in ARCHITECTURE_OPTIMIZATION.md. It downloads the official 1.19.5 musl binary (about 0.3 GB on D:), runs it with no network, no credentials and no prompts inside the existing `python:3.12-alpine` image, and then cleans up.

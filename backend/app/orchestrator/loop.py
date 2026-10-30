@@ -234,7 +234,7 @@ class Orchestrator:
                 if isinstance(prepared, ToolResult):
                     self._finish(s, run, inv, prepared)
                     continue
-                ctx = self._context(s, run)
+                ctx = self._context(s, run, inv.call_id)
                 if prepared.spec.external is None:
                     before = run.state
                     result = self._executor.invoke(ctx, prepared)
@@ -259,7 +259,7 @@ class Orchestrator:
                 run = s.get(Run, run_id)
                 inv = s.get(ToolInvocation, inv_id)
                 assert run is not None and inv is not None
-                ctx = self._context(s, run)
+                ctx = self._context(s, run, inv.call_id)
                 ended_meanwhile = run.is_terminal
                 before = run.state
                 # The tool still records its own outcome (and undoes its side effects if needed).
@@ -272,7 +272,7 @@ class Orchestrator:
                     run.nudges = 0
                 self._finish(s, run, inv, result)
 
-    def _context(self, s: Session, run: Run) -> ToolContext:
+    def _context(self, s: Session, run: Run, call_id: str) -> ToolContext:
         project = s.get(Project, run.project_id)
         assert project is not None
         return ToolContext(
@@ -286,6 +286,7 @@ class Orchestrator:
             workspace=self._workspace,
             cancel=self._stop,  # backend shutdown stops any container still running
             coding=self._coding,
+            call_id=call_id,
         )
 
     def _progress(self, run_id: str, event_type: str, payload: dict[str, Any]) -> None:

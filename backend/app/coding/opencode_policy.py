@@ -15,6 +15,7 @@ a task keep an edit to the files that feed OpenCode's configuration (`is_protect
 
 from __future__ import annotations
 
+import copy
 import re
 from collections.abc import Iterable
 from functools import lru_cache
@@ -112,7 +113,10 @@ def managed_config(*, model: str, gateway_base_url: str) -> dict[str, Any]:
         "mcp": {},
         "instructions": [],
         "permission": permission,
-        "agent": {name: {"disable": True} for name in _DISABLED_AGENTS},
+        # Agent rules take precedence over global rules, and managed settings protect only the
+        # keys they set. Pinning the build agent's rules here stops a project-level
+        # `agent.build.permission` entry from widening them.
+        "agent": {"build": {"permission": copy.deepcopy(permission)}, **{name: {"disable": True} for name in _DISABLED_AGENTS}},
     }
 
 

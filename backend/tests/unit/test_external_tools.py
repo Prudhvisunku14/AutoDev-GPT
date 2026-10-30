@@ -67,9 +67,11 @@ class SlowTool:
     recovered: list[RecoveryInfo] = field(default_factory=list)
     recover_raises: bool = False
     progress_extra: dict[str, object] = field(default_factory=dict)
+    begin_call_ids: list[str | None] = field(default_factory=list)
 
     def begin(self, ctx: ToolContext, args: SlowArgs) -> str:
         self.calls.append("begin")
+        self.begin_call_ids.append(ctx.call_id)
         if self.fail_begin:
             raise ToolError(ErrorClass.VALIDATION_FAILED, "begin refused")
         ctx.events.record(ctx.session, project_id=ctx.project.id, run_id=ctx.run.id, type="slow.begin", payload={})
@@ -287,6 +289,7 @@ def test_a_crash_in_the_slow_step_is_recovered_once_and_never_re_run(harness: Ha
     assert tool.calls == ["begin", "run"]  # not run a second time
     (info,) = tool.recovered
     assert (info.run_id, info.call_id) == (run_id, inv.call_id)
+    assert tool.begin_call_ids == [inv.call_id]  # the key a tool uses in begin is the key recovery receives
     assert "The test side effects were undone." in (inv.output_json or "")
     assert harness.events_of(run_id, "tool.recovered")[0]["note"] == "The test side effects were undone."
 

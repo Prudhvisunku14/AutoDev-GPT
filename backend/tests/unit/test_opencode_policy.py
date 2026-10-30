@@ -73,6 +73,20 @@ def test_the_managed_config_denies_unknown_permissions_by_default() -> None:
     assert next(iter(permission)) == "*" and permission["*"] == "deny"
 
 
+def test_the_build_agent_carries_its_own_copy_of_the_rules() -> None:
+    config = _config()
+    build = config["agent"]["build"]["permission"]
+    assert build == config["permission"] and build is not config["permission"]
+    assert {config["agent"][name].get("disable") for name in ("plan", "general", "explore")} == {True}
+
+
+def test_an_agent_entry_from_a_project_cannot_widen_the_pinned_build_rules_unnoticed() -> None:
+    # Simulates a merged result where a project entry won for one key: the check still catches it.
+    config = _config()
+    config["agent"]["build"]["permission"]["bash"] = "allow"
+    assert any(p.startswith("agent build: bash is not denied") for p in verify_effective_config(config))
+
+
 def test_session_rules_match_the_managed_policy() -> None:
     rules = [(r["permission"], r["pattern"], r["action"]) for r in session_rules()]
     assert evaluate(rules, "bash", "python main.py") == "deny"

@@ -102,8 +102,11 @@ class ToolContext:
     sandbox: SandboxRunner | None = None
     workspace: WorkspaceFS | None = None
     cancel: threading.Event | None = None
-    # Phase 4: the coding engine (OpenCode, or FakeOpenCode in tests).
+    # Phase 4: the coding engine.
     coding: CodingProvider | None = None
+    # The GPT function call being executed. Tools key their side effects (such as a workspace
+    # checkpoint) by it, so the `recover` hook, which receives the same call_id, can find them.
+    call_id: str | None = None
 
 
 Handler = Callable[[ToolContext, Any], dict[str, Any]]
