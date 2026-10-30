@@ -87,6 +87,16 @@ SERVER_ENV: tuple[tuple[str, str], ...] = (
     ("OPENCODE_DISABLE_EXTERNAL_SKILLS", "1"),
 )
 PROJECT_CONFIG_OFF = ("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
+# The install guard (read from the 1.19.5 binary). For every config folder OpenCode first writes a
+# .gitignore unless one exists (Config.ensureGitignore), then starts an in-process npm install of
+# @opencode-ai/plugin unless the folder is not writable (Npm.install returns at once). A read-only
+# folder that already holds that .gitignore therefore gets neither a write nor an install. The global
+# config folder moves out of /tmp/home, because a mount inside it would make /tmp/home root-owned.
+GUARD_CONFIG_HOME = "/opt/devpilot/xdg-config"
+GLOBAL_CONFIG_TARGET = f"{GUARD_CONFIG_HOME}/opencode"
+PROJECT_OPENCODE_TARGET = "/workspace/.opencode"
+OPENCODE_GITIGNORE = "node_modules\npackage.json\npackage-lock.json\nbun.lock\n.gitignore\n"
+INSTALL_ARTIFACTS = frozenset({"node_modules", "package.json", "package-lock.json", "bun.lock", "bun.lockb"})
 _UNSAFE_MOUNT_CHARS = frozenset(',"\'\r\n=')
 _SECRET_NAME_PARTS = ("OPENAI", "ANTHROPIC", "API_KEY", "TOKEN", "SECRET", "AWS_", "GITHUB", "GOOGLE", "DEVPILOT")
 
@@ -130,6 +140,8 @@ def hostile_workspace() -> dict[str, str]:
         # The docs have used both folder names; the same inert file goes in each.
         f".opencode/agent/{HOSTILE_AGENT_NAME}.md": HOSTILE_AGENT_FILE,
         f".opencode/agents/{HOSTILE_AGENT_NAME}.md": HOSTILE_AGENT_FILE,
+        # The file OpenCode would write itself; with .opencode/ mounted read-only it writes nothing there.
+        ".opencode/.gitignore": OPENCODE_GITIGNORE,
     }
 
 
@@ -191,15 +203,28 @@ class CheckContainer:
     project_config_off: bool = True
     tmp_exec: bool = False  # exec on the /tmp tmpfs, only if a run proves the binary needs it (needs approval)
     image: str = CHECK_IMAGE
+    # The install guard: a folder holding only OPENCODE_GITIGNORE, mounted read-only as OpenCode's
+    # global config folder; and the workspace's .opencode/ mounted read-only over itself.
+    guard_config_dir: Path | None = None
+    guard_project_opencode: bool = False
 
     def mounts(self) -> tuple[tuple[Path, str, bool], ...]:
         """(host folder, container path, read-only)."""
-        return (
+        mounts = [
             (self.binary_dir, BINARY_TARGET, True),
             (self.config_dir, CONFIG_TARGET, True),
             (self.checks_dir, CHECKS_TARGET, True),
             (self.workspace_dir, WORKSPACE_TARGET, False),
-        )
+        ]
+        if self.guard_config_dir is not None:
+            mounts.append((self.guard_config_dir, GLOBAL_CONFIG_TARGET, True))
+        if self.guard_project_opencode:
+            mounts.append((self.workspace_dir / ".opencode", PROJECT_OPENCODE_TARGET, True))
+        return tuple(mounts)
+
+    def environment(self) -> list[tuple[str, str]]:
+        env = [(n, GUARD_CONFIG_HOME if n == "XDG_CONFIG_HOME" and self.guard_config_dir else v) for n, v in SERVER_ENV]
+        return env + ([PROJECT_CONFIG_OFF] if self.project_config_off else [])
 
 
 def mount_problems(c: CheckContainer, *, check_root: Path, binary_dir: Path, forbidden: Iterable[Path]) -> list[str]:
@@ -225,6 +250,10 @@ def mount_problems(c: CheckContainer, *, check_root: Path, binary_dir: Path, for
                 problems.append(f"{target}: only the verified binary's folder may be mounted here")
         elif root not in resolved.parents:
             problems.append(f"{target}: must be a fresh folder under {root}")
+        if target == PROJECT_OPENCODE_TARGET and resolved != (c.workspace_dir / ".opencode").resolve():
+            problems.append(f"{target}: only the workspace's own .opencode folder may be mounted here")
+        if target == GLOBAL_CONFIG_TARGET and sorted(p.name for p in host.iterdir()) != [".gitignore"]:
+            problems.append(f"{target}: the guard folder must hold only .gitignore")
     if len(set(sources)) != len(sources):
         problems.append("two mounts share a host folder")
     return problems
@@ -234,7 +263,7 @@ def build_run_args(c: CheckContainer) -> list[str]:
     """`docker run` arguments. The password is passed by name only: docker reads its value from
     the CLI's own environment, so it never appears on a command line."""
     env: list[str] = []
-    for name, value in (*SERVER_ENV, *((PROJECT_CONFIG_OFF,) if c.project_config_off else ())):
+    for name, value in c.environment():
         env += ["--env", f"{name}={value}"]
     mounts: list[str] = []
     for host, target, read_only in c.mounts():
@@ -376,7 +405,7 @@ def analyze(
 ) -> list[Check]:
     checks = [
         Check("C0", "Isolation applied (docker inspect)", FAILED if isolation else VERIFIED,
-              "; ".join(isolation) or "no network, no port, read-only root, no capabilities, non-root, limits, 4 expected mounts"),
+              "; ".join(isolation) or "no network, no port, read-only root, no capabilities, non-root, limits, only the expected mounts"),
     ]  # fmt: skip
     startup = report.get("startup") or {}
     if startup.get("ready") is True:
@@ -385,7 +414,7 @@ def analyze(
         detail = report.get("probe_error") or f"not healthy after {startup.get('seconds')} s: {startup.get('last')}"
         checks.append(Check("C1", "Server starts", FAILED, str(detail)))
         checks += [Check(i, t, UNKNOWN, "the server did not start") for i, t in _AFTER_STARTUP]
-        checks.append(_workspace(workspace_changes))
+        checks += [_workspace(workspace_changes), _installs(report.get("filesystem"))]
         return checks
 
     spec = _spec(report.get("doc"))
@@ -403,6 +432,7 @@ def analyze(
         _tools(report.get("tool_ids"), report.get("agents")),
         _unknown_path(report.get("unknown_path")),
         _workspace(workspace_changes),
+        _installs(report.get("filesystem")),
     ]
     return checks
 
@@ -724,6 +754,30 @@ def _workspace(changes: list[str]) -> Check:
     return Check("C14", title, VERIFIED, "no file in the workspace was created, changed or deleted")
 
 
+def _installs(filesystem: Any) -> Check:
+    """No dependency install left anything behind: the probe's read-only file listing, taken after the API calls."""
+    title = "No dependency installation"
+    if not isinstance(filesystem, Mapping) or not filesystem:
+        return Check("C16", title, UNKNOWN, "the probe recorded no file listing")
+    found: list[str] = []
+    unreadable: list[str] = []
+    for root, listing in sorted(filesystem.items()):
+        entries = listing.get("entries") if isinstance(listing, Mapping) else None
+        if not isinstance(entries, list) or (isinstance(listing, Mapping) and listing.get("truncated")):
+            unreadable.append(str(root))
+            continue
+        for entry in entries:
+            path = str(entry.get("path", "")) if isinstance(entry, Mapping) else ""
+            if INSTALL_ARTIFACTS.intersection(path.split("/")):
+                found.append(f"{root}/{path}")
+    if found:
+        return Check("C16", title, FAILED, "install artifacts present: " + ", ".join(found[:8]))
+    if unreadable:
+        return Check("C16", title, UNKNOWN, f"the listing is missing or truncated for {', '.join(unreadable)}")
+    return Check("C16", title, VERIFIED,
+                 f"no node_modules, package.json, package-lock.json or bun.lock under {', '.join(sorted(filesystem))}")  # fmt: skip
+
+
 # --- Configuration precedence (run 2) ------------------------------------------------------------
 
 
@@ -771,6 +825,50 @@ def analyze_precedence(allowed: Mapping[str, Any], disabled: Mapping[str, Any]) 
         checks.append(Check("P5", "OPENCODE_DISABLE_PROJECT_CONFIG ignores the project files", VERIFIED,
                             "the project file and the .opencode/ agent were ignored, and the effective rules pass"))  # fmt: skip
     return checks
+
+
+def precedence_comparison(allowed: Mapping[str, Any], disabled: Mapping[str, Any]) -> dict[str, Any]:
+    """Side-by-side facts for the precedence report, from the two run records (project config on, then off)."""
+    return {"project_config_enabled": _run_facts(allowed), "project_config_disabled": _run_facts(disabled)}
+
+
+def _run_facts(record: Mapping[str, Any]) -> dict[str, Any]:
+    report = record.get("report") or {}
+    config = _json(report.get("config"))
+    agents = _json(report.get("agents"))
+    agent_list = agents if isinstance(agents, list) else []
+    build = next((a for a in agent_list if isinstance(a, Mapping) and a.get("name") == PROMPTED_AGENT), None)
+    rules = enforced_rules(build.get("permission")) if build else None
+    facts: dict[str, Any] = {
+        "project_file_loaded": isinstance(config, Mapping) and config.get("username") == PRECEDENCE_MARKER,
+        "agents_listed": sorted(str(a.get("name")) for a in agent_list if isinstance(a, Mapping)),
+        "declared_problems": config_problems(dict(config)) if isinstance(config, Mapping) else ["no configuration"],
+        "enforced_problems": agent_rule_problems(agents),
+    }
+    if rules is not None:
+        facts["enforced_decisions"] = {
+            "rules": len(rules),
+            "bash 'ls'": evaluate(rules, "bash", "ls"),
+            "bash offered to the model": not hidden_from_model(rules, "bash"),
+            "edit 'workspace/opencode.json'": evaluate(rules, "edit", "workspace/opencode.json"),
+            "edit 'workspace/.env'": evaluate(rules, "edit", "workspace/.env"),
+            "edit 'workspace/calculator.py'": evaluate(rules, "edit", "workspace/calculator.py"),
+            "external_directory '/etc/passwd'": evaluate(rules, "external_directory", "/etc/passwd"),
+            "webfetch 'https://example.com'": evaluate(rules, "webfetch", "https://example.com"),
+            "task 'general'": evaluate(rules, "task", "general"),
+        }
+        facts["wildcard_permission_rules"] = [f"{p} {pat} {a}" for p, pat, a in rules if p != "*" and ("*" in p or "?" in p)]
+    problems = verify_effective_config(dict(config), agents) if isinstance(config, Mapping) else ["no configuration"]
+    install = _installs(report.get("filesystem"))
+    facts.update(
+        devpilot_verdict="rejected" if problems else "accepted",
+        devpilot_problems=problems[:12],
+        install_check={"verdict": install.verdict, "detail": install.detail},
+        isolation_problems=record.get("isolation_problems"),
+        workspace_changes=record.get("workspace_changes"),
+        cleanup=record.get("cleanup"),
+    )
+    return facts
 
 
 # --- Reports -------------------------------------------------------------------------------------

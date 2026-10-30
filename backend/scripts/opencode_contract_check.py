@@ -55,9 +55,11 @@ from app.coding.opencode_check import (
     compare_verdicts,
     hostile_workspace,
     image_problems,
+    OPENCODE_GITIGNORE,
     isolation_problems,
     isolation_summary,
     mount_problems,
+    precedence_comparison,
     probe_input,
     safe_console,
     write_report,
@@ -214,7 +216,9 @@ def _summary(mode: str, record: dict[str, Any], checks: list[Check], binary_sha:
     }
 
 
-def _container(run_dir: Path, binary_dir: Path, *, project_config_off: bool, tmp_exec: bool) -> CheckContainer:
+def _container(
+    run_dir: Path, binary_dir: Path, *, project_config_off: bool, tmp_exec: bool, guard: bool = False, project_opencode: bool = False
+) -> CheckContainer:
     return CheckContainer(
         name=f"devpilot-opencode-check-{secrets.token_hex(4)}",
         binary_dir=binary_dir,
@@ -223,12 +227,17 @@ def _container(run_dir: Path, binary_dir: Path, *, project_config_off: bool, tmp
         workspace_dir=run_dir / "workspace",
         project_config_off=project_config_off,
         tmp_exec=tmp_exec,
+        guard_config_dir=run_dir / "global-config" if guard else None,
+        guard_project_opencode=guard and project_opencode,
     )
 
 
 def _prepare(c: CheckContainer, files: dict[str, str]) -> None:
     for folder in (c.config_dir, c.checks_dir, c.workspace_dir):
         folder.mkdir(parents=True, exist_ok=False)
+    if c.guard_config_dir is not None:
+        c.guard_config_dir.mkdir(parents=True, exist_ok=False)
+        (c.guard_config_dir / ".gitignore").write_text(OPENCODE_GITIGNORE, encoding="utf-8")
     config = managed_config(model=CHECK_MODEL, gateway_base_url=CHECK_GATEWAY)
     (c.config_dir / "opencode.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     shutil.copyfile(PROBE, c.checks_dir / "probe.py")
@@ -239,12 +248,17 @@ def _prepare(c: CheckContainer, files: dict[str, str]) -> None:
         target.write_text(text, encoding="utf-8")
 
 
-def one_run(label: str, binary_dir: Path, files: dict[str, str], *, project_config_off: bool, tmp_exec: bool) -> dict[str, Any]:
+def one_run(
+    label: str, binary_dir: Path, files: dict[str, str], *, project_config_off: bool, tmp_exec: bool, guard: bool = False
+) -> dict[str, Any]:
     """Start one server, probe it, remove everything. Returns the redacted record."""
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     run_dir = RUNS / f"{stamp}-{label}-{secrets.token_hex(3)}"
-    c = _container(run_dir, binary_dir, project_config_off=project_config_off, tmp_exec=tmp_exec)
-    record: dict[str, Any] = {"label": label, "stamp": stamp, "container": c.name, "project_config_off": project_config_off}
+    project_opencode = any(rel.startswith(".opencode/") for rel in files)
+    c = _container(run_dir, binary_dir, project_config_off=project_config_off, tmp_exec=tmp_exec,
+                   guard=guard, project_opencode=project_opencode)  # fmt: skip
+    record: dict[str, Any] = {"label": label, "stamp": stamp, "container": c.name, "project_config_off": project_config_off,
+                              "install_guard": guard, "mounts": [f"{t} ({'ro' if ro else 'rw'})" for _, t, ro in c.mounts()]}  # fmt: skip
     began = time.monotonic()
     password = secrets.token_urlsafe(32)
     token = base64.b64encode(f"opencode:{password}".encode()).decode()
@@ -345,10 +359,10 @@ def dry_run() -> int:
     sample = RUNS / "<stamp>-<label>-<random>"
     for label, off, files in (
         ("Run 1, baseline (empty workspace)", True, {}),
-        ("Run 2a, precedence: hostile project config, project config allowed", False, hostile_workspace()),
-        ("Run 2b, precedence: same files, OPENCODE_DISABLE_PROJECT_CONFIG=1", True, hostile_workspace()),
+        ("Run 2a, precedence: hostile project config, project config allowed, install guard", False, hostile_workspace()),
+        ("Run 2b, precedence: same files, OPENCODE_DISABLE_PROJECT_CONFIG=1, install guard", True, hostile_workspace()),
     ):
-        c = _container(sample, binary_dir, project_config_off=off, tmp_exec=False)
+        c = _container(sample, binary_dir, project_config_off=off, tmp_exec=False, guard=bool(files), project_opencode=bool(files))
         print(f"\n== {label}\ndocker run")
         for line in _pairs(build_run_args(c)[1:]):
             print(f"  {line}")
@@ -384,17 +398,85 @@ def run(mode: str, *, tmp_exec: bool) -> int:
     if baseline.get("passed") is not True or baseline.get("binary_sha256") != binary_sha:
         print("STOPPED: the precedence run needs a passing baseline run of this exact binary first")
         return 1
-    allowed = one_run("precedence-allowed", binary_dir, hostile_workspace(), project_config_off=False, tmp_exec=tmp_exec)
-    disabled = one_run("precedence-disabled", binary_dir, hostile_workspace(), project_config_off=True, tmp_exec=tmp_exec)
-    paths = [_save(r["stamp"] + "-" + r["label"] + ".json", r) for r in (allowed, disabled)]
+    return run_precedence(binary_dir, binary_sha, tmp_exec=tmp_exec, stream=sys.stdout)
+
+
+def run_precedence(binary_dir: Path, binary_sha: str, *, tmp_exec: bool, stream: TextIO) -> int:
+    """Run A (project config on), then B (OPENCODE_DISABLE_PROJECT_CONFIG=1), both with the install guard.
+    B does not start unless A cleaned up completely. Evidence is saved before anything is printed."""
+    allowed = one_run("precedence-allowed", binary_dir, hostile_workspace(), project_config_off=False, tmp_exec=tmp_exec, guard=True)
+    allowed["binary_sha256"] = binary_sha
+    allowed_path = _save(allowed["stamp"] + "-precedence-allowed.json", allowed)
+    if cleanup_check(allowed.get("cleanup") or {}).verdict != "PASS":
+        print(f"STOPPED: run A did not clean up ({allowed.get('cleanup')}); run B was not started. Report: {allowed_path}", file=stream)
+        return 1
+    disabled = one_run("precedence-disabled", binary_dir, hostile_workspace(), project_config_off=True, tmp_exec=tmp_exec, guard=True)
+    disabled["binary_sha256"] = binary_sha
+    disabled_path = _save(disabled["stamp"] + "-precedence-disabled.json", disabled)
+
+    runs = {"A": (allowed, _analysis(allowed)), "B": (disabled, _analysis(disabled))}
     checks = analyze_precedence(allowed.get("report") or {}, disabled.get("report") or {})
-    _save(allowed["stamp"] + "-precedence-summary.json",
-          {"binary_sha256": binary_sha, "checks": [{**c.__dict__, "verdict": c.verdict} for c in checks]})  # fmt: skip
-    for record, path in zip((allowed, disabled), paths, strict=True):
-        _print_checks(f"Run {record['label']} (contract checks)", _analysis(record))
-        print(f"Report: {path}  cleanup: {record['cleanup']}")
-    _print_checks("Run 2, configuration precedence", checks)
+    summary = {
+        "binary_sha256": binary_sha,
+        "image_id": allowed.get("image_id"),
+        "report_files": [allowed_path.name, disabled_path.name],
+        "precedence_checks": [{**c.__dict__, "verdict": c.verdict} for c in checks],
+        "contract_checks": {key: [{"id": c.id, "verdict": c.verdict, "detail": c.detail} for c in run_checks]
+                            for key, (_, run_checks) in runs.items()},  # fmt: skip
+        "comparison": precedence_comparison(allowed, disabled),
+    }
+    summary_path = _save(allowed["stamp"] + "-precedence-summary.json", summary)
+    markdown_path = REPORTS / (allowed["stamp"] + "-precedence-report.md")
+    _write_text_atomic(markdown_path, _precedence_markdown(summary))
+
+    for key, (record, run_checks) in runs.items():
+        _print_checks(f"Run {key}: {record['label']} (contract checks)", run_checks, stream)
+        print(f"Cleanup: {record.get('cleanup')}   Duration: {record.get('duration_seconds')} s", file=stream)
+    _print_checks("Configuration precedence", checks, stream)
+    print(f"\nReports: {allowed_path}\n         {disabled_path}\nSummary: {summary_path}\nComparison: {markdown_path}", file=stream)
     return 0
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _precedence_markdown(summary: dict[str, Any]) -> str:
+    on, off = summary["comparison"]["project_config_enabled"], summary["comparison"]["project_config_disabled"]
+    lines = ["# OpenCode 1.19.5 configuration-precedence comparison", "",
+             f"Binary SHA-256 `{summary['binary_sha256']}`, image `{summary['image_id']}`.", "",
+             "| | A: project config enabled | B: OPENCODE_DISABLE_PROJECT_CONFIG=1 |", "|---|---|---|"]  # fmt: skip
+
+    def row(label: str, a: Any, b: Any) -> None:
+        lines.append(f"| {label} | {a} | {b} |")
+
+    row("Project opencode.json loaded (marker)", on["project_file_loaded"], off["project_file_loaded"])
+    row("Agents listed by GET /agent", ", ".join(on["agents_listed"]), ", ".join(off["agents_listed"]))
+    for key in (on.get("enforced_decisions") or {}):
+        row(f"Enforced: {key}", (on.get("enforced_decisions") or {}).get(key), (off.get("enforced_decisions") or {}).get(key))
+    row("Wildcard permission rules enforced", "; ".join(on.get("wildcard_permission_rules") or []) or "none",
+        "; ".join(off.get("wildcard_permission_rules") or []) or "none")  # fmt: skip
+    row("Declared-config findings (GET /config)", len(on["declared_problems"]), len(off["declared_problems"]))
+    row("Enforced-rule findings (GET /agent)", len(on["enforced_problems"]), len(off["enforced_problems"]))
+    row("DevPilot verdict", on["devpilot_verdict"], off["devpilot_verdict"])
+    row("Dependency install (C16)", on["install_check"]["verdict"], off["install_check"]["verdict"])
+    row("Isolation problems (docker inspect)", on["isolation_problems"] or "none", off["isolation_problems"] or "none")
+    row("Workspace changes", on["workspace_changes"] or "none", off["workspace_changes"] or "none")
+    row("Cleanup", on["cleanup"], off["cleanup"])
+    lines += ["", "## Precedence checks", ""]
+    lines += [f"- **{c['id']} {c['verdict']}** {c['title']}: {c['detail']}" for c in summary["precedence_checks"]]
+    for label, facts in (("A", on), ("B", off)):
+        lines += ["", f"## DevPilot findings, run {label}", ""]
+        lines += [f"- {p}" for p in facts["devpilot_problems"]] or ["- none"]
+    return "\n".join(lines) + "\n"
 
 
 def build_image() -> int:

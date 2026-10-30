@@ -22,6 +22,9 @@ from app.coding.opencode_check import (
     BASE_IMAGE_ID,
     CHECK_USER,
     FAILED,
+    GLOBAL_CONFIG_TARGET,
+    GUARD_CONFIG_HOME,
+    OPENCODE_GITIGNORE,
     HOSTILE_AGENT_NAME,
     HOSTILE_PROJECT_CONFIG,
     MEMORY_BYTES,
@@ -46,6 +49,7 @@ from app.coding.opencode_check import (
     isolation_problems,
     isolation_summary,
     mount_problems,
+    precedence_comparison,
     probe_input,
     prompt_fields,
     safe_console,
@@ -113,6 +117,37 @@ def test_project_config_flag_and_tmp_exec_follow_the_container_settings(tmp_path
     off = build_run_args(_container(tmp_path, project_config_off=False, tmp_exec=True))
     assert "OPENCODE_DISABLE_PROJECT_CONFIG=1" in on and "OPENCODE_DISABLE_PROJECT_CONFIG=1" not in off
     assert any(a.startswith("/tmp:rw,exec,") for a in off)
+
+
+def _guarded(root: Path) -> CheckContainer:
+    c = _container(root)
+    guard = root / "check" / "global-config"
+    guard.mkdir()
+    (guard / ".gitignore").write_text(OPENCODE_GITIGNORE)
+    (c.workspace_dir / ".opencode").mkdir()
+    return CheckContainer(**{**c.__dict__, "guard_config_dir": guard, "guard_project_opencode": True})
+
+
+def test_the_install_guard_mounts_both_config_folders_read_only_and_moves_the_global_one(tmp_path: Path) -> None:
+    args = build_run_args(_guarded(tmp_path))
+    mounts = [a for a in args if a.startswith("type=bind")]
+    assert len(mounts) == 6 and [m for m in mounts if not m.endswith(",readonly")] == [m for m in mounts if m.endswith("target=/workspace")]
+    assert any(m.endswith(f"target={GLOBAL_CONFIG_TARGET},readonly") for m in mounts)
+    assert any(m.endswith("target=/workspace/.opencode,readonly") for m in mounts)
+    assert f"XDG_CONFIG_HOME={GUARD_CONFIG_HOME}" in args and "XDG_CONFIG_HOME=/tmp/home/.config" not in args
+    assert "XDG_DATA_HOME=/tmp/home/.local/share" in args  # the rest of HOME stays in the tmpfs
+    assert "XDG_CONFIG_HOME=/tmp/home/.config" in build_run_args(_container(tmp_path / "plain"))
+
+
+def test_guard_mounts_are_checked(tmp_path: Path) -> None:
+    c = _guarded(tmp_path)
+    assert mount_problems(c, check_root=tmp_path / "check", binary_dir=c.binary_dir, forbidden=[]) == []
+    (c.guard_config_dir / "plugin.js").write_text("x")  # type: ignore[operator]
+    assert any("must hold only .gitignore" in p for p in mount_problems(c, check_root=tmp_path / "check", binary_dir=c.binary_dir, forbidden=[]))
+    inspect = _inspect(c)
+    assert isolation_problems(inspect, c) == []
+    next(m for m in inspect["Mounts"] if m["Destination"] == "/workspace/.opencode")["RW"] = True
+    assert "the mount at /workspace/.opencode is writable" in isolation_problems(inspect, c)
 
 
 def test_the_probe_runs_as_a_separate_isolated_python_process() -> None:
@@ -322,7 +357,17 @@ def _good_report() -> dict[str, Any]:
         "session_unknown": {"status": 404, "headers": {}, "text": "Not Found"},
         "event": {"status": 200, "headers": {"content-type": "text/event-stream"}, "raw_b64": base64.b64encode(sse).decode(), "seconds": 0.1},
         "unknown_path": {"status": 404, "headers": {}, "text": "Not Found"},
+        "filesystem": _filesystem(),
     }  # fmt: skip
+
+
+def _filesystem(*extra: str) -> dict[str, Any]:
+    home = [{"path": p, "type": "file", "size": 1} for p in (".local/share/opencode/log/run.log", *extra)]
+    return {
+        "/tmp/home": {"exists": True, "entries": home, "truncated": False},
+        "/workspace": {"exists": True, "entries": [], "truncated": False},
+        "/opt/devpilot/xdg-config": {"exists": True, "entries": [{"path": "opencode/.gitignore", "type": "file", "size": 50}], "truncated": False},
+    }
 
 
 def _by_id(checks: list[Any]) -> dict[str, Any]:
@@ -482,6 +527,23 @@ def test_unknown_paths_that_are_served_and_workspace_writes_are_reported() -> No
     assert checks["C0"].status == FAILED
 
 
+def test_install_artifacts_anywhere_in_the_listing_fail_c16() -> None:
+    assert _analyze(_good_report())["C16"].status == VERIFIED
+    report = _good_report()
+    report["filesystem"] = _filesystem(".config/opencode/node_modules/@opencode-ai/plugin/index.js", ".config/opencode/package.json")
+    check = _analyze(report)["C16"]
+    assert check.status == FAILED and "node_modules" in check.detail and "package.json" in check.detail
+
+
+def test_a_missing_or_truncated_listing_leaves_c16_not_verified() -> None:
+    report = _good_report()
+    del report["filesystem"]
+    assert _analyze(report)["C16"].status == UNKNOWN
+    report["filesystem"] = _filesystem()
+    report["filesystem"]["/tmp/home"]["truncated"] = True
+    assert _analyze(report)["C16"].status == UNKNOWN
+
+
 def test_an_event_stream_without_server_connected_is_unknown() -> None:
     report = _good_report()
     report["event"]["raw_b64"] = base64.b64encode(b": heartbeat\n\n").decode()
@@ -510,9 +572,33 @@ def test_the_hostile_workspace_is_inert_text() -> None:
     project = json.loads(files["opencode.json"])
     assert project == HOSTILE_PROJECT_CONFIG
     text = json.dumps(project) + "".join(files.values())
-    for key in ('"mcp"', '"plugin"', '"command"', '"formatter"', '"lsp"', '"instructions"', '"provider"'):
+    for key in ('"mcp"', '"plugin"', '"command"', '"formatter"', '"lsp"', '"instructions"', '"provider"', "apiKey", "http://"):
         assert key not in text
-    assert all(path.endswith((".json", ".md")) for path in files)
+    assert all(path.endswith((".json", ".md", ".gitignore")) for path in files)
+    assert files[".opencode/.gitignore"] == OPENCODE_GITIGNORE  # what OpenCode would write; it then writes nothing there
+
+
+def _run_record(config: dict[str, Any], agents: list[dict[str, Any]], **extra: Any) -> dict[str, Any]:
+    return {"report": {"config": _ok(config), "agents": _ok(agents), "filesystem": _filesystem()},
+            "isolation_problems": [], "workspace_changes": [], "cleanup": {"removed": True, "left": [], "run_folder_removed": True},
+            **extra}  # fmt: skip
+
+
+def test_the_comparison_shows_declared_enforced_and_devpilots_verdict(runner: ModuleType) -> None:
+    merged = _merge(HOSTILE_PROJECT_CONFIG, _managed())
+    clean = _managed()
+    comparison = precedence_comparison(_run_record(merged, opencode_agents(merged)), _run_record(clean, opencode_agents(clean)))
+    on, off = comparison["project_config_enabled"], comparison["project_config_disabled"]
+    assert on["project_file_loaded"] and not off["project_file_loaded"]
+    assert on["enforced_decisions"]["bash 'ls'"] == "allow" and on["enforced_decisions"]["bash offered to the model"]
+    assert off["enforced_decisions"]["bash 'ls'"] == "deny" and not off["enforced_decisions"]["bash offered to the model"]
+    assert on["wildcard_permission_rules"] and off["wildcard_permission_rules"] == []
+    assert on["devpilot_verdict"] == "rejected" and off["devpilot_verdict"] == "accepted"
+    assert on["install_check"]["verdict"] == "PASS"
+    summary = {"binary_sha256": "ab", "image_id": "sha256:x", "comparison": comparison, "precedence_checks": []}
+    markdown = runner._precedence_markdown(summary)
+    assert "| DevPilot verdict | rejected | accepted |" in markdown
+    assert "| Enforced: bash 'ls' | allow | deny |" in markdown
 
 
 def test_a_project_file_naming_keys_first_reorders_the_enforced_rules_and_the_checks_catch_it() -> None:
@@ -606,6 +692,19 @@ def test_the_probe_refuses_ids_that_could_change_the_path(probe: ModuleType) -> 
             probe.target("GET", "/session/{id}", {"id": bad})
     with pytest.raises(probe.Refused):
         probe.target("GET", "/session/{id}", {})
+
+
+def test_the_probe_lists_names_and_sizes_without_reading_or_following(probe: ModuleType, tmp_path: Path) -> None:
+    (tmp_path / "node_modules" / "pkg").mkdir(parents=True)
+    (tmp_path / "node_modules" / "pkg" / "index.js").write_text("secret contents")
+    (tmp_path / ".gitignore").write_text("node_modules\n")
+    out = probe.listing(str(tmp_path))
+    assert out["exists"] and not out["truncated"]
+    assert {e["path"]: e["type"] for e in out["entries"]} == {
+        "node_modules": "dir", ".gitignore": "file", "node_modules/pkg": "dir", "node_modules/pkg/index.js": "file",
+    }  # fmt: skip
+    assert "secret contents" not in json.dumps(out)
+    assert probe.listing(str(tmp_path / "missing")) == {"exists": False, "entries": [], "truncated": False}
 
 
 def test_the_probe_records_html_links_without_following_them(probe: ModuleType) -> None:

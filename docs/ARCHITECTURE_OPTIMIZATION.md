@@ -783,3 +783,88 @@ These were read from the binary and are not yet observed:
 - **Config folders.** Without the flag, every `.opencode/` folder between the workspace and the worktree is loaded. OpenCode also starts a dependency install (`@opencode-ai/plugin`) inside each such folder, which would write `node_modules` and `package.json` into the workspace if one existed. This makes the flag, the workspace pre-check and the audit all necessary.
 
 Run 2 confirms the effect.
+
+---
+
+# Phase 4C configuration-precedence experiment (2026-10-30)
+
+**Approved and done:** the two precedence runs, both offline with the baseline hardening.
+
+**Not done:** prompts, models, OpenAI, Phase 4D and any commit. The changes from this round stay in the working tree.
+
+**Evidence** (redacted):
+- `D:\DevPilotCache\opencode-check\reports\20261030T080356Z-precedence-*`, including a side-by-side `…-precedence-report.md`
+- `20261030T080401Z-precedence-disabled.json`
+
+## Dependency installation: found, then prevented
+
+Read from the binary, for every config folder OpenCode loads:
+1. `Config.ensureGitignore` writes a `.gitignore` unless one exists.
+2. `Npm.install` then runs an **in-process** npm install of `@opencode-ai/plugin` (`@npmcli/arborist`, `ignoreScripts: true`, no subprocess), **unless the folder is not writable**.
+
+This covers OpenCode's global config folder on every start, and the workspace's `.opencode/` when project configuration is on. The original fixture would therefore have made OpenCode write into the workspace and attempt an install there. It was not run as it stood.
+
+**Guard used in both runs, without changing what is tested:**
+- The fixture gets `.opencode/.gitignore`, the same text OpenCode writes.
+- The workspace's `.opencode/` is mounted read-only over itself, so OpenCode can still read the agent files.
+- OpenCode's global config folder is a read-only folder holding only that `.gitignore`. It is reached through `XDG_CONFIG_HOME=/opt/devpilot/xdg-config`, outside `/tmp/home`, because a mount inside the tmpfs would make `/tmp/home` root-owned.
+
+**Result.** The probe's read-only file listing (new check C16) found no `node_modules`, `package.json`, `package-lock.json` or `bun.lock` in either run. The workspace was unchanged (C14).
+
+**Earlier runs.** The two earlier baseline runs had no guard, so OpenCode most likely attempted the global install into its RAM tmpfs. With no network and scripts disabled, it could download and run nothing, and the workspace was untouched.
+
+## Results
+
+| | A: project config enabled | B: `OPENCODE_DISABLE_PROJECT_CONFIG=1` |
+|---|---|---|
+| Project `opencode.json` loaded | yes (marker present; log shows `/workspace/opencode.json` and `/workspace/.opencode/…` read) | no (no workspace file read) |
+| Agents available (`GET /agent`) | build, **devpilot-hostile**, compaction, summary, title | build, compaction, summary, title |
+| Enforced build rules | 103 | 101 (same as the baseline) |
+| bash | **allow, and offered to the model** | deny, hidden |
+| edit `workspace/opencode.json`, `workspace/.env` | deny | deny |
+| edit `workspace/calculator.py` | allow | allow |
+| external folders, webfetch, task | deny | deny |
+| plan, general, explore | still disabled | disabled |
+| DevPilot verdict | **rejected**: C8, C9 and C12 fail with 7 findings | **accepted**: 20 PASS, 0 FAIL, 1 NOT VERIFIED (C13) |
+| Dependency install (C16) | none | none |
+| Isolation (C0), workspace (C14), cleanup (C15) | pass | pass |
+
+**Why bash became allowed.**
+- Managed configuration still won every key it set: `bash` stayed `deny` as a key.
+- But the project file named `*`, `bash` and `b*sh` first, so the merged and enforced order became `* deny`, `bash deny`, `b*sh allow`. This happened in both the global and the build-agent parts, at rules 14–16 and 58–60.
+- Last match wins, so `b*sh allow` decides for bash.
+- **This confirms on the real server the key-order weakness predicted in Phase 4C:** managed configuration alone cannot keep a project file from widening permissions.
+
+**The injected agent.** The `.opencode/agent/` file added a visible primary agent. Its own rules allow bash and editing protected files: its `edit: allow` comes after the global denies. DevPilot prompts only `build`, but a client that names this agent would get those rights.
+
+**Precedence checks:**
+- **P1 PASS:** the project file was loaded.
+- **P2, P3 and P4 FAIL, which are the intended findings.** The enforced rules and the declarations were both weakened, and an agent was added. DevPilot's checker caught all of it.
+- **P5 PASS:** the flag removed every effect.
+
+## Conclusions and how each is known
+
+No coding prompt was sent and no model was called in either run. The containers had no network, held no credentials, and invoked no tool. Each conclusion below is tagged with how it is known:
+- **Observed:** seen on the running 1.19.5 server in these runs.
+- **Binary:** read from the code embedded in the pinned binary, without running it.
+- **Requirement:** a design decision that follows from the first two.
+
+| # | Conclusion | Basis |
+|---|---|---|
+| 1 | With project configuration on, a project `opencode.json` changes the enforced permissions of OpenCode 1.19.5 | **Observed:** the build agent's enforced rules went from 101 to 103, and bash went from deny to allow |
+| 2 | A wildcard permission key (`b*sh: allow`) overrides an explicit `bash: deny` through rule order. Managed config wins each key it sets but not the order, and the last matching rule wins. | **Observed:** the enforced order was `* deny`, `bash deny`, `b*sh allow`. The order mechanism was predicted offline, and the matching rule (`findLast`) is in the binary. |
+| 3 | A project `.opencode/agent/` file adds an agent, with its own wider rules | **Observed:** `devpilot-hostile` was listed by `GET /agent`, and its rules allow bash and protected-file edits |
+| 4 | DevPilot rejects that configuration | **Observed:** `verify_effective_config` and checks C8, C9 and C12 failed run A with 7 findings, and accepted run B |
+| 5 | `OPENCODE_DISABLE_PROJECT_CONFIG=1` stops OpenCode from loading the project `opencode.json` and the workspace's `.opencode/` folder | **Observed:** no workspace file was read in run B, the marker and agent were absent, and the rules matched the baseline. **Binary:** the flag gates both loaders and project instruction files. |
+| 6 | Production must **enforce** the flag in every OpenCode container, not rely on detection alone. Detection stays as a second layer, together with the workspace pre-check and the audit. | **Requirement** |
+| 7 | The API filter must accept only `agent: "build"` on `prompt_async` | **Requirement:** a project-added agent would otherwise be selectable |
+| 8 | OpenCode writes a `.gitignore` into, and starts an in-process npm install in, every writable config folder. A read-only folder that already holds the `.gitignore` gets neither. | **Binary** (`Config.ensureGitignore`, `Npm.install`). **Observed:** no install files in the guarded runs (C16). |
+| — | Whether the per-session rule list DevPilot sends is applied after the agent's rules when a tool runs | **Not verified.** No conclusion is drawn about session-level precedence. |
+
+## What this means for Phase 4D
+
+1. **`OPENCODE_DISABLE_PROJECT_CONFIG=1` is mandatory** for every OpenCode container, enforced in the launcher's fixed configuration, not left to detection.
+2. **Keep the other layers:** the workspace pre-check that refuses `opencode.json` and `.opencode/`, the effective-policy check before each task, edit denials, and the audit with exact restore.
+3. **Use the install guard in the deployment:** a read-only global config folder with `.gitignore`.
+4. **The API filter must force `agent: "build"`** on `prompt_async` and refuse any other agent.
+5. **Not verified:** whether the per-session rule list DevPilot sends is applied after the agent's rules when a tool runs. It would neutralise a reordering at prompt time. Checking it needs a prompt, or more reading of the binary.

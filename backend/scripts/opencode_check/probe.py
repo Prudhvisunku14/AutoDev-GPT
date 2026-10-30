@@ -7,9 +7,10 @@ analyses the report with DevPilot's tested checks (backend/app/coding/opencode_c
 Scope, enforced by ALLOWED: health, /doc, configuration, agents, tool ids, creating one empty
 session and reading it, its status and messages, aborting it while idle, the event stream, and
 one unknown path. It never sends a prompt or a command and never calls the shell, config-change,
-auth, MCP, TUI or PTY endpoints. It never follows links found in responses. Standard library
-only, run as `python3 -I`. The password comes from the container's environment and is never
-written to the report.
+auth, MCP, TUI or PTY endpoints. It never follows links found in responses. At the end it lists
+file names (never contents) under LISTED_ROOTS, to show whether a dependency install left
+anything. Standard library only, run as `python3 -I`. The password comes from the container's
+environment and is never written to the report.
 """
 
 from __future__ import annotations
@@ -37,6 +38,11 @@ MAX_BODY = 8 * 1024 * 1024
 TEXT_PREVIEW = 600
 SSE_BYTES = 16 * 1024
 SSE_SECONDS = 4.0
+# Folders whose file names (never contents) are listed at the end, to see whether a dependency
+# install left anything behind: the server's HOME, the workspace, and the guarded global config folder.
+LISTED_ROOTS = ("/tmp/home", "/workspace", "/opt/devpilot/xdg-config")
+LIST_MAX_ENTRIES = 400
+LIST_MAX_DEPTH = 6
 
 ALLOWED = frozenset(
     {
@@ -180,6 +186,28 @@ def wait_ready(seconds: float) -> dict[str, Any]:
     return {"ready": False, "seconds": round(time.monotonic() - started, 2), "attempts": attempts, "last": str(last)}
 
 
+def listing(root: str) -> dict[str, Any]:
+    """Names, kinds and sizes under one folder. Read-only: links are not followed and no file is opened."""
+    entries: list[dict[str, Any]] = []
+    if not os.path.isdir(root):
+        return {"exists": False, "entries": entries, "truncated": False}
+    for current, dirs, files in os.walk(root, followlinks=False):
+        relative = os.path.relpath(current, root)
+        depth = 0 if relative == "." else relative.count(os.sep) + 1
+        names = sorted(dirs) + sorted(files)
+        if depth >= LIST_MAX_DEPTH:
+            dirs[:] = []  # named below, not entered
+        for name in names:
+            full = os.path.join(current, name)
+            kind = "link" if os.path.islink(full) else "dir" if os.path.isdir(full) else "file"
+            size = os.lstat(full).st_size if kind == "file" else 0
+            entries.append({"path": os.path.relpath(full, root).replace(os.sep, "/"), "type": kind, "size": size})
+            if len(entries) >= LIST_MAX_ENTRIES:
+                return {"exists": True, "entries": entries, "truncated": True}
+        dirs.sort()
+    return {"exists": True, "entries": entries, "truncated": False}
+
+
 def session_id(record: dict[str, Any]) -> str | None:
     body = record.get("json")
     status = record.get("status") or 0
@@ -243,6 +271,10 @@ def main() -> int:
         report["probe_error"], code = f"refused: {exc}", 3
     except Exception as exc:  # reported as one line, never a traceback that could echo request data
         report["probe_error"], code = f"{type(exc).__name__}: {exc}", 4
+    try:
+        report["filesystem"] = {root: listing(root) for root in LISTED_ROOTS}
+    except OSError as exc:
+        report["filesystem_error"] = f"{type(exc).__name__}: {exc}"
     sys.stdout.write(json.dumps(report))
     sys.stdout.flush()
     return code

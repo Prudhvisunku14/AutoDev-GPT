@@ -637,3 +637,47 @@ This stage was read-only investigation and preparation. No OpenCode server was s
 - the adapter's own tests, and wiring it to the new checker, `/agent` and the allowlist
 - the API filter and the model gateway
 - the precedence run (needs approval)
+
+### Phase 4C configuration-precedence experiment (2026-10-30)
+
+**Approved and done:** the two precedence runs. **Not done:** prompts, OpenAI, Phase 4D and any commit. Details are in [ARCHITECTURE_OPTIMIZATION.md](ARCHITECTURE_OPTIMIZATION.md), section "Phase 4C configuration-precedence experiment".
+
+**Dependency installation.**
+- The binary shows that OpenCode writes a `.gitignore` into, and starts an in-process npm install in, every writable config folder (no subprocess, scripts disabled). That includes a workspace `.opencode/`.
+- The fixture was not run as it stood.
+- Both runs used a guard: `.opencode/.gitignore` in the fixture, the workspace `.opencode/` read-only, and a read-only global config folder.
+- No installation happened in either run (new check C16), and the workspace was unchanged.
+
+**Run A, project config enabled.**
+- The project file loaded, and **bash became allowed and offered to the model**. The project file fixed the key order, so its later `b*sh: allow` beats the managed `bash: deny`, which managed config still won as a key.
+- The `.opencode/` agent file added an agent that may run bash and edit protected files.
+- Protected-file edits, web access, external folders and subagents stayed denied.
+- **DevPilot rejected the configuration** (C8, C9 and C12, with 7 findings).
+
+**Run B, `OPENCODE_DISABLE_PROJECT_CONFIG=1`.** No workspace file was read. The result equals the baseline (20 PASS, 0 FAIL, 1 NOT VERIFIED), and DevPilot accepted it.
+
+**Isolation and cleanup.** `docker inspect` confirmed the hardening in both runs (now 6 mounts, 5 of them read-only). Containers and run folders were removed, and the evidence is redacted.
+
+**Code changed, uncommitted, check tooling only:**
+- the install guard and check C16, in `opencode_check.py`, the runner and the probe
+- the comparison report
+- tests
+
+No change was made to the adapter, the policy module or the contract module.
+
+**Tests:** 834 passed, 10 skipped, 0 failed. Coverage is 96% without the adapter and 86% with it.
+
+**Phase 4D must:**
+- enforce `OPENCODE_DISABLE_PROJECT_CONFIG=1`, not rely on detection
+- use the install guard
+- force `agent: "build"` in the API filter
+- keep the pre-check, effective-policy check and audit
+
+**How it is known.** Findings 1–5 were observed on the server. The install mechanism was read from the binary, and its prevention was observed (C16). Session-level rule precedence is **not verified**. The conclusions table in ARCHITECTURE_OPTIMIZATION.md tags each item.
+
+**Still open:**
+- the adapter is untested
+- A1 and A2 are unresolved
+- C13 (unknown paths) is not verified, and waits for the API filter
+
+**Commit:** this round's tooling, tests and docs were committed after approval. The adapter and the egress line are not included.
