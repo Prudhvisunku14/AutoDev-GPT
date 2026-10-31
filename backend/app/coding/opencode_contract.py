@@ -1,8 +1,8 @@
 """OpenCode API contract checks: pure functions, tested without any server.
 
-These are the checks the HTTP adapter needs before it may talk to a server. The adapter
-(tools/adapters/opencode.py, untested and uncommitted) does not use this module yet.
-Every check fails closed: anything unexpected stops the task before a prompt is sent.
+These are the checks the HTTP adapter (tools/adapters/opencode.py) needs before it may talk to a
+server, and the checks of each answer it gets. Every check fails closed: anything unexpected
+stops the task before a prompt is sent.
 
 Sources: the published opencode-ai 1.19.5 SDK types and the server docs (2026-10-30), then the
 Phase 4C baseline run against the real 1.19.5 server and the binary's bundled source. See
@@ -32,6 +32,7 @@ REQUIRED_OPERATIONS = frozenset(
         ("get", "/event"),
         ("get", "/config"),
         ("get", "/agent"),  # the enforced, ordered rules: /config re-orders permission keys (Phase 4C)
+        ("get", "/experimental/tool/ids"),  # compared with the reviewed list before each task (opencode_tools.py)
         ("post", "/session"),
         ("get", "/session/{}"),
         ("get", "/session/status"),
@@ -57,34 +58,12 @@ _SENSITIVE_PREFIXES = ("/mcp", "/tui", "/pty", "/experimental", "/instance")
 _HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete"})
 _VERSION = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)")
 
-# Tool id → the permission OpenCode 1.19.5 checks before the tool acts, read from the pinned binary's
-# bundled source (Phase 4C fix). `edit`, `write` and `apply_patch` all ask "edit"; `write` and
-# `apply_patch` also ask "external_directory" for a path outside the project. `apply_patch` asks "edit"
-# only for each change's source path: a move's destination is checked only for leaving the project, so
-# DevPilot's own audit of every changed path is what catches a move onto a protected file. `invalid`
-# only reports a malformed call. A tool whose last rule for its permission is `* deny` is not offered to
-# the model at all (`hidden_from_model` in opencode_policy.py).
-TOOL_PERMISSIONS: dict[str, str | None] = {
-    "read": "read",
-    "glob": "glob",
-    "grep": "grep",
-    "edit": "edit",
-    "write": "edit",
-    "apply_patch": "edit",
-    "todowrite": "todowrite",
-    "invalid": None,
-    "bash": "bash",
-    "task": "task",
-    "question": "question",
-    "webfetch": "webfetch",
-    "websearch": "websearch",
-    "skill": "skill",
-    "lsp": "lsp",
-    "codesearch": "codesearch",
-}
-# The minimum the build agent needs to read and edit project files. Any other tool that runs means the
-# policy did not hold; a tool a newer OpenCode adds is treated the same way until it is reviewed.
-ALLOWED_TOOLS = frozenset({"read", "glob", "grep", "edit", "write", "apply_patch", "todowrite", "invalid"})
+# The API filter's own health route (ARCHITECTURE_OPTIMIZATION.md). OpenCode has no such route: it answers
+# with its web page, so this tells a filtered deployment from a bare server.
+FILTER_HEALTH_PATH = "/devpilot/health"
+FILTER_SERVICE = "devpilot-api-filter"
+_SESSION_STATES = frozenset({"idle", "busy", "retry"})
+_MESSAGE_ROLES = frozenset({"user", "assistant"})
 
 
 class ContractError(Exception):
@@ -102,6 +81,7 @@ class Contract:
     permission_reply: str  # normalized path template of the reply operation
     question_reject: str | None
     sensitive: tuple[str, ...]  # sensitive operations the server exposes, for the security inventory
+    client_message_id: bool = False  # the prompt body takes a `messageID` chosen by DevPilot
 
 
 def parse_version(text: str) -> tuple[int, int, int] | None:
@@ -170,7 +150,13 @@ def check_spec(spec: dict[str, Any], version: str) -> Contract:
     if reply is None:
         raise ContractError("incompatible", "the OpenCode API has no operation to answer permission requests")
     question = QUESTION_REJECT_OPERATION[1] if QUESTION_REJECT_OPERATION in ops else None
-    return Contract(version=version, permission_reply=reply, question_reject=question, sensitive=tuple(sensitive_operations(ops)))
+    return Contract(
+        version=version,
+        permission_reply=reply,
+        question_reject=question,
+        sensitive=tuple(sensitive_operations(ops)),
+        client_message_id="messageID" in (prompt_fields(spec) or []),
+    )
 
 
 def sensitive_operations(ops: set[tuple[str, str]]) -> list[str]:
@@ -197,11 +183,80 @@ def prompt_fields(spec: dict[str, Any]) -> list[str] | None:
     return None
 
 
-def tool_violation(tool: str, status: str) -> str | None:
-    """A message when a tool outside the allowlist starts or finishes, otherwise None."""
-    if status in ("running", "completed") and tool not in ALLOWED_TOOLS:
-        return f"the engine ran the tool {tool!r}, which DevPilot does not allow"
-    return None
+def json_answer(status: int, content_type: str, body: bytes, what: str) -> Any:
+    """The JSON of a 200 answer, or ContractError. A 200 proves nothing by itself: OpenCode answers
+    unknown paths with 200 and its web page, so the type and the content must both be JSON."""
+    media = content_type.split(";", 1)[0].strip().lower()
+    if status != 200:
+        raise ContractError("protocol", f"{what} answered {status}, expected 200")
+    if media != "application/json" or body.lstrip()[:1] == b"<":
+        raise ContractError("protocol", f"{what} answered {media or 'no content type'}, not JSON")
+    try:
+        return json.loads(body)
+    except ValueError as exc:
+        raise ContractError("protocol", f"{what} sent a body that is not JSON") from exc
+
+
+def check_event_stream(status: int, content_type: str) -> None:
+    """The answer to GET /event must really be an event stream."""
+    media = content_type.split(";", 1)[0].strip().lower()
+    if status != 200 or media != "text/event-stream":
+        raise ContractError("protocol", f"GET /event answered {status} {media or 'no content type'}, not an event stream")
+
+
+def check_filter(payload: Any) -> None:
+    """A live deployment must sit behind the API filter. A bare OpenCode server never passes this."""
+    if not isinstance(payload, dict) or payload.get("service") != FILTER_SERVICE or payload.get("healthy") is not True:
+        raise ContractError("incompatible", "the API filter did not answer as itself")
+
+
+def parse_statuses(payload: Any) -> dict[str, dict[str, Any]]:
+    """GET /session/status: session id to {"type": "idle" | "busy" | "retry", ...}. Idle sessions are not listed."""
+    if not isinstance(payload, dict) or not all(isinstance(v, dict) and v.get("type") in _SESSION_STATES for v in payload.values()):
+        raise ContractError("protocol", "GET /session/status did not return known session states")
+    return payload
+
+
+def parse_session(payload: Any, *, directory: str, permission: Any) -> dict[str, Any]:
+    """A Session: DevPilot's folder and exactly DevPilot's rule list, or it is not a session to use."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("id"), str) or not payload["id"].startswith("ses"):
+        raise ContractError("protocol", "the server's session has no usable id")
+    if payload.get("directory") != directory:
+        raise ContractError("protocol", "the server's session is not pinned to the project folder")
+    if payload.get("permission") != permission:
+        raise ContractError("protocol", "the server's session does not hold DevPilot's rule list")
+    if payload.get("parentID") is not None:
+        raise ContractError("protocol", "the server's session is a child session")
+    return payload
+
+
+def parse_messages(payload: Any, *, session_id: str) -> list[dict[str, Any]]:
+    """GET /session/{id}/message: a list of {"info": Message, "parts": [Part]} of this session."""
+    if not isinstance(payload, list):
+        raise ContractError("protocol", "GET /session/{id}/message did not return a list")
+    for entry in payload:
+        info = entry.get("info") if isinstance(entry, dict) else None
+        if not isinstance(info, dict) or not isinstance(entry.get("parts"), list):
+            raise ContractError("protocol", "a message has no info or no parts")
+        if not isinstance(info.get("id"), str) or not info["id"].startswith("msg") or info.get("role") not in _MESSAGE_ROLES:
+            raise ContractError("protocol", "a message has no usable id or role")
+        if info.get("sessionID") != session_id:
+            raise ContractError("protocol", "a message belongs to another session")
+        if info["role"] == "assistant" and not isinstance(info.get("parentID"), str):
+            raise ContractError("protocol", "an assistant message does not name its user message")
+    return payload
+
+
+def parse_tool_ids(payload: Any) -> list[str]:
+    if not isinstance(payload, list) or not all(isinstance(item, str) for item in payload):
+        raise ContractError("protocol", "GET /experimental/tool/ids did not return a list of names")
+    return payload
+
+
+def check_confirmed(payload: Any, what: str) -> None:
+    """Abort and the reject calls answer the JSON value true. Anything else did not happen."""
+    if payload is not True:
+        raise ContractError("protocol", f"{what} was not confirmed")
 
 
 def inside_workspace(path: str, workspace: str) -> bool:

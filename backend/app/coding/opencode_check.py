@@ -52,8 +52,6 @@ from app.coding.opencode_container import (
     isolation_flags,
 )
 from app.coding.opencode_contract import (
-    ALLOWED_TOOLS,
-    TOOL_PERMISSIONS,
     ContractError,
     SSEParser,
     check_health,
@@ -74,6 +72,7 @@ from app.coding.opencode_policy import (
     session_rules,
     verify_effective_config,
 )
+from app.coding.opencode_tools import ALLOWED_TOOLS, TOOL_PERMISSIONS, tool_rule_problems
 
 VERIFIED, UNSUPPORTED, UNKNOWN, FAILED = "VERIFIED", "UNSUPPORTED", "UNKNOWN", "FAILED"
 
@@ -608,11 +607,6 @@ def _operations(spec: dict[str, Any] | None, version: str) -> Check:
                  f"prompt body fields {fields}; client messageID accepted: {message_id}")  # fmt: skip
 
 
-# A value each allowed tool's permission must allow for ordinary project work.
-_TOOL_SAMPLES = {"read": "workspace/calculator.py", "edit": "workspace/calculator.py", "glob": "**/*.py",
-                 "grep": "def add", "todowrite": "*"}  # fmt: skip
-
-
 def _tools(record: Any, agents_record: Any) -> Check:
     """Every listed tool is reviewed, and the enforced rules treat it as the review decided.
 
@@ -630,17 +624,7 @@ def _tools(record: Any, agents_record: Any) -> Check:
     rules = enforced_rules(build.get("permission")) if build else None
     if rules is None:
         return Check("C12", title, UNKNOWN, "no enforced build-agent rules to compare the tools with")
-    wrong: list[str] = []
-    for tool in sorted(set(ids)):
-        permission = TOOL_PERMISSIONS[tool]
-        if permission is None:
-            continue  # `invalid` asks nothing and changes nothing
-        hidden = hidden_from_model(rules, permission)
-        if tool in ALLOWED_TOOLS:
-            if hidden or evaluate(rules, permission, _TOOL_SAMPLES.get(permission, "anything")) != "allow":
-                wrong.append(f"{tool} ({permission}) should be offered and allowed")
-        elif not hidden or evaluate(rules, permission, "anything") != "deny":
-            wrong.append(f"{tool} ({permission}) should be denied and hidden from the model")
+    wrong = tool_rule_problems(ids, rules)
     if wrong:
         return Check("C12", title, FAILED, "; ".join(wrong))
     allowed = sorted(set(ids) & ALLOWED_TOOLS)

@@ -231,7 +231,7 @@ Model IDs come only from configuration (`OPENAI_MODEL`, `OPENCODE_MODEL`).
 
 ## 6. Coding engine: OpenCode
 
-> **Status (2026-10-31):** the policy, the audit, the brief and the transaction-free tool path are built and tested. The official 1.19.5 binary is downloaded and verified on D:. The guarded real-server baseline passes (22 PASS, 0 FAIL, 2 NOT VERIFIED: unknown paths, which wait for the API filter, and the ripgrep download path). The effective policy is judged from the rules OpenCode enforces (`GET /agent`). The production container definition (`coding/opencode_container.py`) and the attempt lifecycle (`coding/session_control.py`) are built, tested and committed. The HTTP adapter uses that lifecycle, but it is not committed yet. The container launcher, the API filter, the model gateway and the `generate_code` tool are not built. [ARCHITECTURE_OPTIMIZATION.md](ARCHITECTURE_OPTIMIZATION.md) lists the open P0 items and the Phase 4C design.
+> **Status (2026-10-31):** the policy, the audit, the brief and the transaction-free tool path are built and tested. The official 1.19.5 binary is downloaded and verified on D:. The guarded real-server baseline passes (22 PASS, 0 FAIL, 2 NOT VERIFIED: unknown paths, which wait for the API filter, and the ripgrep download path). The effective policy is judged from the rules OpenCode enforces (`GET /agent`). The production container definition (`coding/opencode_container.py`) and the attempt lifecycle (`coding/session_control.py`) are built, tested and committed. The HTTP adapter uses that lifecycle, and its reading calls are verified on the real server, read-only. Its writing calls have never run on a real server. The container launcher, the API filter, the model gateway and the `generate_code` tool are not built. [ARCHITECTURE_OPTIMIZATION.md](ARCHITECTURE_OPTIMIZATION.md) lists the open P0 items and the Phase 4C design.
 
 **Deployment (design, not built)**
 - **Binary.** The official `opencode-linux-x64-musl` binary, verified against its npm SHA-512 integrity and mounted read-only (`coding/opencode_artifact.py`). The runtime image is Alpine with `libstdc++` and `libgcc`.
@@ -255,16 +255,15 @@ Model IDs come only from configuration (`OPENAI_MODEL`, `OPENCODE_MODEL`).
   2. Before every task it checks the *effective* policy. Decisions are taken from the build agent's ordered, enforced rules (`GET /agent`) evaluated on sample inputs. `GET /config` is used only for order-independent settings, because the server re-orders its keys.
   3. It refuses a workspace that already holds such files, and reverts any task that creates them.
 
-**Adapter flow** (`tools/adapters/opencode.py`, written, untested)
-1. Check health and version (1.19.0 up to, not including, 2.0.0), the server's `/doc` operations and the effective config. Nothing is sent if any check fails.
+**Adapter flow** (`tools/adapters/opencode.py`, tested through the `OpenCodeApi` Protocol)
+1. Require the API filter, then check health and version, the server's `/doc` operations, the effective policy (`GET /config` with `GET /agent`) and the tool inventory against the pinned list. Nothing is sent if any check fails, and every answer's status, type and shape is checked.
 2. Continue the task's earlier session if it still exists, otherwise `POST /session` with the policy's rules. A busy session is never prompted again.
 3. Open `GET /event`, then send the brief with `POST /session/{id}/prompt_async`.
 4. Follow this session's events:
    - Progress becomes `coding.*` events.
-   - Every permission request is rejected. The 1.19.5 SDK uses `POST /permission/{id}/reply`; older servers use `POST /session/{id}/permissions/{id}`. The adapter uses whichever the server's `/doc` lists.
-   - Questions are rejected.
-   - A forbidden tool, an edit outside `/workspace` or a token overrun aborts the session.
-5. Completion is confirmed from the session's messages. A dropped stream is reopened. A timeout or a cancelled run sends `POST /session/{id}/abort`.
+   - Every permission request and question is rejected and stops the attempt: the verified rules leave nothing to ask. The adapter uses whichever reply operation the server's `/doc` lists.
+   - A tool outside the allowlist (`coding/opencode_tools.py`), a protected path, a path outside `/workspace`, a terminal or MCP event, an unreadable event or a token overrun stops the attempt.
+5. Completion is confirmed from the session's messages, by `parentID`, using the rule the server's own loop exits on. A dropped stream is reopened. Every stop goes through `AttemptGuard.secure`, which aborts, watches, ends the container and only then allows a restore.
 6. The adapter never calls `/session/{id}/shell` or `/session/{id}/command`.
 
 **Audit after every task** (`coding/audit.py`, built and tested)

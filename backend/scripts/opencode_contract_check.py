@@ -32,6 +32,7 @@ import subprocess
 import sys
 import time
 from datetime import UTC, datetime
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -76,6 +77,7 @@ RUNS = CHECK_ROOT / "runs"
 REPORTS = CHECK_ROOT / "reports"
 HERE = Path(__file__).resolve().parent
 PROBE = HERE / "opencode_check" / "probe.py"
+RELAY = HERE / "opencode_check" / "http_relay.py"
 IMAGE_CONTEXT = HERE / "opencode_check" / "image"
 # Placeholders: no prompt is ever sent, and the container has no network to reach anything.
 CHECK_MODEL = "openai/devpilot-contract-check"
@@ -86,14 +88,18 @@ LOG_TAIL_BYTES = 256 * 1024
 
 def docker(args: list[str], *, timeout: float, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[bytes]:
     """One docker CLI call. A timeout becomes exit code 124 so the caller records it and still cleans up."""
-    executable = shutil.which("docker")
-    if executable is None:
-        raise RuntimeError("docker is not on PATH")
     try:
-        return subprocess.run([executable, *args], capture_output=True, timeout=timeout, env=env, check=False)
+        return subprocess.run([docker_path(), *args], capture_output=True, timeout=timeout, env=env, check=False)
     except subprocess.TimeoutExpired as exc:
         message = f"docker {args[0]} timed out after {timeout:g} s".encode()
         return subprocess.CompletedProcess(exc.cmd, 124, stdout=exc.stdout or b"", stderr=(exc.stderr or b"") + message)
+
+
+def docker_path() -> str:
+    executable = shutil.which("docker")
+    if executable is None:
+        raise RuntimeError("docker is not on PATH")
+    return executable
 
 
 def _text(data: bytes, limit: int = LOG_TAIL_BYTES) -> str:
@@ -242,6 +248,7 @@ def _prepare(c: CheckContainer, files: dict[str, str]) -> None:
     config = managed_config(model=CHECK_MODEL, gateway_base_url=CHECK_GATEWAY)
     (c.config_dir / "opencode.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     shutil.copyfile(PROBE, c.checks_dir / "probe.py")
+    shutil.copyfile(RELAY, c.checks_dir / "http_relay.py")
     (c.checks_dir / "input.json").write_text(json.dumps(probe_input()) + "\n", encoding="utf-8")
     for rel, text in files.items():
         target = c.workspace_dir.joinpath(*rel.split("/"))
@@ -250,9 +257,19 @@ def _prepare(c: CheckContainer, files: dict[str, str]) -> None:
 
 
 def one_run(
-    label: str, binary_dir: Path, files: dict[str, str], *, project_config_off: bool, tmp_exec: bool, guard: bool = False
+    label: str,
+    binary_dir: Path,
+    files: dict[str, str],
+    *,
+    project_config_off: bool,
+    tmp_exec: bool,
+    guard: bool = False,
+    exercise: Callable[[str, str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Start one server, probe it, remove everything. Returns the redacted record."""
+    """Start one server, probe it, remove everything. Returns the redacted record.
+
+    `exercise(container name, password)` replaces the probe, in the same container and with the same
+    checks and cleanup. It must catch its own failures: the container is removed either way."""
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     run_dir = RUNS / f"{stamp}-{label}-{secrets.token_hex(3)}"
     project_opencode = any(rel.startswith(".opencode/") for rel in files)
@@ -279,11 +296,14 @@ def one_run(
         record["isolation_problems"] = isolation_problems(inspect, c)
         record["isolation"] = isolation_summary(inspect)
         record["image_id"] = inspect.get("Image")
-        probe = docker(build_exec_args(c.name, wait_seconds=WAIT_SECONDS), timeout=WAIT_SECONDS + 120)
-        try:
-            record["report"] = json.loads(probe.stdout)
-        except ValueError:
-            record["report"] = {"probe_error": f"exit {probe.returncode}: " + _text(probe.stdout + probe.stderr, 4000)}
+        if exercise is not None:
+            record["report"] = exercise(c.name, password)
+        else:
+            probe = docker(build_exec_args(c.name, wait_seconds=WAIT_SECONDS), timeout=WAIT_SECONDS + 120)
+            try:
+                record["report"] = json.loads(probe.stdout)
+            except ValueError:
+                record["report"] = {"probe_error": f"exit {probe.returncode}: " + _text(probe.stdout + probe.stderr, 4000)}
         logs = docker(["logs", "--tail", "400", c.name], timeout=30)
         record["server_log_tail"] = _redact(_text(logs.stdout + logs.stderr), [password, token])
         state = docker(["inspect", "--format", "{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}}", c.name], timeout=30)
@@ -322,6 +342,22 @@ def _save(name: str, data: dict[str, Any]) -> Path:
     path = REPORTS / name
     write_report(path, data)  # UTF-8, atomic
     return path
+
+
+def save_report(name: str, data: dict[str, Any]) -> Path:
+    return _save(name, data)
+
+
+def ready_binary() -> tuple[Path, str] | None:
+    return _preflight(need_image=True)
+
+
+def preflight_ok() -> bool:
+    return _preflight(need_image=True) is not None
+
+
+def sweep() -> list[str]:
+    return _sweep()
 
 
 def _preflight(*, need_image: bool) -> tuple[Path, str] | None:

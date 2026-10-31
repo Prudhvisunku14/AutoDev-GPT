@@ -354,7 +354,3 @@ def session_rules() -> list[dict[str, str]]:
     rules += [{"permission": name, "pattern": "*", "action": "allow"} for name in _ALLOWED]
     rules += [{"permission": name, "pattern": "*", "action": "deny"} for name in _DENIED]
     return rules
-
-
-# Tools that must never run. A completed call to one of these means the policy did not hold.
-FORBIDDEN_TOOLS = frozenset({"bash", "shell", "webfetch", "websearch", "codesearch", "task", "skill", "question"})

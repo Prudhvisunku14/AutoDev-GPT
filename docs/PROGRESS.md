@@ -6,7 +6,7 @@ Phase 4D Round 1 (2026-10-31):
 - The production container definition, the install guard and the A1/A2 lifecycle are tested and committed.
 - **The guarded baseline against the real server passes: 22 PASS, 0 FAIL, 2 NOT VERIFIED (C13, unknown paths, which depend on the API filter, and C18, the ripgrep download path, which depends on a runtime image).**
 
-The OpenCode adapter itself is not committed, and nothing calls OpenCode yet. Phase 3 is verified in real containers.
+Phase 4D Round 2 (2026-10-31): the adapter and the tool allowlist are built and tested, and the adapter's HTTP client reads the real server, read-only. They are committed. Nothing calls OpenCode. Phase 3 is verified in real containers.
 
 ## Phase tracker
 
@@ -16,7 +16,7 @@ The OpenCode adapter itself is not committed, and nothing calls OpenCode yet. Ph
 | 1 | Backend foundation | ✅ Done (2026-10-29) | Python 3.12.9 at `D:\python.exe` |
 | 2 | GPT orchestrator | ✅ Done (2026-10-29), verified with FakeLLM; first live GPT call verified (analysis accepted, 1 call, 919 tokens) | OpenAI API key (user) for live use |
 | 3 | Docker sandbox | 🟡 Isolation controls verified in real containers (2026-10-30); install proxy and orphan-sweep test on a real container still open | Docker Desktop running, data on D:, `python:3.12-alpine` present |
-| 4 | OpenCode integration | 🟡 Foundation committed; binary verified; precedence verified; Phase 4D Stages 1–4 committed (2026-10-31): production container definition, install guard, A1/A2 lifecycle. Guarded baseline 22 PASS, 0 FAIL, 2 NOT VERIFIED. Adapter not committed; not wired into runs | Stage 5 (adapter reads `GET /agent`), API filter, model gateway, launcher, runtime image with ripgrep, approval for live use |
+| 4 | OpenCode integration | 🟡 Foundation committed; binary verified; precedence verified; Phase 4D Stages 1–4 committed as `f4aa786` (2026-10-31). Stages 5 and 6 committed: adapter, tool allowlist, read-only real-server check (28 PASS, 0 FAIL). Not wired into runs | API filter, model gateway, launcher, runtime image with ripgrep, approval for live use |
 | 5 | Verification-guided development | ⏳ Not started | — |
 | 6 | Failure classification and recovery | ⏳ Not started | — |
 | 7 | Adaptive tool selection | ⏳ Not started | — |
@@ -715,3 +715,38 @@ No change was made to the adapter, the policy module or the contract module.
 - The guarantee rests on `terminate()` telling the truth: a stop that says "gone" while a quiet writer survives cannot be detected. Stage 9 must confirm with an independent `docker inspect`.
 - The adapter's HTTP layer is untested. Abort-to-idle time on a busy session and session-level rule precedence are unmeasured.
 - No code clears a quarantine yet. It needs a person.
+
+### Phase 4D Round 2: adapter, tool allowlist and read-only server check (2026-10-31)
+
+**Round 1 is committed as `f4aa786`,** without the adapter, its test file and the egress line. On an export of the staged files: 1051 passed, 10 skipped, 0 failed.
+
+Committed after approval, without the `127.0.0.1:4096` egress line. No prompt, model call, paid API, image build, download or network change was made. The API filter, gateway, launcher and `generate_code` are not built.
+
+**Stage 5, adapter** (`tools/adapters/opencode.py`).
+- New `OpenCodeApi` Protocol: the decisions are tested with an in-memory fake, and `OpenCodeClient` is the thin HTTP side.
+- Before a session exists: the API filter answers, then health and version, `/doc`, `GET /config` with `GET /agent`, and the tool inventory.
+- Every answer is checked: status 200, `application/json`, body shape. HTML with a 200 is refused. Sessions must hold DevPilot's folder and exact rule list. Abort and rejections must answer the JSON value `true`.
+- Completion follows the server's own loop rule, by `parentID` (`session_control.turn_finished`), never by counting messages. Messages from before the attempt are ignored, for completion and for tokens.
+- Duplicated contract code is gone. The client's message ID, and the A1/A2 lifecycle, are kept.
+
+**Security finding: the prompt's `tools` field replaces the session's rules.** On 1.19.5 `SessionPrompt.prompt` turns `tools` into a rule list and stores it over the session's whole list. The adapter's "further layer" would have silently removed the protected-path rules. It is gone, sessions are checked against the exact list, and the API filter must refuse `tools`.
+
+**Other fixes the reading found:**
+- A late finish could have returned COMPLETED from a stopped attempt. It now returns CANCELLED.
+- The adapter treated the workspace root as outside the project, which would have stopped a legitimate `glob`.
+- `permission.v2.asked` and `question.v2.asked` were not fully handled.
+
+**Stage 6, allowlist** (`coding/opencode_tools.py`).
+- `read, glob, grep, edit, write, apply_patch, todowrite`, plus `invalid`, which executes nothing. The denylist is gone.
+- The server's list must equal the pinned 14 tools of 1.19.5. Any other release is unreviewed.
+- `apply_patch` paths are read from the patch itself, and move destinations are judged, because OpenCode asks `edit` only for the source.
+- Any permission request or question stops the task. Terminal and MCP events stop it. An event that cannot be read stops it.
+- A `pending` part under a forbidden name is not a violation: that is a model asking, and OpenCode repairs it to `invalid`.
+
+**Read-only real-server check** (one run, approved): 28 PASS, 0 FAIL. Same isolation as the baseline, confirmed by `docker inspect`. 20 GET requests reached the server through a relay inside the container, because it has no port. 7 others were refused on the host, and the relay refused 4 more on its own. No session exists afterwards, the workspace is unchanged, and the server log shows no session activity. This is read-only compatibility, not coding integration. Evidence: `D:\DevPilotCache\opencode-check\reports\20261031T055130Z-readonly-http.json`.
+
+**Server finding:** 1.19.5 sends `null` for optional agent fields its own schema types as boolean, number or string. Nothing DevPilot reads depends on them.
+
+**Tests:** 1593 passed, 10 skipped, 0 failed. Coverage is 96%, or 97% without the adapter. The adapter is at 84% offline, and 90% with the real read-only run. A mutation check broke the new logic in 52 ways in a throwaway copy. The tests caught 51; the survivor exposed a gap, now tested, and caught. Lines still unexercised are the client's writing calls, which a read-only check cannot reach.
+
+**Open:** see "Phase 4D Round 2" in ARCHITECTURE_OPTIMIZATION.md.

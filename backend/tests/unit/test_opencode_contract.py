@@ -13,21 +13,27 @@ import pytest
 from pydantic import SecretStr
 
 from app.coding.opencode_contract import (
-    ALLOWED_TOOLS,
+    FILTER_SERVICE,
     REQUIRED_OPERATIONS,
-    TOOL_PERMISSIONS,
     ContractError,
     SSEParser,
     check_health,
     check_spec,
+    check_confirmed,
+    check_event_stream,
+    check_filter,
     inside_workspace,
+    json_answer,
+    parse_messages,
+    parse_session,
+    parse_statuses,
+    parse_tool_ids,
     opencode_config_problem,
     operations,
     parse_version,
     sensitive_operations,
     spec_from_doc,
     template,
-    tool_violation,
 )
 from app.core.egress import EgressPolicy
 from tests.helpers import make_settings
@@ -137,8 +143,9 @@ def test_no_way_to_answer_permissions_is_incompatible() -> None:
 def test_sensitive_operations_are_inventoried() -> None:
     ops = FULL | {("post", "/session/{}/shell"), ("patch", "/config"), ("put", "/auth/{}"), ("get", "/mcp"), ("post", "/tui/x")}
     contract = check_spec(_spec(ops), "1.19.5")
-    assert contract.sensitive == ("GET /mcp", "PATCH /config", "POST /session/{}/shell", "POST /tui/x", "PUT /auth/{}")
-    assert sensitive_operations(set(FULL)) == []
+    assert contract.sensitive == ("GET /experimental/tool/ids", "GET /mcp", "PATCH /config", "POST /session/{}/shell", "POST /tui/x", "PUT /auth/{}")
+    # The one sensitive operation DevPilot itself needs: the API filter's allowlist must name it.
+    assert sensitive_operations(set(FULL)) == ["GET /experimental/tool/ids"]
 
 
 # --- SSE parsing --------------------------------------------------------------------------
@@ -231,23 +238,141 @@ def test_workspace_containment(path: str, inside: bool) -> None:
     assert inside_workspace(path, "/workspace") is inside
 
 
-def test_only_allowlisted_tools_may_run() -> None:
-    for tool in ("write", "edit", "apply_patch", "read", "glob", "grep", "todowrite", "invalid"):
-        assert tool_violation(tool, "completed") is None
-    assert tool_violation("bash", "pending") is None  # requested, not run: the permission system decides
-    # bash and friends, plus tools 1.19.5 does not have (a newer release adding one is refused until reviewed)
-    for tool in ("bash", "webfetch", "task", "question", "interactive_shell", "multiedit", "patch", "list", "some_future_tool"):
-        assert "does not allow" in (tool_violation(tool, "running") or "")
-        assert "does not allow" in (tool_violation(tool, "completed") or "")
-    assert {"bash", "webfetch", "websearch", "task", "skill", "question", "lsp", "codesearch"}.isdisjoint(ALLOWED_TOOLS)
+# --- Each answer is checked before anything uses it (pure functions, no HTTP) ------------------
 
 
-def test_every_allowed_tool_maps_to_a_reading_or_editing_permission() -> None:
-    # From the 1.19.5 binary: edit, write and apply_patch ask "edit"; invalid asks nothing.
-    assert {TOOL_PERMISSIONS[t] for t in ALLOWED_TOOLS} == {"read", "glob", "grep", "edit", "todowrite", None}
-    assert [t for t in ("edit", "write", "apply_patch") if TOOL_PERMISSIONS[t] != "edit"] == []
-    assert ALLOWED_TOOLS <= TOOL_PERMISSIONS.keys()
-    assert all(TOOL_PERMISSIONS[t] == t for t in TOOL_PERMISSIONS.keys() - ALLOWED_TOOLS)
+def test_a_json_200_is_accepted() -> None:
+    assert json_answer(200, "application/json; charset=utf-8", b'{"a": 1}', "GET /x") == {"a": 1}
+
+
+@pytest.mark.parametrize(
+    ("status", "content_type", "body", "reason"),
+    [
+        (200, "text/html; charset=utf-8", b"<!doctype html><html></html>", "text/html, not JSON"),  # what unknown paths answer
+        (200, "application/json", b"<!doctype html><html></html>", "not JSON"),  # HTML under a JSON label
+        (200, "application/json", b"  \n <html>", "not JSON"),
+        (200, "", b"{}", "no content type"),
+        (200, "text/plain", b"{}", "text/plain"),
+        (200, "application/json", b"{not json", "not JSON"),
+        (200, "application/json", b"", "not JSON"),
+        (204, "application/json", b"{}", "expected 200"),
+        (302, "application/json", b"{}", "expected 200"),
+    ],
+)
+def test_anything_but_a_json_200_is_refused(status: int, content_type: str, body: bytes, reason: str) -> None:
+    with pytest.raises(ContractError, match=reason) as caught:
+        json_answer(status, content_type, body, "GET /x")
+    assert caught.value.kind == "protocol"
+
+
+def test_an_event_stream_must_be_one() -> None:
+    check_event_stream(200, "text/event-stream; charset=utf-8")
+    for status, content_type in ((200, "text/html"), (200, ""), (200, "application/json"), (204, "text/event-stream")):
+        with pytest.raises(ContractError, match="not an event stream"):
+            check_event_stream(status, content_type)
+
+
+def test_only_the_filter_itself_passes_the_filter_check() -> None:
+    check_filter({"service": FILTER_SERVICE, "healthy": True})
+    for payload in ({}, {"service": FILTER_SERVICE}, {"service": FILTER_SERVICE, "healthy": False}, {"service": "x", "healthy": True}, [], None, "<html>"):
+        with pytest.raises(ContractError, match="API filter") as caught:
+            check_filter(payload)
+        assert caught.value.kind == "incompatible"
+
+
+def test_session_states_are_the_three_the_schema_lists() -> None:
+    states = {"ses_1": {"type": "busy"}, "ses_2": {"type": "retry", "attempt": 1, "message": "m", "next": 2}, "ses_3": {"type": "idle"}}
+    assert parse_statuses(states) == states
+    assert parse_statuses({}) == {}
+    for broken in ([], None, {"ses_1": "busy"}, {"ses_1": {}}, {"ses_1": {"type": "something-new"}}):
+        with pytest.raises(ContractError, match="session states"):
+            parse_statuses(broken)
+
+
+RULES = [{"permission": "*", "pattern": "*", "action": "deny"}]
+
+
+def _session(**changes: Any) -> dict[str, Any]:
+    return {"id": "ses_abc", "directory": "/workspace", "permission": RULES, **changes}
+
+
+def test_a_session_must_be_in_the_project_folder_with_exactly_the_rules_sent() -> None:
+    session = _session()
+    assert parse_session(session, directory="/workspace", permission=RULES) is session
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        (None, "no usable id"),
+        ([], "no usable id"),
+        ({"id": 7}, "no usable id"),
+        (_session(id="msg_abc"), "no usable id"),
+        (_session(directory="/"), "not pinned"),
+        (_session(permission=None), "rule list"),  # `tools` on a prompt replaces the list: this is what it would look like
+        (_session(permission=[{"permission": "bash", "pattern": "*", "action": "deny"}]), "rule list"),
+        (_session(parentID="ses_parent"), "child session"),
+    ],
+)
+def test_a_session_that_is_not_devpilots_is_refused(payload: Any, reason: str) -> None:
+    with pytest.raises(ContractError, match=reason):
+        parse_session(payload, directory="/workspace", permission=RULES)
+
+
+def _message(role: str = "assistant", **changes: Any) -> dict[str, Any]:
+    info: dict[str, Any] = {"id": "msg_a", "sessionID": "ses_1", "role": role}
+    if role == "assistant":
+        info["parentID"] = "msg_u"
+    return {"info": {**info, **changes}, "parts": []}
+
+
+def test_messages_follow_the_real_schema() -> None:
+    entries = [_message("user"), _message()]
+    assert parse_messages(entries, session_id="ses_1") is entries
+    assert parse_messages([], session_id="ses_1") == []
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        ({}, "not return a list"),
+        (["x"], "no info"),
+        ([{"info": {}}], "no info"),
+        ([{"parts": []}], "no info"),
+        ([_message(id=None)], "no usable id"),
+        ([_message(id="abc")], "no usable id"),
+        ([_message(role="system")], "no usable id"),
+        ([_message(sessionID="ses_other")], "another session"),
+        ([_message(parentID=None)], "does not name"),
+    ],
+)
+def test_a_message_outside_the_schema_is_refused(payload: Any, reason: str) -> None:
+    with pytest.raises(ContractError, match=reason):
+        parse_messages(payload, session_id="ses_1")
+
+
+def test_tool_ids_are_a_list_of_names() -> None:
+    assert parse_tool_ids(["read", "edit"]) == ["read", "edit"]
+    for broken in ({}, None, [1], "read"):
+        with pytest.raises(ContractError, match="list of names"):
+            parse_tool_ids(broken)
+
+
+def test_only_the_json_value_true_confirms() -> None:
+    check_confirmed(True, "the abort")
+    for answer in (False, None, 1, "true", {}, []):
+        with pytest.raises(ContractError, match="the abort was not confirmed"):
+            check_confirmed(answer, "the abort")
+
+
+def test_a_client_message_id_is_read_from_the_prompt_body_schema() -> None:
+    plain = _spec(FULL)
+    assert check_spec(plain, "1.19.5").client_message_id is False
+    with_id = _spec(FULL)
+    with_id["paths"]["/session/{id}/prompt_async"]["post"] = {
+        "requestBody": {"content": {"application/json": {"schema": {"properties": {"parts": {}, "messageID": {}}}}}}
+    }
+    assert check_spec(with_id, "1.19.5").client_message_id is True
 
 
 # --- Configuration ------------------------------------------------------------------------

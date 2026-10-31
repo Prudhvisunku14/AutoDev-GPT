@@ -260,6 +260,45 @@ def _settled(messages: Sequence[Any], known: Iterable[str]) -> bool:
     return last.get("id") in set(known)
 
 
+def new_entries(messages: Sequence[Any], known: Iterable[str]) -> list[dict[str, Any]]:
+    """The entries added since `known` was read: nothing an earlier attempt left in the session counts."""
+    seen = set(known)
+    entries = [m for m in messages if isinstance(m, dict) and isinstance(m.get("info"), dict)]
+    return [m for m in entries if m["info"].get("id") not in seen]
+
+
+def turn_finished(messages: Sequence[Any], *, known: Iterable[str], message_id: str | None) -> bool:
+    """True when this attempt's turn is over, by the rule the engine's own loop exits on (read from the
+    1.19.5 binary): the newest assistant message answers the newest user message, its `finish` is not
+    `tool-calls` or `unknown`, and none of its tools is still going. An error also ends the turn.
+
+    Relationships, not counts. `parentID` ties a reply to its prompt, and the newest user message may be
+    later than ours, because compaction adds one. When the exact prompt is known it must be present."""
+    entries = new_entries(messages, known)
+    users = [m["info"] for m in entries if m["info"].get("role") == "user"]
+    replies = [m for m in entries if m["info"].get("role") == "assistant"]
+    if not users or not replies or (message_id is not None and message_id not in {u.get("id") for u in users}):
+        return False
+    last = replies[-1]
+    info = last["info"]
+    if info.get("parentID") != users[-1].get("id"):
+        return False
+    if info.get("error"):
+        return True
+    times = info.get("time") if isinstance(info.get("time"), dict) else {}
+    if not times.get("completed") or info.get("finish") in (None, "tool-calls", "unknown"):
+        return False
+    parts = last.get("parts") if isinstance(last.get("parts"), list) else []
+    return not any(_tool_going(part) for part in parts)
+
+
+def _tool_going(part: Any) -> bool:
+    if not isinstance(part, dict) or part.get("type") != "tool":
+        return False
+    state = part.get("state") if isinstance(part.get("state"), dict) else {}
+    return state.get("status") in ("pending", "running")
+
+
 def _signature(messages: Sequence[Any]) -> tuple[Any, ...]:
     """Changes when a message or a part is added or a message is updated."""
     rows: list[tuple[Any, ...]] = []

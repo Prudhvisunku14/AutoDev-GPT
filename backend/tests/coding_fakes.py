@@ -82,9 +82,11 @@ class FakeEngine:
         self.working = False
         self.state = None
         info = self.entries[-1]["info"]
-        info["time"] = {"completed": 2}
+        info["time"] = {"created": 1, "completed": 2}
         if error:
-            info["error"] = {"name": "MessageAbortedError"}
+            info["error"] = {"name": "MessageAbortedError", "data": {"message": "aborted"}}
+        else:
+            info["finish"] = "stop"
 
     def killed(self) -> None:
         self.working = False
@@ -95,8 +97,10 @@ class FakeEngine:
         self.working = True
         self.state = "busy"
         user_id = self.prompts[-1].get("messageID", "msg_server_chosen")
-        self.entries.append({"info": {"id": user_id, "role": "user", "time": {"created": 1}}, "parts": [{"type": "text"}]})
-        self.entries.append({"info": {"id": f"{user_id}_reply", "role": "assistant", "time": {"created": 1}}, "parts": []})
+        user = {"id": user_id, "sessionID": SESSION, "role": "user", "time": {"created": 1}}
+        reply = {"id": f"{user_id}_reply", "sessionID": SESSION, "role": "assistant", "parentID": user_id, "time": {"created": 1}}
+        self.entries.append({"info": user, "parts": [{"type": "text"}]})
+        self.entries.append({"info": reply, "parts": []})
 
     def _read(self) -> None:
         if self.unreadable:

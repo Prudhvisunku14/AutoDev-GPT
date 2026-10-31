@@ -25,8 +25,10 @@ from app.coding.session_control import (
     SubmitVerdict,
     classify_submission,
     message_ids,
+    new_entries,
     new_message_id,
     observe_quiescence,
+    turn_finished,
     workspace_fingerprint,
 )
 from app.coding.types import AttemptPhase
@@ -560,6 +562,76 @@ def test_a_finish_from_a_thread_cannot_race_a_stop_into_an_illegal_phase() -> No
         for t in threads:
             t.join()
         assert errors == [] and guard.phase is P.SAFE_TO_RESTORE
+
+
+# --- Completion by relationship --------------------------------------------------------------
+
+
+def _user(message_id: str = "msg_u") -> dict[str, Any]:
+    return {"info": {"id": message_id, "role": "user", "time": {"created": 1}}, "parts": []}
+
+
+def _reply(parent: str = "msg_u", *, finish: str | None = "stop", completed: bool = True, parts: list[Any] | None = None, **info: Any) -> dict[str, Any]:
+    times: dict[str, int] = {"created": 2, **({"completed": 3} if completed else {})}
+    return {"info": {"id": f"msg_r_{parent}", "role": "assistant", "parentID": parent, "time": times, "finish": finish, **info}, "parts": parts or []}
+
+
+def _tool_part(status: str) -> dict[str, Any]:
+    return {"type": "tool", "tool": "edit", "state": {"status": status, "input": {}}}
+
+
+@pytest.mark.parametrize("finish", ["stop", "length", "content-filter", "end_turn"])
+def test_a_finished_reply_to_the_exact_prompt_ends_the_turn(finish: str) -> None:
+    assert turn_finished([_user(), _reply(finish=finish)], known=[], message_id="msg_u")
+
+
+@pytest.mark.parametrize(
+    ("messages", "message_id"),
+    [
+        ([], "msg_u"),  # nothing yet
+        ([_user()], "msg_u"),  # accepted, no reply yet
+        ([_reply()], "msg_u"),  # a reply with no prompt
+        ([_user("msg_other"), _reply("msg_other")], "msg_u"),  # our prompt is not there
+        ([_user(), _reply(finish="tool-calls")], "msg_u"),  # the model wants another step
+        ([_user(), _reply(finish="unknown")], "msg_u"),
+        ([_user(), _reply(finish=None)], "msg_u"),
+        ([_user(), _reply(completed=False)], "msg_u"),  # still writing
+        ([_user(), _reply("msg_elsewhere")], "msg_u"),  # answers another prompt
+        ([_user(), _reply(parts=[_tool_part("running")])], "msg_u"),
+        ([_user(), _reply(parts=[_tool_part("pending")])], "msg_u"),
+    ],
+)
+def test_anything_short_of_that_does_not(messages: list[Any], message_id: str) -> None:
+    assert not turn_finished(messages, known=[], message_id=message_id)
+
+
+def test_tools_that_ended_do_not_hold_the_turn_open() -> None:
+    parts = [_tool_part("completed"), _tool_part("error"), {"type": "text"}, "odd"]
+    assert turn_finished([_user(), _reply(parts=parts)], known=[], message_id="msg_u")
+
+
+def test_an_error_ends_the_turn_even_without_a_finish() -> None:
+    assert turn_finished([_user(), _reply(finish=None, completed=False, error={"name": "APIError"})], known=[], message_id="msg_u")
+
+
+def test_a_later_user_message_from_compaction_is_followed() -> None:
+    messages = [_user(), _reply(finish="stop", summary=True), _user("msg_continue"), _reply("msg_continue")]
+    assert turn_finished(messages, known=[], message_id="msg_u")
+    messages = [_user(), _reply(finish="stop", summary=True), _user("msg_continue")]
+    assert not turn_finished(messages, known=[], message_id="msg_u")
+
+
+def test_what_an_earlier_attempt_left_never_counts() -> None:
+    old = [_user("msg_old"), _reply("msg_old")]
+    known = ["msg_old", "msg_r_msg_old"]
+    assert not turn_finished(old, known=known, message_id=None)
+    assert not turn_finished([*old, _user()], known=known, message_id=None)
+    assert turn_finished([*old, _user(), _reply()], known=known, message_id=None)
+
+
+def test_new_entries_leave_out_what_was_known_and_anything_malformed() -> None:
+    entries = [_user("msg_old"), _user("msg_new"), "odd", {"info": "odd"}]
+    assert new_entries(entries, ["msg_old"]) == [_user("msg_new")]
 
 
 # --- Watching --------------------------------------------------------------------------------

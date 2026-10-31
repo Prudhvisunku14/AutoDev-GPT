@@ -282,7 +282,7 @@ These are findings only. The adapter file was not changed in this stage.
 
 | Priority | Recommendation |
 |---|---|
-| **P0** | Fix A1 and A2 (an ambiguous prompt, an unconfirmed abort) before any live coding task. **Done in Phase 4D Round 1;** the adapter's use of it is not committed yet. |
+| **P0** | Fix A1 and A2 (an ambiguous prompt, an unconfirmed abort) before any live coding task. **Done in Phase 4D Rounds 1 and 2.** |
 | **P0** | Put an API filter in front of OpenCode that forwards only the operations the adapter needs. It blocks the command, config, auth and MCP endpoints even for a caller with the password. |
 | **P0** | Run the real-server contract check above, which is the adapter's test route for now. Then confirm `/doc`, the session-status semantics and the time from abort to idle. |
 | **P0** | Run one container and one internal network per active project, and stop it when the run pauses or ends. |
@@ -528,17 +528,17 @@ Why the filter is a container: a container attached only to internal networks ca
 - `POST/GET <allowlisted path>` with `Authorization: Bearer <filter token>`. The token is random per start and held in backend memory. It is compared in constant time.
 - Upstream is `http://opencode:4096` with basic auth.
 - Allowlist (method, path template, query keys, body rule):
-  - `GET /global/health`, `GET /doc` (or the confirmed spec path), `GET /config`, `GET /agent`, `GET /session/status`
+  - `GET /global/health`, `GET /doc`, `GET /config`, `GET /agent`, `GET /session/status`, `GET /experimental/tool/ids`
   - `POST /session` (body only `title` and `permission`)
   - `GET /session/{id}`, `GET /session/{id}/message`
-  - `POST /session/{id}/prompt_async`: `agent` must be `build`, `model` must be the configured one, only text parts, at most 64 KB
+  - `POST /session/{id}/prompt_async`: `agent` must be `build`, `model` must be the configured one, only text parts, at most 64 KB. It refuses `tools`, which would replace the session's rule list, and `system`, `noReply`, `format` and `variant`.
   - `POST /session/{id}/abort`
   - `GET /event`: streamed, with a per-event size cap
   - the permission reply (whichever form C11 confirms), whose body can only reject
   - `POST /question/{id}/reject`
 - The only query key allowed is `directory=/workspace`.
 - Everything else, including unknown paths (C13), gets 403 and an audit line. It is never forwarded.
-- Response size caps apply. `GET /devpilot/health` reports the filter's own health.
+- Response size caps apply. `GET /devpilot/health` answers JSON `{"service": "devpilot-api-filter", "healthy": true}`. The adapter requires it before every task, so it refuses a bare server.
 
 **Model gateway interface:**
 - `POST /v1/<model endpoint OpenCode's OpenAI provider uses>`, with `Authorization: Bearer <gateway token>`. The endpoint (Responses or Chat Completions) is to be confirmed by a later check.
@@ -925,3 +925,79 @@ Environment variables that would reconfigure OpenCode (`OPENCODE_CONFIG`, `OPENC
 2. **`recover` is not wired in.** Stage 10 must call it at backend startup.
 3. **Every failed attempt costs a container.** Termination is required even when everything looks quiet. The cost is about 5 s per restart, accepted until a live run measures abort-to-idle.
 4. **Not measured:** abort-to-idle time on a busy session, session-level rule precedence, and the adapter's HTTP layer.
+
+---
+
+# Phase 4D Round 2: adapter, allowlist and what remains (2026-10-31)
+
+Committed, without the `127.0.0.1:4096` egress line. Items marked as binary-derived were read from the pinned 1.19.5 binary as bytes, never by running it.
+
+## Findings
+
+| # | Finding | How it is known | What changed |
+|---|---|---|---|
+| 1 | **A prompt's `tools` field replaces the session's whole rule list** (`SessionPrompt.prompt`: `H.permission=he; setPermission(...)`) | Binary | Removed from the adapter. Sessions are compared with the exact list. **The API filter must refuse `tools`.** |
+| 2 | The server sends `null` for optional fields its schema types as boolean, number or string | Observed, 7 fields on the `build` agent | Reported by the check. Nothing DevPilot reads depends on them. |
+| 3 | A model asking for a hidden tool makes a `pending` part under that name, repaired to `invalid`. Only `tool-call` sets the name for execution. | Binary | `pending` is not a violation; every later state is |
+| 4 | `invalid` returns a fixed text, asks no permission and is left out of `activeTools` | Binary | Allowed, as a tool that executes nothing |
+| 5 | The loop exits when the newest assistant's `parentID` is the newest user message, its `finish` is not `tool-calls` or `unknown`, and no tool is going | Binary | `turn_finished` uses the same rule |
+| 6 | `apply_patch` reports `metadata.files[].movePath`; its parser reads `*** Move to:` at the start of a line | Binary | Both are read, so destinations are judged |
+
+## Tool review (pinned 1.19.5)
+
+| Tool | Decision | Permission | Note |
+|---|---|---|---|
+| `read` | Allowed | `read` | Reads one file |
+| `glob`, `grep` | Allowed | `glob`, `grep` | Run ripgrep (see the runtime image below) |
+| `edit` | Allowed | `edit` | One file |
+| `write` | Allowed | `edit` | One file |
+| `apply_patch` | Allowed | `edit` | Add, update, move, delete. `edit` is asked only for sources, so destinations are judged by DevPilot. |
+| `todowrite` | Allowed | `todowrite` | OpenCode's own task list; no project file |
+| `invalid` | Allowed, executes nothing | none | See finding 4 |
+| `bash`, `task`, `webfetch`, `websearch`, `skill`, `question` | Refused | their own | Denied, hidden from the model, and a stop if one runs |
+| `lsp`, `plan_exit`, `codesearch` | Refused | their own | Defined in the binary, not listed by this server |
+| Anything else, including MCP tools | Refused | n/a | Not on the allowlist |
+
+Reading events is a tripwire: the tool may already have written. The audit of real files is the authority on what changed. Neither replaces isolation: the audit runs afterwards, and the container's lack of network and its private copy are what limit the damage.
+
+## Read-only check on the real server
+
+The container has no port, so `RelayTransport` carries each request through `docker exec -i` into `http_relay.py`, inside the container. The adapter's real `OpenCodeClient` runs on top, unchanged. The password travels on stdin, never on a command line. Two independent layers refuse anything but an allowlisted GET.
+
+| Verified on the real server | Not verified |
+|---|---|
+| Health, `/doc`, `/config`, `/agent`, `/session/status`, `/experimental/tool/ids`, `/event` | `POST /session` through the client (a saved real answer passes `parse_session`) |
+| Answers match the server's own schema | `prompt_async` answering 204, and `messageID` being honoured |
+| The effective-policy and inventory checks pass on real answers | Real tool and message events: they come from the schema and the binary |
+| 404, 401 and HTTP 200 HTML are each handled correctly | `abort` on a busy session, and abort-to-idle time |
+| The adapter refuses to drive a bare server | Session-level rule precedence |
+
+## What the next stages must do
+
+**1. The launcher must confirm termination independently.** `terminate()` returns True only if a separate read shows the container gone. The exit code of `docker rm` is not that read, and **`DockerCli.inspect` cannot be reused as it stands: it returns `None` for any failure, so an unreachable Docker daemon would look like a container that is gone.** The launcher must see "No such container" specifically, and treat everything else as unconfirmed, which quarantines.
+
+**2. Recovery at backend startup.** Nothing calls `recover` yet. In the `lifespan` of `main.py`, beside `_sweep_sandbox` and before any run can advance:
+1. Read `store.unresolved()`.
+2. For each, build a guard with that project's launcher and a control. If the server is gone, the control simply fails, and `recover` goes straight to termination.
+3. Call `guard.recover(control)`. It sends no prompt.
+4. If the result is `SAFE_TO_RESTORE`, find the checkpoint and call `guard.restore`.
+5. Report any quarantined project. Nothing clears it automatically.
+
+This must finish before `loop._recover_interrupted` reports the call to GPT, so that a retry does not meet a held project. Quarantine still needs an approved way for a person to clear it.
+
+**3. The adapter cannot code without the API filter.** Enforced, not assumed: the first step of every task requires `GET /devpilot/health` to answer as the filter. A bare server answers with its web page and the task ends INCOMPATIBLE before anything else, which the real-server run showed. Three other gates stand behind it: no runtime image is approved, no launcher exists, and `generate_code` is not registered. Limit: this shows a filter answers, not that it carries all traffic. The filter's own token must do that in Stage 7.
+
+**4. The runtime image still needs ripgrep.** `grep` and `glob` are allowed tools, so the first real task would try to download it from github.com. C18 stays NOT VERIFIED and the production builder refuses any image without `rg`. Building that image needs approval.
+
+**5. C13 stays NOT VERIFIED** until the API filter refuses unknown paths. The server answered 200 HTML again in this run.
+
+**6. A private, disposable workspace.**
+- **Create:** per attempt, under a work root on D:, outside the repository. Copy the project with `take_snapshot`, following no links, after `preexisting_violations` has passed.
+- **Mount:** only the copy. The real workspace is never in a container.
+- **Accept:** audit the copy. Then DevPilot copies only the audited changes into the real workspace through `WorkspaceFS`, after checking that the real files are still as they were snapshotted.
+- **Discard:** on any failure, after termination is confirmed, delete the copy. The real workspace was never touched, so nothing needs restoring there.
+- **Quarantine:** keep the copy for inspection and hold the project. The real workspace stays safe even then.
+- **Clean up:** delete on success, and sweep leftovers at startup. Apply the workspace file limits so copies stay small on D:.
+- **To verify in Stage 9:** that user 65534 can write to a bind mount on Docker Desktop. Nothing has written to one yet.
+
+**7. The API filter's allowlist** gains `GET /experimental/tool/ids`. It sits under the sensitive `/experimental` prefix and is the one such operation DevPilot needs. `prompt_async` must also refuse `tools`, `system`, `noReply`, `format` and `variant`. A second API tree exists under `/api/*`; the filter's default refusal covers it.
