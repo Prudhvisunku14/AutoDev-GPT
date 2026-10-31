@@ -215,8 +215,8 @@ def test_a_good_definition_has_no_problems(tmp_path: Path, settings: Settings, a
 # --- Refused images and binaries --------------------------------------------------------------
 
 
-def test_no_runtime_image_is_approved_yet_so_nothing_can_start(tmp_path: Path, settings: Settings) -> None:
-    assert APPROVED_RUNTIME_IMAGES == frozenset()
+def test_any_image_but_the_approved_one_is_refused(tmp_path: Path, settings: Settings) -> None:
+    assert IMAGE_ID not in APPROVED_RUNTIME_IMAGES and len(APPROVED_RUNTIME_IMAGES) == 1
     with pytest.raises(ContainerPolicyError, match="not an approved"):
         build_production_args(_container(tmp_path), settings)
 

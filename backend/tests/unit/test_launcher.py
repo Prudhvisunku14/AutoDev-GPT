@@ -156,6 +156,7 @@ class Rig:
         values: dict[str, Any] = {
             "opencode_enabled": True, "coding_live_approved": True, "opencode_runtime_image": IMAGE, "opencode_model": "openai/gpt-test",
             "opencode_manifest_file": tmp_path / "manifest.json", "openai_price_input_per_mtok": 2.0, "openai_price_output_per_mtok": 10.0,
+            "openai_max_output_tokens": 4_000, "openai_max_retries": 0,
             "gateway_max_usd_per_task": 0.5, **overrides,
         }  # fmt: skip
         self.settings = make_settings(tmp_path, **values)
@@ -199,7 +200,7 @@ def test_by_default_every_gate_is_closed(tmp_path: Path) -> None:
     ("change", "reason"),
     [({"opencode_enabled": False}, "OPENCODE_ENABLED"), ({"coding_live_approved": False}, "approval"), ({"opencode_runtime_image": "sha256:" + "e" * 64}, "ripgrep"),
      ({"opencode_model": "anthropic/x"}, "openai/"), ({"opencode_manifest_file": None}, "MANIFEST"), ({"openai_api_key": None}, "OPENAI_API_KEY"),
-     ({"openai_price_output_per_mtok": None}, "spending limit")],
+     ({"openai_price_output_per_mtok": None}, "spending limit"), ({"openai_max_output_tokens": None}, "no upper bound"), ({"openai_max_retries": 2}, "OPENAI_MAX_RETRIES")],
 )  # fmt: skip
 def test_each_gate_alone_refuses_and_nothing_is_touched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: dict[str, Any], reason: str) -> None:
     rig = Rig(tmp_path, monkeypatch, **change)
@@ -221,8 +222,8 @@ def test_a_filter_address_off_this_machine_stops_the_start(tmp_path: Path, monke
         rig.start()
 
 
-def test_the_shipped_code_approves_no_runtime_image() -> None:
-    assert container.APPROVED_RUNTIME_IMAGES == frozenset()
+def test_only_the_verified_runtime_image_is_approved() -> None:
+    assert container.APPROVED_RUNTIME_IMAGES == frozenset({"sha256:a7753fe443915eed28c577c1d1b3f0e27ab1c5bd16b7debc7de9579d2aaefe99"})
 
 
 # --- What it asks Docker for ------------------------------------------------------------------------
@@ -491,6 +492,13 @@ def test_the_sweep_removes_what_a_crash_left(rig: Rig) -> None:
 # --- The rest ---------------------------------------------------------------------------------------
 
 
+def test_an_attempts_ledger_can_be_read_after_a_crash(rig: Rig) -> None:
+    rig.start()
+    folder = next((rig.work / "attempts").iterdir())
+    (folder / "ledger" / "ledger.jsonl").write_text(json.dumps({"charged_tokens": 7, "usage_known": True, "cost_usd": 0.5}) + "\n", encoding="utf-8")
+    assert rig.launcher.usage_for(RUN, "call_1")["cost_usd"] == 0.5
+
+
 def test_the_ledger_is_totalled(tmp_path: Path) -> None:
     path = tmp_path / "ledger.jsonl"
     path.write_text(json.dumps({"charged_tokens": 10, "usage_known": True, "cost_usd": 0.5}) + "\n" + json.dumps({"charged_tokens": 5, "usage_known": True, "cost_usd": 0.25}) + "\n", encoding="utf-8")
@@ -517,3 +525,44 @@ def test_production_environment_is_unchanged_by_the_launcher(rig: Rig) -> None:
     rig.start()
     args = rig.run_args("opencode")
     assert {f"{n}={v}" for n, v in production_environment()} <= set(args)
+
+
+def _rows(path: Path, *rows: dict[str, Any]) -> None:
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+
+def test_a_request_that_never_settled_is_charged_its_whole_reservation(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.jsonl"
+    _rows(path, {"request": 1, "status": 0, "charged_tokens": 900, "cost_usd": 0.2, "usage_known": False})
+    assert read_ledger(path) == {"requests": 1, "charged_tokens": 900, "cost_usd": 0.2, "all_known": False}
+
+
+def test_a_settled_request_replaces_its_reservation_and_counts_once(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.jsonl"
+    _rows(path, {"request": 1, "status": 0, "charged_tokens": 900, "cost_usd": 0.2, "usage_known": False},
+          {"request": 1, "status": 200, "charged_tokens": 100, "cost_usd": 0.01, "usage_known": True})  # fmt: skip
+    assert read_ledger(path) == {"requests": 1, "charged_tokens": 100, "cost_usd": 0.01, "all_known": True}
+
+
+def test_one_lost_request_among_settled_ones_still_counts_in_full(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.jsonl"
+    _rows(path, {"request": 1, "status": 0, "charged_tokens": 900, "cost_usd": 0.2, "usage_known": False},
+          {"request": 1, "status": 200, "charged_tokens": 100, "cost_usd": 0.01, "usage_known": True},
+          {"request": 2, "status": 0, "charged_tokens": 800, "cost_usd": 0.3, "usage_known": False})  # fmt: skip
+    assert read_ledger(path) == {"requests": 2, "charged_tokens": 900, "cost_usd": pytest.approx(0.31), "all_known": False}
+
+
+def test_a_line_that_is_not_an_object_is_unreadable_and_does_not_stop_the_count(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.jsonl"
+    path.write_text('7\n{"request": 1, "status": 200, "charged_tokens": 5, "cost_usd": 0.1, "usage_known": true}\n', encoding="utf-8")
+    assert read_ledger(path) == {"requests": 1, "charged_tokens": 5, "cost_usd": 0.1, "all_known": False}
+
+
+def test_sweep_keeps_the_logs_of_an_attempt_a_stopped_backend_left(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    rig = Rig(tmp_path, monkeypatch)
+    attempt = rig.settings.coding_work_dir / "attempts" / "abc"
+    (attempt / "ledger").mkdir(parents=True)
+    (attempt / "ledger" / "filter-audit.jsonl").write_text("evidence", encoding="utf-8")
+    rig.launcher.sweep()
+    assert not attempt.exists()
+    assert (rig.settings.coding_work_dir / "evidence" / "abc" / "filter-audit.jsonl").read_text(encoding="utf-8") == "evidence"

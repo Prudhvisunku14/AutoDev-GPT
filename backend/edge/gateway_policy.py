@@ -20,6 +20,10 @@ Budgets are enforced before forwarding. A request reserves its worst case, so a 
 overrun is refused, not discovered afterwards. Each answer then replaces the reservation with the
 real usage. An answer whose usage cannot be read keeps the whole reservation, so missing numbers
 can never make spending invisible.
+
+The worst case is a true upper bound, not an estimate. A token covers at least one byte of text, so a
+body's size in bytes bounds its input tokens, and the output cap is sent with the request. Requests
+still running hold their reservations, so several at once cannot spend the same money.
 """
 
 from __future__ import annotations
@@ -40,7 +44,11 @@ RESPONSES_PATH = "/v1/responses"
 MAX_BODY_BYTES = 8 * 1024 * 1024
 MAX_TOOLS = 64
 _MAX_JSON_DEPTH = 96
-_BYTES_PER_TOKEN = 3  # counted low, so the input estimate errs towards refusing
+_INPUT_OVERHEAD_TOKENS = 512  # what the provider adds around messages and tools, beyond the body itself
+# Above this many input tokens the model costs twice as much (developers.openai.com/api/docs/pricing), so the
+# configured prices would not hold, and neither would the reservation. Not a status OpenCode retries.
+SHORT_CONTEXT_TOKENS = 272_000
+SERVICE_TIER = "default"  # "auto" follows the project's own setting, which may be the dearer Fast tier
 
 ALLOWED_FIELDS = frozenset(
     {
@@ -97,7 +105,7 @@ class GatewayPolicy:
 class CheckedRequest:
     body: bytes  # rebuilt from the parsed fields, with the output cap in it
     stream: bool
-    input_estimate: int
+    input_ceiling: int  # no more input tokens than this can be billed
     max_output_tokens: int
 
 
@@ -139,9 +147,12 @@ def check_request(head: Head, body: bytes, policy: GatewayPolicy) -> CheckedRequ
     stream = payload.get("stream", False)
     if not isinstance(stream, bool):
         raise Refused(403, "stream is not true or false")
+    input_ceiling = len(body) + _INPUT_OVERHEAD_TOKENS
+    if input_ceiling > SHORT_CONTEXT_TOKENS:
+        raise Refused(413, "this request could be billed at long-context prices")
     limited = min(asked, policy.max_output_tokens)
-    clean = {**payload, "max_output_tokens": limited}
-    return CheckedRequest(_serialized(clean), stream, len(body) // _BYTES_PER_TOKEN, limited)
+    clean = {**payload, "max_output_tokens": limited, "service_tier": SERVICE_TIER}
+    return CheckedRequest(_serialized(clean), stream, input_ceiling, limited)
 
 
 def _check_tools(tools: Any, choice: Any) -> None:
@@ -211,6 +222,7 @@ class Budget:
         self.requests = 0
         self.tokens = 0
         self.usd = 0.0
+        self.outstanding = 0  # requests forwarded and not yet settled
         self._held = 0  # tokens reserved by requests still running
         self._held_usd = 0.0
 
@@ -219,15 +231,16 @@ class Budget:
         with self._lock:
             if self.requests >= policy.max_requests:
                 raise Refused(429, "the request budget is used up")
-            room = policy.max_tokens - self.tokens - self._held - request.input_estimate
+            room = policy.max_tokens - self.tokens - self._held - request.input_ceiling
             if room <= 0:
                 raise Refused(429, "the token budget is used up")
             output = min(request.max_output_tokens, room)
-            worst = policy.cost_usd(request.input_estimate, output)
+            worst = policy.cost_usd(request.input_ceiling, output)
             if policy.max_usd is not None and worst is not None and self.usd + self._held_usd + worst > policy.max_usd:
                 raise Refused(429, "the spending budget is used up")
             self.requests += 1
-            held = request.input_estimate + output
+            held = request.input_ceiling + output
+            self.outstanding += 1
             self._held += held
             self._held_usd += worst or 0.0
             return Reservation(tokens=held, usd=worst or 0.0, max_output_tokens=output)
@@ -235,6 +248,7 @@ class Budget:
     def settle(self, reservation: Reservation, usage: Usage | None) -> Charge:
         """Replace a reservation with what was really used. Unknown usage keeps the whole reservation."""
         with self._lock:
+            self.outstanding -= 1
             self._held -= reservation.tokens
             self._held_usd -= reservation.usd
             if usage is None:

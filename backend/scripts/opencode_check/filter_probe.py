@@ -14,6 +14,8 @@ import base64
 import json
 import socket
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 HOST = "127.0.0.1"
@@ -51,7 +53,20 @@ def run(request: Any) -> list[dict[str, Any]]:
     port = request.get("port") if isinstance(request, dict) else None
     if port not in PORTS:
         return [{"refused": f"port {port!r} is not one this probe may reach"}]
-    return [{"id": item["id"], **exchange(port, base64.b64decode(item["raw_b64"]))} for item in request["requests"]]
+    held = [socket.create_connection((HOST, port), timeout=SECONDS) for _ in range(request.get("hold", 0))]  # each takes a slot
+    time.sleep(request.get("settle", 0))
+    try:
+        if request.get("workers"):
+            with ThreadPoolExecutor(max_workers=request["workers"]) as pool:
+                return list(pool.map(lambda item: {"id": item["id"], **exchange(port, base64.b64decode(item["raw_b64"]))}, request["requests"]))
+        answers = []
+        for item in request["requests"]:
+            answers.append({"id": item["id"], **exchange(port, base64.b64decode(item["raw_b64"]))})
+            time.sleep(request.get("gap", 0))  # a controlled rate, when the check asks for one
+        return answers
+    finally:
+        for conn in held:
+            conn.close()
 
 
 def read_back(path: str) -> str:

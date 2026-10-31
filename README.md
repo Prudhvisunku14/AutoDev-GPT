@@ -10,7 +10,7 @@ You describe the software you want in plain language. DevPilot AI then:
 - diagnoses and repairs failures within strict limits
 - delivers the source code, documentation, test results and a final report
 
-> **Status: Phase 2 (GPT orchestrator) complete.** GPT analyzes a requirement, chooses a stack, plans the work and defines acceptance criteria. Python validates and stores each step. Runs then pause at IMPLEMENTING, because code generation and execution arrive in Phases 3 and 4.
+> **Status: the offline MVP is verified.** A requirement goes through the GPT function-calling loop, real OpenCode on real containers, tests in Docker and delivery, with GPT's replies and the model scripted. **No real model has been called through this path, and no paid run is authorized.**
 > See [docs/PROGRESS.md](docs/PROGRESS.md) for exactly what has been built and verified.
 
 ## How it works

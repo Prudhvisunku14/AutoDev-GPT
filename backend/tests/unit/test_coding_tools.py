@@ -21,7 +21,7 @@ from app.coding.launcher import LaunchRequest
 from app.coding.session_control import StopPolicy
 from app.coding.simulated import PROVIDER_NAME, ScriptedAttempt, SimulatedLauncher
 from app.coding.types import AttemptPhase, CodingOutcome, CodingStatus, Termination
-from app.db.models import CodingAttempt, RunState
+from app.db.models import CodingAttempt, Run, RunState
 from app.demo import mvp
 from app.orchestrator.fake_llm import FakeLLM, Step, call, fail
 from app.orchestrator.llm_client import LLMErrorKind
@@ -29,7 +29,7 @@ from app.orchestrator.state_machine import FULL_RUN_STATES
 from app.sandbox.fake import FakeSandbox
 from app.sandbox.spec import ExecResult, ExecSpec, ExecStatus
 from app.selection.selector import ProviderOption, ProviderSelector
-from app.tools.adapters.coding import CodingRuntime, recover_attempts, register_coding_tools
+from app.tools.adapters.coding import CodingRuntime, attempt_cost, recover_attempts, register_coding_tools
 from app.tools.adapters.sandbox import register_sandbox_tools
 from app.tools.adapters.workspace_fs import WorkspaceFS
 from tests.harness import Harness
@@ -109,7 +109,7 @@ def finish() -> Step:
 
 def pause() -> Step:
     """Ends a script without ending the run: an exhausted script would fail it."""
-    return fail(LLMErrorKind.TRANSIENT, "the script stops here")
+    return fail(LLMErrorKind.RATE_LIMIT, "the script stops here")
 
 
 # --- The normal path --------------------------------------------------------------------------------
@@ -194,6 +194,29 @@ def test_the_gateways_ledger_counts_against_the_run(tmp_path: Path) -> None:
     run = rig.advance()
     gpt_turns = run.turns * (1_000 * 2 + 200 * 10) / 1_000_000
     assert run.cost_usd == pytest.approx(0.25 + gpt_turns) and run.tokens_in + run.tokens_out == run.turns * 1_200 + 5_000
+
+
+@pytest.mark.parametrize(
+    ("ledger", "allowance", "expected"),
+    [({}, 0.5, None), ({"requests": 2, "cost_usd": 0.1, "all_known": True}, 0.5, 0.1), ({"requests": 2, "cost_usd": 0.1, "all_known": False}, 0.5, 0.1),
+     ({"requests": 0, "cost_usd": None, "all_known": True}, 0.5, 0.0), ({"requests": 0, "cost_usd": None, "all_known": False}, 0.5, 0.5)],
+    ids=["no gateway", "counted", "partly unknown", "nothing spent", "unreadable counts as everything"],
+)  # fmt: skip
+def test_what_an_attempt_cost(ledger: dict[str, Any], allowance: float, expected: float | None) -> None:
+    assert attempt_cost(ledger, allowance) == expected
+
+
+def test_a_lost_attempt_is_charged_at_startup(tmp_path: Path) -> None:
+    class Metered(SimulatedLauncher):
+        def usage_for(self, run_id: str, call_id: str) -> dict[str, Any]:
+            return {"requests": 3, "cost_usd": 0.3, "all_known": True}
+
+    rig = Rig(tmp_path, launcher=Metered([]), openai_price_input_per_mtok=2.0, openai_price_output_per_mtok=10.0)
+    with rig.h.sessions.begin() as s:
+        s.get(Run, rig.run_id).cost_known = True
+    _crashed_attempt(rig, AttemptPhase.RUNNING)
+    recover_attempts(rig.runtime, rig.h.settings, rig.h.sessions)
+    assert rig.h.run(rig.run_id).cost_usd == pytest.approx(0.3)
 
 
 def test_the_choice_of_provider_is_recorded(tmp_path: Path) -> None:
@@ -520,8 +543,6 @@ def test_the_criteria_record_their_results(tmp_path: Path) -> None:
 def test_finish_is_refused_without_a_passed_verification(tmp_path: Path) -> None:
     rig = Rig(tmp_path)
     with rig.h.sessions.begin() as s:
-        from app.db.models import Run
-
         run = s.get(Run, rig.run_id)
         run.state = RunState.DOCUMENTING
         run.verification_json = json.dumps({"verdict": "FAILED"})
@@ -564,7 +585,6 @@ def test_a_cancel_while_tests_run_ends_the_run_and_drops_the_copy(tmp_path: Path
     def cancel_then_answer(spec: ExecSpec) -> ExecResult:
         rig = rig_holder[0]
         with rig.h.sessions.begin() as s:
-            from app.db.models import Run
             from app.orchestrator.run_control import cancel_run
 
             cancel_run(s, s.get(Run, rig.run_id), rig.h.events)

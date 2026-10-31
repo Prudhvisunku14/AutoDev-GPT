@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from app.config import Settings
 from app.db.models import (
     ApprovalKind,
     ApprovalStatus,
@@ -21,8 +22,9 @@ from app.db.models import (
 )
 from app.demo.calculator import ANALYSIS, CRITERIA, PLAN
 from app.orchestrator.approvals import ApprovalConflict, ApprovalInvalid
+from app.orchestrator.budget import SHORT_CONTEXT_TOKENS, RunGuard, turn_ceiling_usd, turn_input_tokens
 from app.orchestrator.fake_llm import FakeLLM, call, calls, fail, fcall, text
-from app.orchestrator.llm_client import LLMErrorKind, LLMRequest, LLMResponse
+from app.orchestrator.llm_client import LLMErrorKind, LLMRequest, LLMResponse, Usage
 from tests.harness import Harness
 from tests.helpers import API_TOKEN, FAKE_GITHUB_TOKEN, FAKE_OPENAI_KEY
 
@@ -233,18 +235,74 @@ def test_token_limit_applies_when_cost_is_unknown(make: Any) -> None:
     assert h.events_of(run.id, "run.started")[0] == {"cost_known": False}
 
 
-def test_budget_limit_with_known_prices(make: Any) -> None:
-    h = make(
-        *[call("submit_analysis", {**BAD_ANALYSIS, "summary": f"b{i}"}) for i in range(5)],
-        openai_price_input_per_mtok=1_000.0,  # $1.00 per scripted turn input, $0.20 output
-        openai_price_output_per_mtok=1_000.0,
-        run_budget_usd=2.0,
-    )
+PRICED = {"openai_price_input_per_mtok": 1.0, "openai_price_output_per_mtok": 1.0, "openai_max_output_tokens": 100}
+
+
+def test_a_call_that_could_pass_the_budget_is_never_sent(make: Any) -> None:
+    budget = 0.012
+    h = make(*[call("submit_analysis", {**BAD_ANALYSIS, "summary": f"b{i}"}) for i in range(9)], run_budget_usd=budget, **PRICED)
     run = h.advance(h.new_run())
-    assert run.cost_known is True
-    assert run.outcome == "budget_limit"
-    assert run.cost_usd == pytest.approx(2.4)
-    assert [e["cost_usd"] for e in h.events_of(run.id, "llm.response")] == [pytest.approx(1.2)] * 2
+    assert run.cost_known is True and run.outcome == "budget_limit" and "could cost" in run.status_detail
+    assert 1 <= run.turns < 9 and run.cost_usd <= budget
+    assert [e["cost_usd"] for e in h.events_of(run.id, "llm.response")] == [pytest.approx(0.0012)] * run.turns
+    assert h.llm.remaining == 9 - run.turns
+
+
+def test_the_first_call_is_refused_when_even_it_could_overrun(make: Any) -> None:
+    h = make(call("submit_analysis", ANALYSIS), run_budget_usd=0.000001, **PRICED)
+    run = h.advance(h.new_run())
+    assert run.outcome == "budget_limit" and run.turns == 0 and h.llm.remaining == 1 and h.llm.requests == []
+
+
+def test_the_next_ceiling_counts_what_openai_holds_for_the_run(make: Any) -> None:
+    h = make(call("submit_analysis", {**BAD_ANALYSIS, "summary": "a"}), fail(LLMErrorKind.RATE_LIMIT), run_budget_usd=1.0, **PRICED)
+    run = h.advance(h.new_run())
+    assert run.context_tokens == 1_200  # the scripted turn's input and output
+
+
+def test_a_call_with_no_answer_counts_at_its_ceiling(make: Any) -> None:
+    h = make(fail(LLMErrorKind.TIMEOUT), run_budget_usd=1.0, **PRICED)
+    run = h.advance(h.new_run())
+    assert run.cost_usd > 0 and run.reserved_usd == 0 and run.pause_reason == "llm_error:timeout"
+
+
+@pytest.mark.parametrize("kind", [LLMErrorKind.RATE_LIMIT, LLMErrorKind.AUTH, LLMErrorKind.QUOTA, LLMErrorKind.MODEL_NOT_FOUND])
+def test_a_call_refused_before_any_work_costs_nothing(make: Any, kind: LLMErrorKind) -> None:
+    run = make(fail(kind), run_budget_usd=1.0, **PRICED)
+    run = run.advance(run.new_run())
+    assert run.cost_usd == 0 and run.reserved_usd == 0
+
+
+def test_the_loop_stops_a_call_that_could_reach_long_context_prices(make: Any) -> None:
+    """The guard is only as good as the size it is given, so this goes through the real loop."""
+    h = make(call("submit_analysis", ANALYSIS), run_budget_usd=1_000_000.0, **PRICED)
+    run_id = h.new_run()
+    with h.sessions.begin() as s:
+        s.get(Run, run_id).context_tokens = SHORT_CONTEXT_TOKENS
+    run = h.advance(run_id)
+    assert run.outcome == "budget_limit" and str(SHORT_CONTEXT_TOKENS) in run.status_detail
+    assert h.llm.requests == [] and h.llm.remaining == 1
+
+
+def test_a_crash_during_a_call_counts_it_at_its_ceiling(make: Any) -> None:
+    h = make(fail(LLMErrorKind.RATE_LIMIT), run_budget_usd=1.0, **PRICED)
+    run_id = h.new_run()
+    h.advance(run_id)
+    with h.sessions.begin() as s:
+        s.get(Run, run_id).reserved_usd = 0.25  # what a process that died mid-call leaves behind
+    h.llm.extend(fail(LLMErrorKind.RATE_LIMIT))
+    run = h.advance(run_id)
+    assert run.cost_usd == pytest.approx(0.25) and run.reserved_usd == 0
+
+
+def test_a_response_that_arrives_after_the_run_ended_is_still_paid_for(make: Any) -> None:
+    h = make(call("submit_analysis", ANALYSIS), run_budget_usd=1.0, **PRICED)
+    run_id = h.new_run()
+    with h.sessions.begin() as s:
+        run = s.get(Run, run_id)
+        run.state = RunState.CANCELLED
+    h.orchestrator._record_response(run_id, LLMResponse(id="r", usage=Usage(1_000, 200)), [])
+    assert h.run(run_id).cost_usd == pytest.approx(0.0012)
 
 
 def test_wall_clock_limit_counts_active_time_only(make: Any) -> None:
@@ -473,3 +531,51 @@ def test_requirement_cannot_break_out_of_its_data_block(make: Any) -> None:
     message = _messages_sent(h.llm.requests[0])[0]
     assert message.count("</requirement>") == 1
     assert "&lt;/requirement&gt;" in message
+
+
+def test_a_gpt_call_that_could_reach_long_context_prices_is_not_sent() -> None:
+    """Above 272,000 input tokens the same model costs twice as much, so no configured price would hold."""
+    guard = RunGuard(Settings(_env_file=None, devpilot_api_token="t" * 32, openai_price_input_per_mtok=2.0, openai_price_output_per_mtok=10.0, run_budget_usd=100.0))  # type: ignore[call-arg]
+    run = Run(project_id="p", cost_known=True, cost_usd=0.0)
+    assert guard.before_send(run, 0.01, SHORT_CONTEXT_TOKENS) is None
+    hit = guard.before_send(run, 0.01, SHORT_CONTEXT_TOKENS + 1)
+    assert hit is not None and hit.reason == "budget_limit" and "272000" in hit.detail
+
+
+def test_without_prices_there_is_no_price_to_protect() -> None:
+    guard = RunGuard(Settings(_env_file=None, devpilot_api_token="t" * 32))  # type: ignore[call-arg]
+    assert guard.before_send(Run(project_id="p", cost_known=False, cost_usd=0.0), 0.0, SHORT_CONTEXT_TOKENS + 1) is None
+
+
+def test_both_sides_of_the_budget_use_the_same_long_context_limit() -> None:
+    from edge.gateway_policy import SHORT_CONTEXT_TOKENS as GATEWAY_LIMIT
+
+    assert GATEWAY_LIMIT == SHORT_CONTEXT_TOKENS == 272_000
+
+
+def _ceiling_parts() -> tuple[Settings, LLMRequest]:
+    settings = Settings(_env_file=None, devpilot_api_token="t" * 32, openai_price_input_per_mtok=2.0, openai_price_output_per_mtok=10.0, openai_max_output_tokens=4_000)  # type: ignore[call-arg]
+    return settings, LLMRequest(instructions="be brief", input=[{"role": "user", "content": "hello"}], tools=[], previous_response_id=None)
+
+
+def test_a_gpt_ceiling_counts_everything_stored_at_openai() -> None:
+    """With previous_response_id the whole history is billed again, so a ceiling without it would be far too low."""
+    settings, request = _ceiling_parts()
+    fresh = Run(project_id="p", context_tokens=0)
+    long_running = Run(project_id="p", context_tokens=100_000)
+    assert turn_input_tokens(request, long_running) - turn_input_tokens(request, fresh) == 100_000
+    assert turn_ceiling_usd(request, long_running, settings) - turn_ceiling_usd(request, fresh, settings) == pytest.approx(0.2)
+
+
+def test_a_gpt_ceiling_counts_the_whole_output_cap() -> None:
+    settings, request = _ceiling_parts()
+    run = Run(project_id="p", context_tokens=0)
+    input_only = turn_input_tokens(request, run) * 2.0 / 1_000_000
+    assert turn_ceiling_usd(request, run, settings) == pytest.approx(input_only + 4_000 * 10.0 / 1_000_000)
+
+
+def test_a_gpt_ceiling_counts_at_least_a_token_for_each_byte_of_the_request() -> None:
+    settings, request = _ceiling_parts()
+    run = Run(project_id="p", context_tokens=0)
+    longer = LLMRequest(instructions="be brief", input=[{"role": "user", "content": "x" * 1_000}], tools=[], previous_response_id=None)
+    assert turn_input_tokens(longer, run) - turn_input_tokens(request, run) >= 995

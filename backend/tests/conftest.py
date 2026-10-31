@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
-from tests.helpers import API_TOKEN, make_settings
+from tests.helpers import API_TOKEN, make_settings, refuse_real_env_file
 
 # Settings fields that the developer's shell could set; tests must not pick them up.
 _ENV_VARS = (
@@ -38,6 +39,9 @@ _LIVE_FLAGS = {
     "live_github": "RUN_LIVE_GITHUB_TESTS",
     "docker": "RUN_DOCKER_TESTS",
 }
+
+if os.environ.get(_LIVE_FLAGS["live_openai"], "").lower() != "true":  # only an approved live run reads the real key
+    sys.addaudithook(refuse_real_env_file)
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

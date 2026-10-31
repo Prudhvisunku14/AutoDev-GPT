@@ -1,12 +1,27 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from app.config import REPO_ROOT, Settings
+from tests import helpers
 from tests.helpers import API_TOKEN, FAKE_OPENAI_KEY, make_settings
+
+
+@pytest.mark.skipif(os.environ.get("RUN_LIVE_OPENAI_TESTS", "").lower() == "true", reason="an approved live run reads the real key")
+def test_no_offline_test_can_open_the_real_environment_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shown on a stand-in: the direct proof would be an attempt to open the real file."""
+    assert os.path.normcase(REPO_ROOT / ".env") in helpers.REAL_ENV_FILES
+    stand_in = tmp_path / ".env"
+    stand_in.write_text("OPENAI_API_KEY=not-real\n", encoding="utf-8")
+    monkeypatch.setattr(helpers, "REAL_ENV_FILES", {*helpers.REAL_ENV_FILES, os.path.normcase(stand_in)})
+    with pytest.raises(PermissionError, match="real key"):
+        stand_in.read_text(encoding="utf-8")
+    with pytest.raises(PermissionError, match="real key"):
+        Settings(_env_file=stand_in, devpilot_api_token=API_TOKEN)  # type: ignore[call-arg]
 
 
 def test_relative_paths_resolve_against_repo_root(tmp_path: Path) -> None:

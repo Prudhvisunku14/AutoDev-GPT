@@ -1,6 +1,6 @@
 # DevPilot AI: Progress
 
-**Current state (2026-10-31):** the end-to-end MVP works offline. A requirement goes through the real API, orchestrator, audit and Docker tests to a delivered, verified project, with GPT and the coding provider simulated. **No real GPT-to-OpenCode coding has run yet;** it needs approvals listed under "First real demonstration" at the end of this file.
+**Current state (2026-11-01):** the offline MVP is finished and verified. A requirement goes through the real API, orchestrator and audit, real OpenCode writes the files on real containers behind the real filter and gateway code, Docker runs the tests, and the tested files are delivered. GPT's replies and the model are scripted. **No real model has been called through this path, and no paid call is authorized.** A live run needs its own approval. Its proposal, with a $1.50 limit, is under "First real demonstration" at the end of this file.
 
 Phase 4 (OpenCode) in progress. The foundation, the contract checks, the verified binary and the precedence experiment are committed (2026-10-30).
 
@@ -20,7 +20,7 @@ Phase 4D Round 3 (2026-10-31): the API filter and independent container terminat
 | 1 | Backend foundation | ✅ Done (2026-10-29) | Python 3.12.9 at `D:\python.exe` |
 | 2 | GPT orchestrator | ✅ Done (2026-10-29), verified with FakeLLM; first live GPT call verified (analysis accepted, 1 call, 919 tokens) | OpenAI API key (user) for live use |
 | 3 | Docker sandbox | 🟡 Isolation controls verified in real containers (2026-10-30); install proxy and orphan-sweep test on a real container still open | Docker Desktop running, data on D:, `python:3.12-alpine` present |
-| 4 | OpenCode integration | 🟡 Foundation committed; binary verified; precedence verified; Phase 4D Stages 1–4 committed as `f4aa786` (2026-10-31). Stages 5 and 6 committed as `53070e8`: adapter, tool allowlist, read-only real-server check (28 PASS, 0 FAIL). Round 3 committed as `ab3f447`: API filter and independent termination, isolated filter run 42 PASS, 0 FAIL. MVP slice built and demonstrated offline: gateway, launcher, disposable copy, `generate_code`, verification, recovery, delivery, report. The live path has not run | Runtime image with ripgrep, Docker networks, paid-call approval |
+| 4 | OpenCode integration | 🟡 Foundation committed; binary verified; precedence verified; Phase 4D Stages 1–4 committed as `f4aa786` (2026-10-31). Stages 5 and 6 committed as `53070e8`: adapter, tool allowlist, read-only real-server check (28 PASS, 0 FAIL). Round 3 committed as `ab3f447`: API filter and independent termination, isolated filter run 42 PASS, 0 FAIL. MVP slice committed as `b7a0010`: gateway, launcher, disposable copy, `generate_code`, verification, recovery, delivery, report. Verified on real containers with a scripted model, and closed out on 2026-11-01. A real model, the published port and the route out have not run | Paid-call approval |
 | 5 | Verification-guided development | 🟡 MVP core only: tests in Docker judged against MUST criteria. No frozen tests or score | — |
 | 6 | Failure classification and recovery | 🟡 MVP core only: a small rule table with bounded repair and retry. No 40-log classifier | — |
 | 7 | Adaptive tool selection | 🟡 MVP core only: deterministic provider choice with recorded exclusions. No scoring from past outcomes | — |
@@ -795,7 +795,7 @@ Evidence: `D:\DevPilotCache\opencode-check\reports\20261031T064332Z-filter-check
 
 ### MVP slice: end-to-end workflow, offline (2026-10-31)
 
-Priorities changed: finish a working workflow instead of more Phase 4 rounds. Round 3 is committed as `ab3f447`. This slice is not committed.
+Priorities changed: finish a working workflow instead of more Phase 4 rounds. Round 3 is committed as `ab3f447`, and this slice as `b7a0010`.
 
 **Built:**
 - **Model gateway** (`edge/gateway_policy.py`, `gateway_server.py`). A per-run token, the approved model only, function tools only, and budgets for requests, tokens and dollars, enforced before forwarding. The upstream is fixed in code. Offline tests use an in-memory fake. **No real API call was made.**
@@ -822,29 +822,131 @@ Priorities changed: finish a working workflow instead of more Phase 4 rounds. Ro
 - The tests in a run come from the same engine as the code, so a pass shows they agree, not that either is right.
 - Selection, recovery and verification are the small cores described above.
 
-### First real demonstration (prepared, not run)
+### Real-container verification, no model (2026-10-31, final pass 2026-11-01)
 
-Nothing below has run. `CODING_LIVE_APPROVED=false` and an empty `APPROVED_RUNTIME_IMAGES` keep the live path refused until each step is approved.
+The launcher, filter, gateway and OpenCode 1.19.5 ran on real containers, on two internal networks, with a scripted model and no key. No paid call was made, and nothing reached OpenAI.
 
-**Requirement:** the same calculator, so the result can be compared with the offline run.
+**Results.** The first nine ran on the final code, each with a hard deadline of 240 s. The last two were not repeated, for the reason given.
+
+| Scenario | Result | What it shows |
+|---|---|---|
+| `boundaries` | 77 PASS, 0 FAIL | The container matches its definition, every unapproved operation is refused and audited, overload is refused with nothing forwarded, the host cannot reach OpenCode, and writes stay in the disposable copy |
+| `gateway` | 20 PASS, 0 FAIL | Tokens, model, request, token and dollar limits, timeouts, no secret in any log |
+| `stop` | 10 PASS, 0 FAIL | A timeout: confirmed stop, then a verified restore |
+| `cancel` | 8 PASS, 0 FAIL | A person's cancel takes the same path |
+| `quarantine` | 9 PASS, 0 FAIL | An unconfirmed stop: the writer was really running, nothing was restored, the copy was kept |
+| `recovery` | 9 PASS, 0 FAIL | A real writer left running by an abandoned session: the next start stops it, confirmed from Docker, and undoes its work |
+| `full` | 8 PASS, 0 FAIL | A whole run through real OpenCode and real Docker tests, GPT and the model scripted |
+| `production_gateway` | 9 PASS, 0 FAIL | The real `gateway_server.py`, placeholder key, no route: it starts, refuses bad tokens, trusts 118 certificate authorities, fails closed and charges in full |
+| `rehearsal` | 10 PASS, 0 FAIL | The paid script's own `dry_launch` and `run_demo` under its exact limits, scripted |
+| `engine` | 40 PASS, 0 FAIL (2026-10-31) | 44 scripted answers accepted, real tools ran, `apply_patch` wrote files. Not repeated: later changes added a ledger field and a forwarded `service_tier` the scripted upstream ignores, and a refusal path it does not reach |
+| `interrupt` | 33 PASS, 0 FAIL (2026-10-31) | Ctrl-C under PowerShell, a kill, a deadline, a wedged process, and a stop that cannot be confirmed. Not repeated: the guard's stopping path has not changed since, and each case leaves a folder holding a token |
+
+**What the first runs got wrong:**
+- **The 47-minute run was the laptop asleep.** Windows Modern Standby lasted 45 min 45 s of it, and only about 2 minutes was work. The check now asks Windows to stay awake and treats a clock gap as an invalid run.
+- **The stalled run was a limit in the check itself:** 20 requests against a script needing 44. OpenCode retries a 429 five times, over about 65 s, longer than the check waited. These retries are read from the binary: at most 5 per prompt, on any 429 or 5xx.
+- **Ctrl-C skipped cleanup because PowerShell terminates its child part-way through a `finally`.** Reproduced with the same signal under two hosts: Python alone finished cleanup, and under PowerShell it was killed in it. No handler inside the process can fix that, so a separate guard does the job.
+
+**Real bugs found and fixed:**
+- A request in flight when the gateway died left no ledger line, so its cost could go unseen. It is now written before it leaves.
+- `auto` follows the project's setting, which may be the dearer Fast tier. Every call is now pinned to `default`.
+- A request over 272,000 input tokens costs $4 and $15, so a reservation at $2 and $10 would be too small. Such a request is now refused, on both sides.
+- A busy refusal left no audit line and could be lost to a connection reset. A connection with no thread available closed silently. Both now answer 503 and are recorded.
+- A weak check let "no tool attempted" pass as a refusal, and three others could not fail. All are fixed.
+
+**The 503s.** The three first seen in a sequential run were not reproduced, in 600 paced and 300 concurrent requests, and their cause is unknown. A slow audit log is not supported: the slowest write measured was 2.1 ms. What is proven is the part that matters: overload fails closed. With every slot deliberately taken, a valid `POST /session` got 503, and OpenCode's own log shows no session was created, while the same request afterwards did appear.
+
+**Not proven:**
+- The published loopback port, `devpilot-ingress` and `devpilot-egress` have never run, because each needs a network with a route out. The dry launch checks them before the first paid call.
+- The gateway's TLS path has never reached OpenAI. Its trust store and its failure path are checked, not a real handshake.
+- Real model behaviour and model-driven cancellation: every stop so far ended a scripted stall.
+- A real process death followed by recovery, as one test. `interrupt` kills a real process and shows the guard stops everything. `recovery` runs the startup path against a real writer, but its crash is a session abandoned inside one process.
+- The tests in a run come from the same engine as the code, so a pass shows they agree, not that either is right.
+
+### Offline close-out (2026-11-01)
+
+The last step before any live demonstration. **No paid call was made, nothing contacted OpenAI, and the real key was not loaded. No paid call is authorized.**
+
+**The real key stays out of offline work.** Some test runs on 2026-10-31 loaded `.env` into memory, though they printed and sent nothing. That is closed:
+- `tests/conftest.py` installs an audit hook that refuses any open of the real `.env` before it happens, so a test that tries fails. Only `RUN_LIVE_OPENAI_TESTS=true`, which needs approval, lifts it. Offline tests use fake credentials from `tests/helpers.py`.
+- `backend/scripts/opencode_launcher_check.py` passes `_env_file=None`, and refuses to run holding a provider key.
+- These scripts do load `.env`, so the key enters their process: `live_demo.py` (its preflight too), `check_openai_access.py`, `live_smoke_test.py` and `demo_sandbox.py`. None of them ran in this round, and none belongs in the offline workflow.
+
+**How this round was checked.** The runs sat inside a fence, a `sitecustomize` loaded into each Python process through `PYTHONPATH`, kept outside the repository. It refused an open of the real `.env` and any public network contact before they happened, and logged each attempt. A control proved each refusal on a decoy. It refused nothing in any run. One guard test's child sets its own `PYTHONPATH`, so it sits outside the fence. The second witness covers it, and everything else that is not Python: NTFS last-access time on `.env`. A control proved a read updates it on this volume, and it did not change. `.env` was not hashed or opened to compare it: only its size and times were read.
+
+**Final results:**
+
+| Check | Result |
+|---|---|
+| Offline suite | 2683 passed, 17 skipped (16 opt-in Docker tests and 1 live OpenAI test), 0 failed |
+| Opt-in Docker tests | 16 passed, 0 failed |
+| Real-container scenarios | Nine scenarios on the final code: 160 PASS, 0 FAIL, in 431 s, on battery. No clock gap |
+| Containers and networks | None left at the last read, 19:21Z, after all of this round's Docker use: 0 containers, only Docker's own networks. Docker Desktop's engine then idled, and failed to restart when another project's Compose call woke it, so no later read exists. With the WSL VM down, nothing can be running |
+| `ruff`, `mypy` | Not run: neither is installed in this virtual environment |
+
+**Mutation check.** A campaign of 153 deliberate breaks crashed at the 59th, on a hanging mutant, on 2026-10-31. Of the 59 it reached, all are now detected, after three test gaps and the hang were fixed. The other 94 ran once on 2026-11-01, on a throwaway copy holding no `.env`, with no network and no Docker, a limit of 180 s per run and 50 minutes overall, each run in its own Windows job so nothing could outlive it.
+
+| Mutants | Caught | Survived | Timed out | Not executed |
+|---|---|---|---|---|
+| The 59 reached on 2026-10-31, after their fixes | 59 | 0 | 0 | 0 |
+| The 94 run on 2026-11-01 | 92 | 2 | 0 | 0 |
+
+Both survivors were investigated, in one targeted check. Neither is a defect:
+- `guard: a failed start is ignored` was a test gap. The next check still refused the run, about 30 seconds later, and the test accepted either refusal. The test now names the reason, and catches this.
+- `tool: recovery trusts the crash` is left as it is. The check in `recover_attempts` is a second layer: `AttemptGuard.restore` refuses as well. Removing that inner check alone is caught, and with both removed `test_a_crashed_attempt_that_cannot_be_stopped_stays_quarantined` fails, so the tests do see a wrongful restore.
+
+So 152 of the 153 are detected, and the last is redundant by design. The 94 ran with no timeout, no clock gap and nothing left behind; the 59 were not run again. These breaks were chosen by hand for the safety logic, so this shows the tests notice them, not that every possible break would be noticed.
+
+**What is real and what is simulated in the offline runs:**
+
+| Part | Status |
+|---|---|
+| API, orchestrator loop, budgets, tools, audit, delivery, report | Real code |
+| Docker, the OpenCode 1.19.5 server and its tools, the API filter, the gateway's code, the internal networks, the disposable copy, stops, restores and quarantine | Real |
+| Generated tests running in the Docker sandbox | Real |
+| GPT's replies | **Simulated:** scripted by `FakeLLM` |
+| The model behind OpenCode | **Simulated:** a scripted upstream inside the real `Gateway`. No key exists in these runs |
+| The gateway's connection to OpenAI | **Never run.** `production_gateway` runs the real server with a placeholder key and no route, and it fails closed |
+| The route from the host to the filter | **Simulated:** `docker exec` stands in for the published port, which has never run |
+| The crash in `recovery` | **Simulated:** the session is abandoned, in one process. The writer, the stop, the restore and the startup path are real |
+
+**Retained evidence.** Nothing was deleted. `D:\DevPilotCache\launcher-check` holds the 13 folders from the first pass, unchanged by fingerprint, and one more, `20261031T191216Z`, from this round. Two attempts stay QUARANTINED on purpose, one from each pass, in `20261031T171452Z\quarantine` and in the new folder: each stop was recorded as unconfirmed, with a Docker CLI broken by the check. Both containers have since been confirmed gone by a separate read, and their workspaces and evidence are intact. They stay until their cleanup is authorized. Six attempt folders from the first pass hold gateway tokens: test-only, not OpenAI keys, each valid only for a gateway that no longer exists. None is in a report, log or the repository. The cleanup is proposed separately in `D:\DevPilotCache\cleanup-recommendation-2026-11-01.md`, and has not been done.
+
+### First real demonstration (proposed, not authorized)
+
+**Nothing below has run, and no paid call is authorized.** It needs its own explicit approval. `backend/scripts/live_demo.py` holds these limits as constants, and `.env` supplies only the key. Without `--approve-spend 1.50` it runs a preflight that contacts nothing external, but that preflight does load the key, so it needs that approval too.
+
+**Request:** "Create a Python calculator application supporting addition, subtraction, multiplication and division, with unit tests."
 
 | Item | Value |
 |---|---|
-| GPT model | `gpt-6.1-sol` (already in `.env`) |
-| OpenCode model | `openai/gpt-6.1-sol`, through the gateway (in the bundled catalog) |
-| Expected model calls | GPT 6 to 9. OpenCode about 4 to 8 per task, including its title call |
-| Hard call limits | `MAX_TURNS=14`, `MAX_TOOL_CALLS=14`, `GATEWAY_MAX_REQUESTS_PER_TASK=15` |
-| Token limits | `RUN_MAX_TOKENS=300000`, `OPENCODE_MAX_TOKENS_PER_TASK=100000`, `GATEWAY_MAX_OUTPUT_TOKENS=8000`, `OPENAI_MAX_OUTPUT_TOKENS=4000` |
-| Cost | Expected about $0.50. **Hard limit `RUN_BUDGET_USD=1.50`**, plus at most one GPT turn past it (about $0.07): **ceiling $1.60** |
-| Prices used | `OPENAI_PRICE_INPUT_PER_MTOK=2`, `OPENAI_PRICE_OUTPUT_PER_MTOK=10`. Confirm on OpenAI's pricing page first |
-| Per-attempt spend | `GATEWAY_MAX_USD_PER_TASK=0.75`, or what the run has left, whichever is lower |
-| Timeouts | `OPENCODE_TIMEOUT_SECONDS=300` per attempt, 120 s for the tests, `RUN_WALL_CLOCK_SECONDS=1200` |
+| Models | GPT `gpt-6.1-sol`, OpenCode `openai/gpt-6.1-sol` through the gateway |
+| Prices | $2 input, $10 output per million, Standard tier up to 272,000 input tokens. Read from developers.openai.com/api/docs/pricing on 2026-10-31. Cached input is $0.10, and is charged as $2 here |
+| **Proposed total spend** | **`RUN_BUDGET_USD=1.50`, strict, across GPT and OpenCode together.** There is no extra turn past it: a call that could pass the limit is not sent |
+| Per attempt | `GATEWAY_MAX_USD_PER_TASK=0.75` or what the run has left, `GATEWAY_MAX_REQUESTS_PER_TASK=15`, `OPENCODE_MAX_TOKENS_PER_TASK=100000`, `GATEWAY_MAX_OUTPUT_TOKENS=8000` |
+| GPT | `MAX_TURNS=14`, `MAX_TOOL_CALLS=14`, `OPENAI_MAX_OUTPUT_TOKENS=4000`, `OPENAI_MAX_RETRIES=0`, `RUN_MAX_TOKENS=300000` |
 | Bounds | `MAX_REPAIR_ATTEMPTS=1`, `OPENCODE_MAX_ATTEMPTS_PER_TASK=2` |
-| OpenCode tools | `read`, `glob`, `grep`, `edit`, `write`, `apply_patch`, `todowrite`, plus `invalid`, which executes nothing. Everything else is denied |
+| Time | `OPENCODE_TIMEOUT_SECONDS=300` per attempt, `RUN_WALL_CLOCK_SECONDS=1200`, and the guard's own deadline 300 s past that |
+| OpenCode tools | For this model it offers `apply_patch`, `read`, `glob`, `grep` and `todowrite`. Not `write` or `edit` |
 
-**Networks, created for each attempt and removed afterwards:** `devpilot-core` and `devpilot-model` (internal), `devpilot-ingress` (the filter, published on `127.0.0.1:4096` only) and `devpilot-egress` (the gateway's route to `api.openai.com:443`). A bridge network cannot limit destinations, so the gateway's single destination is enforced in its code.
+**Measured sizes:** an OpenCode request is 15 to 17 KB, so its reservation starts at $0.114. A GPT request is 3 to 5 KB, reserving about $0.07. The offline calculator path takes 7 GPT turns. OpenCode makes no title call: 22 prompts cost 44 requests, one per tool call plus one to finish.
 
-**Runtime image:** `devpilot/opencode-runtime:1.19.5`, which is `devpilot/opencode-check:1.19.5` plus one verified file, built with no network:
+**The 15-request limit.** It stays at 15. It is not the limit that binds: the 100,000-token limit reserves each request's bytes as tokens, so an attempt gets about 6 to 12 requests (modelled with the real `Budget`; the growth per turn is assumed). A calculator task should need 3 to 8. Refusal is free, and the attempt then fails.
+
+**Networks, created for each attempt and removed afterwards:**
+
+| Network | Route out | Attached | Purpose |
+|---|---|---|---|
+| `devpilot-ingress` | Yes (a published port needs it) | filter | `127.0.0.1:4096` to the filter, loopback only |
+| `devpilot-core` | No, `--internal` | filter, OpenCode | The filter reaches OpenCode |
+| `devpilot-model` | No, `--internal` | OpenCode, gateway | OpenCode reaches the gateway |
+| `devpilot-egress` | Yes | gateway only | The gateway reaches `api.openai.com:443` |
+
+A bridge network cannot limit destinations. The gateway's single destination is fixed in its code, with verified TLS, and it is the only holder of the key. The filter sits on a network with a route out, and has no code that uses it.
+
+**Held back, uncommitted:** the line `127.0.0.1:4096` under `backend:` in `config/egress_allowlist.yaml`. The preflight fails without it.
+
+**Runtime image:** `devpilot/opencode-runtime:1.19.5`, `sha256:a7753fe443915eed28c577c1d1b3f0e27ab1c5bd16b7debc7de9579d2aaefe99`, in `APPROVED_RUNTIME_IMAGES`. It is `devpilot/opencode-check:1.19.5` plus one verified file, built with no network:
 
 ```powershell
 $d = "D:\DevPilotCache\opencode\ripgrep-15.1.0"; New-Item -ItemType Directory -Force $d
@@ -855,12 +957,10 @@ Set-Content "$d\Dockerfile" "FROM devpilot/opencode-check:1.19.5`nCOPY rg /usr/l
 docker build --network none --pull=false -t devpilot/opencode-runtime:1.19.5 $d
 ```
 
-The source is GitHub's release of BurntSushi/ripgrep, the version OpenCode 1.19.5 itself pins. The archive is 2,263,077 bytes. `rg` on `PATH` stops OpenCode's download. The image's ID then goes into `APPROVED_RUNTIME_IMAGES` and `OPENCODE_RUNTIME_IMAGE`.
+The source is GitHub's release of BurntSushi/ripgrep, the version OpenCode 1.19.5 itself pins. The archive is 2,263,077 bytes. `rg` on `PATH` stops OpenCode's download.
 
-**Verification, in order, stopping at the first failure:**
-1. Without a model: start the containers, confirm the networks are internal and `deployment_problems` is empty, confirm OpenCode has no route out and no published port, and that `rg` is found.
-2. Send one prompt. Confirm the gateway's ledger, the filter's audit and the session show only allowed tools.
-3. The generated tests run in the same Docker sandbox as offline, and `finish` delivers only what passed.
-4. Compare the ledger with OpenAI's usage page, and check no container or network is left.
+**Order of a paid run:** preflight, keep-awake and guard, the free model-access check (`GET /v1/models/...`), a dry launch of the real containers, then the run. A run that pauses is cancelled, so nothing goes on spending unattended. Every stop takes the path verified above. Afterwards, compare the gateway's ledger with OpenAI's usage page.
 
 **Failure and cleanup:** the same paths the offline run exercised. A failed attempt stops the container, confirms it from an independent read, and restores the disposable copy. Over budget, the gateway answers 429 and the run stops. If a stop cannot be confirmed, the run is quarantined and everything stays for review. The real project is written only by `finish`, after a pass.
+
+**Account access.** A real call to `gpt-6.1-sol` succeeded on 2026-10-29. It was not re-checked here, because that means sending the key to OpenAI. The script does it first, at no charge. It proves the key sees the model, not that quota remains.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,13 @@ API_TOKEN = "test-api-token-" + "a" * 40
 FAKE_OPENAI_KEY = "sk-test" + "Z" * 40
 FAKE_GITHUB_TOKEN = "ghp_" + "Q" * 36
 ALLOWLIST_FILE = REPO_ROOT / "config" / "egress_allowlist.yaml"
+REAL_ENV_FILES = {os.path.normcase(REPO_ROOT / ".env")}
+
+
+def refuse_real_env_file(event: str, args: tuple[Any, ...]) -> None:
+    """An audit hook: it runs before any open in this process, so an offline test cannot load the real key."""
+    if event == "open" and isinstance(args[0], str | bytes | os.PathLike) and os.path.normcase(os.path.abspath(os.fsdecode(args[0]))) in REAL_ENV_FILES:
+        raise PermissionError("an offline test tried to open the real .env, which holds the real key")
 
 
 def make_settings(tmp_path: Path, **overrides: object) -> Settings:

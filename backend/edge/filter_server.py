@@ -63,6 +63,7 @@ _DRAIN_SECONDS = 0.1
 _STATUS_TEXT = {200: "OK", 204: "No Content", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 408: "Request Timeout",
                 413: "Content Too Large", 429: "Too Many Requests", 431: "Request Header Fields Too Large", 502: "Bad Gateway", 503: "Service Unavailable", 504: "Gateway Timeout"}  # fmt: skip
 _CONFIG_KEYS = frozenset({"directory", "provider_id", "model_id", "session_rules", "upstream_host", "upstream_port"})
+BUSY_RECORD = {"method": "?", "target": "?", "status": 503, "forwarded": False, "reason": "every connection slot is in use", "ms": 0}
 
 
 class UpstreamReply(Protocol):
@@ -82,6 +83,10 @@ class Connections(Protocol):
     """Serves one request on one connection. The filter and the model gateway both do."""
 
     def handle(self, conn: socket.socket) -> None: ...
+
+    def busy(self) -> None:
+        """Record a connection refused for want of a slot. Nothing was read from it."""
+        ...
 
 
 class _HttpReply:
@@ -146,6 +151,9 @@ class Filter:
             record["ms"] = round((time.monotonic() - began) * 1000)
             self._audit(record)
 
+    def busy(self) -> None:
+        self._audit(dict(BUSY_RECORD))
+
     def _serve(self, conn: socket.socket, record: dict[str, Any]) -> None:
         raw, rest = read_head(conn)
         head = parse_head(raw)
@@ -199,9 +207,11 @@ def reply_error(conn: socket.socket, refusal: Refused) -> None:
 def _drain(conn: socket.socket) -> None:
     """Read what the client is still sending, because closing over unread bytes can destroy the reply."""
     conn.shutdown(socket.SHUT_WR)
-    conn.settimeout(_DRAIN_SECONDS)
-    while len(conn.recv(65536)) > 0:
-        pass
+    deadline = time.monotonic() + _DRAIN_SECONDS
+    while (left := deadline - time.monotonic()) > 0:  # a total limit: a client that keeps sending gets no longer
+        conn.settimeout(left)
+        if not conn.recv(65536):
+            return
 
 
 def read_head(conn: socket.socket) -> tuple[bytes, bytes]:
@@ -285,25 +295,37 @@ class _Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
     request_queue_size = 64
+    on_no_thread: Callable[[socket.socket], None]
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request(request, client_address)
+        except RuntimeError:  # the container's process limit: nothing was read, so this is a refusal like a full house
+            self.on_no_thread(request)
+            self.shutdown_request(request)
 
 
 def build_server(listen: tuple[str, int], filter_: Filter | Connections) -> _Server:
     slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
 
+    def refuse(conn: socket.socket) -> None:
+        """Nothing was read and nothing is forwarded. The drain is what keeps the 503 from being lost to a reset."""
+        reply_error(conn, Refused(503, "every connection slot is in use"))
+        filter_.busy()
+
     class Handler(socketserver.BaseRequestHandler):
         def handle(self) -> None:
             if not slots.acquire(blocking=False):
-                try:
-                    send_answer(self.request, 503, "application/json", b'{"error":"busy"}')
-                except OSError:
-                    pass
+                refuse(self.request)
                 return
             try:
                 filter_.handle(self.request)
             finally:
                 slots.release()
 
-    return _Server(listen, Handler)
+    server = _Server(listen, Handler)
+    server.on_no_thread = refuse
+    return server
 
 
 def load_config(path: Path) -> dict[str, Any]:

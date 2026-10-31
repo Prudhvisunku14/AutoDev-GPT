@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import http.client
+import itertools
 import json
 import os
 import socket
@@ -24,7 +25,7 @@ if not __package__:  # run as a script from a read-only mount, as <mount>/edge/g
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from edge.filter_policy import MAX_RESPONSE_BYTES, MIN_TOKEN_CHARS, Refused, audit_target, authenticated, check_framing, parse_head  # noqa: E402
-from edge.filter_server import CLIENT_SECONDS, STREAM_IDLE_SECONDS, STREAM_MAX_SECONDS, JsonLines, UpstreamReply, build_server, read_body, read_head, reply_error, send_answer  # noqa: E402
+from edge.filter_server import BUSY_RECORD, CLIENT_SECONDS, STREAM_IDLE_SECONDS, STREAM_MAX_SECONDS, JsonLines, UpstreamReply, build_server, read_body, read_head, reply_error, send_answer  # noqa: E402
 from edge.gateway_policy import (  # noqa: E402
     MAX_BODY_BYTES,
     RESPONSES_PATH,
@@ -100,6 +101,7 @@ class Gateway:
         self._upstream = upstream
         self._audit = audit
         self._ledger = ledger
+        self._numbers = itertools.count(1)
         self.budget = Budget(policy)
 
     def handle(self, conn: socket.socket) -> None:
@@ -121,6 +123,9 @@ class Gateway:
             record["ms"] = round((time.monotonic() - began) * 1000)
             self._audit(record)
 
+    def busy(self) -> None:
+        self._audit(dict(BUSY_RECORD))
+
     def _serve(self, conn: socket.socket, record: dict[str, Any]) -> None:
         raw, rest = read_head(conn)
         head = parse_head(raw)
@@ -137,6 +142,15 @@ class Gateway:
         record["forwarded"] = True
         usage: Usage | None = None
         status = 502
+        number = next(self._numbers)
+        # On disk before anything leaves: a gateway that dies now can write nothing more, and this line then
+        # charges the whole reservation. The line below replaces it (launcher.ledger_rows).
+        self._ledger(
+            {
+                "request": number, "ts": round(time.time(), 3), "model": self._policy.model, "status": 0, "input_tokens": None, "output_tokens": None, "cached_tokens": None,
+                "charged_tokens": reservation.tokens, "cost_usd": reservation.usd if self._policy.cost_usd(0, 0) is not None else None, "usage_known": False,
+            }
+        )  # fmt: skip
         try:
             body = with_output_limit(request, reservation.max_output_tokens)
             try:
@@ -160,7 +174,7 @@ class Gateway:
             charge = self.budget.settle(reservation, usage)
             self._ledger(
                 {
-                    "ts": round(time.time(), 3), "model": self._policy.model, "status": status,
+                    "request": number, "ts": round(time.time(), 3), "model": self._policy.model, "status": status,
                     "input_tokens": usage.input_tokens if usage else None, "output_tokens": usage.output_tokens if usage else None,
                     "cached_tokens": usage.cached_tokens if usage else None, "charged_tokens": charge.tokens,
                     "cost_usd": charge.usd, "usage_known": charge.known,

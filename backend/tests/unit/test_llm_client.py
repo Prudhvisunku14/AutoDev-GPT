@@ -98,6 +98,7 @@ def test_request_shape_and_response_parsing(tmp_path: Path) -> None:
     assert body["tools"] == REQUEST.tools
     assert body["previous_response_id"] == "resp_prev"
     assert body["parallel_tool_calls"] is False
+    assert body["service_tier"] == "default", "auto follows the project's setting, which may be the dearer Fast tier"
     assert body["store"] is True
     assert body["tool_choice"] == "required"
     assert body["max_output_tokens"] == 2048

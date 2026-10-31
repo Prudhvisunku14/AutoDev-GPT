@@ -119,5 +119,8 @@ class SimulatedLauncher:
     def writer_for(self, container_id: str | None) -> WriterControl:
         return _NoContainer()
 
+    def usage_for(self, run_id: str, call_id: str) -> dict[str, Any]:
+        return {}
+
     def sweep(self) -> None:
         return None

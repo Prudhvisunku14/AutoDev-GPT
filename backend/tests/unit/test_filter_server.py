@@ -6,9 +6,11 @@ The real upstream path is exercised by scripts/opencode_filter_check.py, once, w
 
 from __future__ import annotations
 
+import contextlib
 import json
 import socket
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -390,3 +392,120 @@ def test_the_server_module_imports_only_the_standard_library_and_its_policy() ->
             names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""] if isinstance(node, ast.ImportFrom) else []
             for module in names:
                 assert module.split(".")[0] not in ("app", "httpx", "pydantic", "sqlalchemy", "requests"), (name, module)
+
+
+# --- Every slot taken -------------------------------------------------------------------------------
+
+
+class StalledAudit:
+    """An audit log on a disk that has stopped answering, until `release`."""
+
+    def __init__(self) -> None:
+        self.rows: list[dict[str, Any]] = []
+        self._open = threading.Event()
+
+    def __call__(self, record: dict[str, Any]) -> None:
+        self._open.wait(10)
+        self.rows.append(record)
+
+    def release(self) -> None:
+        self._open.set()
+
+
+def _exchange(port: int, raw: bytes) -> int:
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as conn:
+        conn.sendall(raw)
+        conn.shutdown(socket.SHUT_WR)
+        data = bytearray()
+        while chunk := conn.recv(65536):
+            data.extend(chunk)
+    return int(bytes(data).split(b" ", 2)[1])
+
+
+def _one_at_a_time(audit: Any, count: int) -> tuple[list[int], FakeUpstream, Any]:
+    upstream = FakeUpstream()
+    server = filter_server.build_server(("127.0.0.1", 0), Filter(POLICY, TOKEN, upstream, audit=audit))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return [_exchange(server.server_address[1], _request("GET", "/index.html")) for _ in range(count)], upstream, server
+
+
+def test_refused_requests_sent_one_at_a_time_outrun_a_stalled_audit_log_and_forward_nothing() -> None:
+    """A client that waits for each answer can still fill the slots: the answer is sent, and the slot is held
+    until the decision is on disk. So a stall in the audit log, not concurrency, is enough to reach 503."""
+    audit = StalledAudit()
+    answers, upstream, server = _one_at_a_time(audit, filter_server.MAX_CONNECTIONS + 5)
+    audit.release()
+    deadline = time.monotonic() + 5
+    while len(audit.rows) < len(answers) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    server.shutdown()
+    server.server_close()
+    assert answers == [403] * filter_server.MAX_CONNECTIONS + [503] * 5
+    assert upstream.calls == []
+    assert len(audit.rows) == len(answers), "every decision is one line in the audit log, the busy ones too"
+    assert [r["status"] for r in audit.rows].count(503) == 5 and not any(r["forwarded"] for r in audit.rows)
+
+
+def test_with_an_audit_log_that_keeps_up_the_same_requests_are_all_answered() -> None:
+    rows: list[dict[str, Any]] = []
+    answers, upstream, server = _one_at_a_time(rows.append, filter_server.MAX_CONNECTIONS + 5)
+    server.shutdown()
+    server.server_close()
+    assert answers == [403] * (filter_server.MAX_CONNECTIONS + 5) and upstream.calls == []
+
+
+def test_a_busy_refusal_reads_nothing_from_the_connection() -> None:
+    rig = Rig()
+    rig.filter.busy()
+    assert rig.audit == [filter_server.BUSY_RECORD] and rig.upstream.calls == []
+    assert rig.audit[0] is not filter_server.BUSY_RECORD, "a shared record could be changed by whoever writes it"
+
+
+def test_with_no_thread_to_be_had_a_connection_is_refused_and_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The container's process limit can stop a thread starting. That is a refusal like any other, not a silent close."""
+    rows: list[dict[str, Any]] = []
+    upstream = FakeUpstream()
+    server = filter_server.build_server(("127.0.0.1", 0), Filter(POLICY, TOKEN, upstream, audit=rows.append))
+
+    def no_thread(*_: Any) -> None:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(filter_server.socketserver.ThreadingMixIn, "process_request", no_thread)
+    worker = threading.Thread(target=server.handle_request)
+    worker.start()
+    status = _exchange(server.server_address[1], _request("GET", "/index.html"))
+    worker.join(5)
+    server.server_close()
+    assert status == 503 and rows == [filter_server.BUSY_RECORD] and upstream.calls == []
+
+
+def test_a_client_that_keeps_sending_cannot_hold_a_refused_connection_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A busy refusal drains without holding a slot, so the wait has a total limit, not one per read. The drain
+    runs on its own thread, so a drain with no limit fails this test instead of hanging the whole suite."""
+    monkeypatch.setattr(filter_server, "_DRAIN_SECONDS", 0.05)
+    client, server = socket.socketpair()
+    stop = threading.Event()
+
+    def keep_sending() -> None:
+        while not stop.is_set():
+            try:
+                client.sendall(b"x")
+            except OSError:
+                return
+            time.sleep(0.005)
+
+    def drain() -> None:
+        with contextlib.suppress(OSError):  # reply_error treats a timeout as the end of the wait, too
+            filter_server._drain(server)
+
+    sender = threading.Thread(target=keep_sending, daemon=True)
+    drainer = threading.Thread(target=drain, daemon=True)
+    sender.start()
+    drainer.start()
+    drainer.join(1.0)
+    stuck = drainer.is_alive()
+    stop.set()
+    sender.join(5)
+    client.close()
+    server.close()
+    assert not stuck

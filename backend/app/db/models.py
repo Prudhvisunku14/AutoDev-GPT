@@ -173,6 +173,9 @@ class Run(Base):
 
     # --- Phase 4 slice: verification, repair and the final report ------------------
     repairs: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # What OpenAI holds for this run, which the next call is billed for, and the call now in flight.
+    context_tokens: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    reserved_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
     verification_json: Mapped[str | None] = mapped_column(Text, default=None)  # the last test run, judged
     report_json: Mapped[str | None] = mapped_column(Text, default=None)  # written when the run ends
 

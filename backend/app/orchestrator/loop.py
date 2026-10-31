@@ -46,7 +46,7 @@ from app.db.models import (
     utcnow,
 )
 from app.orchestrator import prompts
-from app.orchestrator.budget import LimitHit, RunGuard, turn_cost_usd
+from app.orchestrator.budget import LimitHit, RunGuard, turn_ceiling_usd, turn_cost_usd, turn_input_tokens
 from app.orchestrator.llm_client import LLMClient, LLMError, LLMErrorKind, LLMRequest, LLMResponse
 from app.orchestrator.run_control import change_state, end_run, pause_run
 from app.orchestrator.state_machine import ORCHESTRATED_STATES, REQUIRED_PHASE
@@ -63,6 +63,8 @@ logger = logging.getLogger("devpilot.orchestrator")
 
 LLMProvider = Callable[[], LLMClient]
 _EVENT_TEXT_LIMIT = 500
+# Refused before any work began, so these cannot have been billed. Anything else may have been.
+_NOT_BILLED = frozenset({LLMErrorKind.AUTH, LLMErrorKind.QUOTA, LLMErrorKind.RATE_LIMIT, LLMErrorKind.MODEL_NOT_FOUND, LLMErrorKind.BAD_REQUEST, LLMErrorKind.CONFIG, LLMErrorKind.STOPPED})
 
 
 class Orchestrator:
@@ -156,6 +158,7 @@ class Orchestrator:
                 run.cost_known = False
             run.pause_reason = None
             run.status_detail = None
+            self._charge_reservation(run)  # the backend stopped during a GPT call: it may have been billed
             self._recover_interrupted(s, run)
             return True
 
@@ -364,6 +367,12 @@ class Orchestrator:
                 tools=self._registry.schemas_for(run.state),
                 previous_response_id=run.last_response_id,
             )
+            ceiling = turn_ceiling_usd(request, run, self._settings)
+            hit = self._guard.before_send(run, ceiling, turn_input_tokens(request, run))
+            if hit is not None:
+                self._stop_run(s, run, hit)
+                return None
+            run.reserved_usd = ceiling  # saved before the send, so a crash cannot hide this call
             self._record(
                 s,
                 run,
@@ -382,16 +391,18 @@ class Orchestrator:
         with self._sessions.begin() as s:
             run = s.get(Run, run_id)
             assert run is not None
+            cost = turn_cost_usd(response.usage, self._settings) if run.cost_known else None
+            if cost is not None:
+                run.cost_usd += cost
+            run.reserved_usd = 0.0
+            run.tokens_in += response.usage.input_tokens
+            run.tokens_out += response.usage.output_tokens
             if run.is_terminal or run.state is RunState.AWAITING_APPROVAL:
                 self._record(s, run, "llm.response_discarded", {"response_id": response.id, "state": run.state})
                 return False
 
             run.turns += 1
-            run.tokens_in += response.usage.input_tokens
-            run.tokens_out += response.usage.output_tokens
-            cost = turn_cost_usd(response.usage, self._settings) if run.cost_known else None
-            if cost is not None:
-                run.cost_usd += cost
+            run.context_tokens = response.usage.input_tokens + response.usage.output_tokens
             run.last_response_id = response.id
             run.pending_messages_json = None
             if delivered_ids:
@@ -533,6 +544,10 @@ class Orchestrator:
         with self._sessions.begin() as s:
             run = s.get(Run, run_id)
             assert run is not None
+            if exc.kind in _NOT_BILLED:
+                run.reserved_usd = 0.0
+            else:
+                self._charge_reservation(run)
             if exc.kind is LLMErrorKind.STOPPED:
                 self._record(s, run, "llm.stopped", {"message": message})
                 if not run.is_terminal and run.state is not RunState.AWAITING_APPROVAL:
@@ -545,6 +560,11 @@ class Orchestrator:
                 pause_run(s, run, self._events, reason=f"llm_error:{exc.kind.lower()}", detail=message)
             else:
                 end_run(s, run, RunState.FAILED, self._events, outcome="llm_error", detail=message, reason=exc.kind)
+
+    def _charge_reservation(self, run: Run) -> None:
+        """The answer never came, so the call counts at its ceiling. Spending cannot go unseen."""
+        run.cost_usd += run.reserved_usd
+        run.reserved_usd = 0.0
 
     def _add_active_time(self, run_id: str, seconds: float) -> None:
         try:

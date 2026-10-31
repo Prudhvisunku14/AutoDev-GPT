@@ -20,6 +20,7 @@ from edge.filter_policy import Refused, parse_head
 from edge.gateway_policy import (
     ALLOWED_FIELDS,
     MAX_BODY_BYTES,
+    SHORT_CONTEXT_TOKENS,
     Budget,
     CheckedRequest,
     GatewayPolicy,
@@ -70,8 +71,14 @@ class Rig:
     def __init__(self, upstream: FakeUpstream | None = None, policy: GatewayPolicy = POLICY) -> None:
         self.upstream = upstream or FakeUpstream()
         self.audit: list[dict[str, Any]] = []
-        self.ledger: list[dict[str, Any]] = []
-        self.gateway = Gateway(policy, TOKEN, self.upstream, audit=self.audit.append, ledger=self.ledger.append)
+        self.journal: list[dict[str, Any]] = []  # every line, in order
+        self.ledger: list[dict[str, Any]] = []  # the lines that settle a request
+        self.gateway = Gateway(policy, TOKEN, self.upstream, audit=self.audit.append, ledger=self._write)
+
+    def _write(self, row: dict[str, Any]) -> None:
+        self.journal.append(row)
+        if row["status"] != 0:
+            self.ledger.append(row)
 
     def send(self, raw: bytes) -> tuple[int, dict[str, str], bytes]:
         client, server = socket.socketpair()
@@ -298,7 +305,8 @@ def test_the_request_budget_stops_the_next_request_before_it_is_forwarded() -> N
 
 
 def test_the_token_budget_stops_a_request_that_could_not_fit() -> None:
-    rig = Rig(policy=GatewayPolicy(model="gpt-test", max_output_tokens=1_000, max_requests=99, max_tokens=170))
+    ceiling = len(_body()) + 512
+    rig = Rig(policy=GatewayPolicy(model="gpt-test", max_output_tokens=1_000, max_requests=99, max_tokens=ceiling + 149))
     assert rig.send(_request(_body()))[0] == 200  # 150 used
     assert rig.send(_request(_body()))[0] == 429
     assert len(rig.upstream.calls) == 1
@@ -307,10 +315,59 @@ def test_the_token_budget_stops_a_request_that_could_not_fit() -> None:
 def test_the_output_cap_shrinks_to_what_the_budget_has_left() -> None:
     body = _body()
     room = 500
-    policy = GatewayPolicy(model="gpt-test", max_output_tokens=1_000, max_requests=9, max_tokens=len(body) // 3 + room)
+    policy = GatewayPolicy(model="gpt-test", max_output_tokens=1_000, max_requests=9, max_tokens=len(body) + 512 + room)
     rig = Rig(policy=policy)
     rig.send(_request(body))
     assert json.loads(rig.upstream.calls[0][0])["max_output_tokens"] == room
+
+
+def test_the_input_ceiling_is_a_true_upper_bound() -> None:
+    body = _body(input="word " * 1_000)
+    checked = _check(body)
+    # Even one token per byte of the whole request could not pass it, and real text takes far fewer.
+    assert checked.input_ceiling >= len(body)
+
+
+@pytest.mark.parametrize(("spent", "allowed"), [(0.0, True), (0.9, False)])
+def test_the_spending_limit_counts_what_is_already_spent(spent: float, allowed: bool) -> None:
+    policy = GatewayPolicy(model="gpt-test", max_output_tokens=1_000, max_requests=9, max_tokens=10_000_000, max_usd=1.0, price_input_per_mtok=2.0, price_output_per_mtok=100.0)
+    budget = Budget(policy)
+    budget.usd = spent
+    request = CheckedRequest(b"{}", True, 5_000, 1_000)  # at most 0.01 + 0.1
+    if allowed:
+        assert budget.reserve(request).usd == pytest.approx(0.11)
+    else:
+        with pytest.raises(Refused) as caught:
+            budget.reserve(request)
+        assert caught.value.status == 429
+
+
+def test_outstanding_requests_hold_their_money_until_they_settle() -> None:
+    policy = GatewayPolicy(model="gpt-test", max_output_tokens=1_000, max_requests=9, max_tokens=10_000_000, max_usd=0.2, price_input_per_mtok=2.0, price_output_per_mtok=100.0)
+    budget = Budget(policy)
+    request = CheckedRequest(b"{}", True, 5_000, 1_000)
+    first = budget.reserve(request)
+    assert budget.outstanding == 1
+    with pytest.raises(Refused):
+        budget.reserve(request)  # 0.11 held and 0.11 more would pass 0.20
+    assert budget.outstanding == 1
+    budget.settle(first, Usage(100, 10))
+    assert budget.outstanding == 0 and budget.reserve(request).usd > 0
+
+
+def test_the_budget_never_passes_its_ceiling_however_requests_end() -> None:
+    policy = GatewayPolicy(model="gpt-test", max_output_tokens=1_000, max_requests=500, max_tokens=10_000_000, max_usd=1.0, price_input_per_mtok=2.0, price_output_per_mtok=10.0)
+    budget = Budget(policy)
+    request = CheckedRequest(b"{}", True, 10_000, 1_000)
+    settled = 0
+    while True:
+        try:
+            held = budget.reserve(request)
+        except Refused:
+            break
+        budget.settle(held, None if settled % 3 == 0 else Usage(10_000, 1_000))  # every third answer is lost
+        settled += 1
+    assert settled > 10 and budget.usd <= 1.0 and budget.outstanding == 0
 
 
 def test_requests_running_together_cannot_both_spend_the_same_room() -> None:
@@ -449,7 +506,7 @@ def test_no_credential_or_prompt_reaches_the_logs() -> None:
 def test_the_ledger_holds_only_numbers_and_the_model() -> None:
     rig = Rig()
     rig.send(_request(_body()))
-    assert set(rig.ledger[0]) == {"ts", "model", "status", "input_tokens", "output_tokens", "cached_tokens", "charged_tokens", "cost_usd", "usage_known"}
+    assert set(rig.ledger[0]) == {"request", "ts", "model", "status", "input_tokens", "output_tokens", "cached_tokens", "charged_tokens", "cost_usd", "usage_known"}
 
 
 def test_the_key_goes_upstream_and_never_to_the_client() -> None:
@@ -501,3 +558,63 @@ def test_real_credentials_are_accepted() -> None:
 
 def test_the_allowlist_holds_nothing_that_detaches_a_request() -> None:
     assert not ALLOWED_FIELDS & {"background", "previous_response_id", "conversation", "prompt"}
+
+
+def test_a_busy_refusal_is_recorded_and_reaches_nothing() -> None:
+    rig = Rig()
+    rig.gateway.busy()
+    assert rig.audit[-1]["status"] == 503 and rig.audit[-1]["forwarded"] is False
+    assert rig.upstream.calls == [] and rig.gateway.budget.requests == 0 and rig.ledger == []
+
+
+def test_a_request_is_on_the_ledger_before_anything_leaves() -> None:
+    """A gateway removed mid-request writes nothing more, so the charge must already be on disk."""
+    seen: list[dict[str, Any]] = []
+
+    class Witness(FakeUpstream):
+        def send(self, body: bytes, *, stream: bool) -> Any:
+            seen.extend(rig.journal)
+            return super().send(body, stream=stream)
+
+    rig = Rig(Witness())
+    status, _, _ = rig.send(_request(_body()))
+    assert status == 200 and len(seen) == 1
+    assert seen[0]["status"] == 0 and seen[0]["usage_known"] is False and seen[0]["charged_tokens"] > 0
+
+
+def test_a_request_is_written_twice_under_one_number_and_settles_for_what_it_used() -> None:
+    rig = Rig()
+    rig.send(_request(_body()))
+    rig.send(_request(_body()))
+    assert [(r["request"], r["status"]) for r in rig.journal] == [(1, 0), (1, 200), (2, 0), (2, 200)]
+    assert rig.journal[1]["charged_tokens"] < rig.journal[0]["charged_tokens"]
+
+
+def test_a_refused_request_is_never_on_the_ledger() -> None:
+    rig = Rig()
+    rig.send(_request(_body(), token="w" * 43))
+    assert rig.journal == []
+
+
+@pytest.mark.parametrize("tier", [None, "auto", "default", "flex"])
+def test_every_forwarded_request_is_pinned_to_standard_processing(tier: str | None) -> None:
+    """`auto` follows the project's own setting, which could be Fast, at twice the price the budget is worked out on."""
+    rig = Rig()
+    rig.send(_request(_body(**({"service_tier": tier} if tier else {}))))
+    assert json.loads(rig.upstream.calls[0][0])["service_tier"] == "default"
+
+
+def test_a_request_that_could_reach_long_context_prices_is_refused() -> None:
+    """Above this many input tokens the model costs twice as much, so the reservation would be too small. A token
+    covers at least a byte, so the size of the body is the proof. The status is not one OpenCode retries."""
+    room = SHORT_CONTEXT_TOKENS - 512 - len(_body(input=""))
+    assert _check(_body(input="x" * room)).input_ceiling == SHORT_CONTEXT_TOKENS
+    with pytest.raises(Refused) as refused:
+        _check(_body(input="x" * (room + 1)))
+    assert refused.value.status == 413
+
+
+def test_a_refused_long_request_spends_nothing_and_reaches_nothing() -> None:
+    rig = Rig()
+    status, _, _ = rig.send(_request(_body(input="x" * SHORT_CONTEXT_TOKENS)))
+    assert status == 413 and rig.upstream.calls == [] and rig.gateway.budget.requests == 0 and rig.journal == []

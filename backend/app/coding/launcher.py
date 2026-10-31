@@ -121,6 +121,10 @@ class CodingLauncher(Protocol):
         """A stop for a container a previous backend started. Startup recovery uses it."""
         ...
 
+    def usage_for(self, run_id: str, call_id: str) -> dict[str, Any]:
+        """What an attempt's gateway recorded, for an attempt a stopped backend never accounted for."""
+        ...
+
     def sweep(self) -> None:
         """Remove what a stopped backend left, after recovery. Only called when nothing is quarantined."""
         ...
@@ -182,6 +186,7 @@ class OpenCodeSession:
         edges: tuple[str, ...],
         folder: Path,
         client: OpenCodeClient,
+        networks: tuple[tuple[str, bool], ...] = NETWORKS,
     ) -> None:
         self.provider = provider
         self.control = control
@@ -191,6 +196,7 @@ class OpenCodeSession:
         self._edges = edges
         self._folder = folder
         self._client = client
+        self._networks = networks
         self.usage: dict[str, Any] = {}
 
     def close(self) -> None:
@@ -203,7 +209,7 @@ class OpenCodeSession:
             # The logs hold no secret and no prompt, and they are the evidence of what was refused and spent.
             shutil.copytree(self._folder / "ledger", self._folder.parent.parent / "evidence" / self._folder.name, dirs_exist_ok=True)
             shutil.rmtree(self._folder, ignore_errors=True)
-            for name, _ in reversed(NETWORKS):
+            for name, _ in reversed(self._networks):
                 self._cli.remove_network(name)
         else:
             logger.error("the coding container could not be confirmed stopped: %s", stopped.evidence)
@@ -216,17 +222,31 @@ def _stop_quietly(writer: WriterControl) -> Termination:
         return Termination(False, f"the stop raised {type(exc).__name__}")
 
 
+def ledger_rows(path: Path) -> tuple[list[dict[str, Any]], bool]:
+    """Each request once: what it settled for, or its whole reservation if the gateway died before it settled.
+    The second value is False when a line could not be read."""
+    rows: dict[Any, dict[str, Any]] = {}
+    readable = True
+    for index, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            entry = None
+        if isinstance(entry, dict):
+            rows[entry.get("request", f"line {index}")] = entry
+        else:
+            readable = False
+    return list(rows.values()), readable
+
+
 def read_ledger(path: Path) -> dict[str, Any]:
     """The gateway's own totals. Unreadable lines count as nothing known, never as nothing spent."""
     totals: dict[str, Any] = {"requests": 0, "charged_tokens": 0, "cost_usd": None, "all_known": True}
     if not path.is_file():
         return {**totals, "all_known": False}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        try:
-            entry = json.loads(line)
-        except ValueError:
-            totals["all_known"] = False
-            continue
+    rows, readable = ledger_rows(path)
+    totals["all_known"] = readable
+    for entry in rows:
         totals["requests"] += 1
         totals["charged_tokens"] += entry.get("charged_tokens") or 0
         totals["all_known"] = totals["all_known"] and bool(entry.get("usage_known"))
@@ -236,7 +256,8 @@ def read_ledger(path: Path) -> dict[str, Any]:
 
 
 class OpenCodeLauncher:
-    """The real launcher. Tested with a fake Docker; not yet run against real containers (approval needed)."""
+    """The real launcher. The no-model check runs it on real containers through a subclass that only
+    removes from this layout (scripts/opencode_launcher_check.py). The live path needs the approvals."""
 
     def __init__(self, settings: Settings, cli: DockerCli, egress: EgressPolicy, *, sleep: Callable[[float], None] = time.sleep) -> None:
         self._settings = settings
@@ -265,6 +286,10 @@ class OpenCodeLauncher:
             missing.append("OPENAI_API_KEY is not set")
         if not s.cost_known:
             missing.append("OPENAI_PRICE_INPUT_PER_MTOK and OPENAI_PRICE_OUTPUT_PER_MTOK are not set, so no spending limit could be enforced")
+        if s.openai_max_output_tokens is None:
+            missing.append("OPENAI_MAX_OUTPUT_TOKENS is not set, so a GPT call has no upper bound")
+        if s.openai_max_retries != 0:
+            missing.append("OPENAI_MAX_RETRIES must be 0: a retry the SDK makes by itself could be billed without being counted")
         endpoint = endpoint_problem(s, self._egress)
         if endpoint is not None:
             missing.append(endpoint)
@@ -273,13 +298,27 @@ class OpenCodeLauncher:
     def writer_for(self, container_id: str | None) -> WriterControl:
         return ContainerTerminator(self._cli, container_id or "")
 
+    def usage_for(self, run_id: str, call_id: str) -> dict[str, Any]:
+        return read_ledger(self._attempt_folder(run_id, call_id) / "ledger" / "ledger.jsonl")
+
     def sweep(self) -> None:
         for label in (CONTAINER_LABEL, EDGE_LABEL):
             for container_id in self._cli.labelled_containers(label):
                 self._cli.remove(container_id)
-        for name, _ in reversed(NETWORKS):
+        for name, _ in reversed(self.networks()):
             self._cli.remove_network(name)
-        shutil.rmtree(self._settings.coding_work_dir / "attempts", ignore_errors=True)
+        attempts = self._settings.coding_work_dir / "attempts"
+        for folder in attempts.iterdir() if attempts.is_dir() else ():
+            if (folder / "ledger").is_dir():
+                shutil.copytree(folder / "ledger", self._settings.coding_work_dir / "evidence" / folder.name, dirs_exist_ok=True)
+        shutil.rmtree(attempts, ignore_errors=True)
+
+    def networks(self) -> tuple[tuple[str, bool], ...]:
+        return NETWORKS
+
+    def _attempt_folder(self, run_id: str, call_id: str) -> Path:
+        key = hashlib.sha256(f"{run_id}:{call_id}".encode()).hexdigest()[:32]
+        return self._settings.coding_work_dir / "attempts" / key
 
     def start(self, request: LaunchRequest) -> OpenCodeSession:
         reason = self.unavailable_reason()
@@ -298,10 +337,9 @@ class OpenCodeLauncher:
             raise
 
     def _new_plan(self, request: LaunchRequest) -> _Plan:
-        key = hashlib.sha256(f"{request.run_id}:{request.call_id}".encode()).hexdigest()[:32]
-        folder = self._settings.coding_work_dir / "attempts" / key
+        folder = self._attempt_folder(request.run_id, request.call_id)
         return _Plan(
-            suffix=key[:16],
+            suffix=folder.name[:16],
             folder=folder,
             filter_token=secrets.token_urlsafe(32),
             password=secrets.token_urlsafe(32),
@@ -312,19 +350,21 @@ class OpenCodeLauncher:
         s = self._settings
         container = self._write_files(request, plan)
         opencode_args = build_production_args(container, s)  # refuses before anything exists
-        for name, internal in NETWORKS:
+        networks = self.networks()
+        for name, internal in networks:
             self._cli.create_network(name, internal=internal)
-        problems = [p for name, internal in NETWORKS if internal for p in network_problems(name, self._cli.inspect_network(name))]
+        problems = [p for name, internal in networks if internal for p in network_problems(name, self._cli.inspect_network(name))]
         if problems:
             raise SandboxError("; ".join(problems))
-        started.append(self._cli.run_detached(self._gateway_args(plan), env={GATEWAY_TOKEN_ENV: plan.gateway_token, UPSTREAM_KEY_ENV: _key(s)}))
+        started.append(self._cli.run_detached(self._gateway_args(plan), env=self._gateway_env(plan)))
         opencode_id = self._cli.run_detached(opencode_args, env={PASSWORD_ENV: plan.password})
         started.append(opencode_id)
         problems = deployment_problems(self._cli.inspect_json(opencode_id) or {}, container)
         if problems:
             raise SandboxError("the OpenCode container is not as defined: " + "; ".join(problems[:5]))
-        started.append(self._cli.run_detached(self._filter_args(plan), env={FILTER_TOKEN_ENV: plan.filter_token, PASSWORD_ENV: plan.password}))
-        client = OpenCodeClient(s.opencode_base_url, token=plan.filter_token, directory=WORKSPACE_TARGET)
+        filter_id = self._cli.run_detached(self._filter_args(plan), env={FILTER_TOKEN_ENV: plan.filter_token, PASSWORD_ENV: plan.password})
+        started.append(filter_id)
+        client = OpenCodeClient(self._filter_url(filter_id), token=plan.filter_token, directory=WORKSPACE_TARGET)
         try:
             self._wait_for_filter(client)
         except BaseException:
@@ -332,7 +372,14 @@ class OpenCodeLauncher:
             raise
         provider = OpenCodeProvider(client, model=s.opencode_model or "")
         edges = tuple(cid for cid in started if cid != opencode_id)
-        return OpenCodeSession(provider=provider, control=session_control(client), cli=self._cli, container_id=opencode_id, edges=edges, folder=plan.folder, client=client)
+        return OpenCodeSession(provider=provider, control=session_control(client), cli=self._cli, container_id=opencode_id, edges=edges, folder=plan.folder, client=client, networks=networks)
+
+    def _filter_url(self, filter_id: str) -> str:
+        """Where the backend reaches the filter: the published loopback port."""
+        return self._settings.opencode_base_url
+
+    def _gateway_env(self, plan: _Plan) -> dict[str, str]:
+        return {GATEWAY_TOKEN_ENV: plan.gateway_token, UPSTREAM_KEY_ENV: _key(self._settings)}
 
     def _write_files(self, request: LaunchRequest, plan: _Plan) -> ProductionContainer:
         """Everything the containers read, in a fresh folder under the work root."""
@@ -358,7 +405,7 @@ class OpenCodeLauncher:
             "price_input_per_mtok": s.openai_price_input_per_mtok, "price_output_per_mtok": s.openai_price_output_per_mtok,
         }  # fmt: skip
         (folders["edge"] / "gateway.json").write_text(json.dumps(gateway_config), encoding="utf-8")
-        image = RuntimeImage(image_id=s.opencode_runtime_image or "", ripgrep="/usr/bin/rg")
+        image = RuntimeImage(image_id=s.opencode_runtime_image or "", ripgrep="/usr/local/bin/rg")
         return ProductionContainer(
             name=plan.opencode_name, image=image, binary=verified_binary(s.opencode_manifest_file or Path()), work_root=s.coding_work_dir,
             config_dir=folders["config"], global_config_dir=folders["guard"], work_copy=request.workspace,
@@ -399,7 +446,7 @@ class OpenCodeLauncher:
     def _undo(self, plan: _Plan, started: list[str]) -> None:
         for container_id in reversed(started):
             self._cli.remove(container_id)
-        for name, _ in reversed(NETWORKS):
+        for name, _ in reversed(self.networks()):
             self._cli.remove_network(name)
         shutil.rmtree(plan.folder, ignore_errors=True)
 

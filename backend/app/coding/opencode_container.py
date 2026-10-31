@@ -37,9 +37,9 @@ from app.config import REPO_ROOT, Settings
 
 # The binary of opencode-linux-x64-musl 1.19.5, recorded when it was verified (docs/PROGRESS.md).
 PINNED_BINARY_SHA256 = "528058cf8f2a7196ec94dc113052b785f8f94f6802ced3980ad7359369ddacc8"
-# Image IDs approved to run OpenCode in production. Empty on purpose: the only image built so far lacks
-# ripgrep (see INSTALL_PATHS), so the production builder refuses every image until one is approved.
-APPROVED_RUNTIME_IMAGES: frozenset[str] = frozenset()
+# Image IDs approved to run OpenCode. This is devpilot/opencode-runtime:1.19.5: the verified check image
+# plus one file, ripgrep 15.1.0 at /usr/local/bin/rg (archive SHA-256 1c9297be...91599), built with no network.
+APPROVED_RUNTIME_IMAGES: frozenset[str] = frozenset({"sha256:a7753fe443915eed28c577c1d1b3f0e27ab1c5bd16b7debc7de9579d2aaefe99"})
 
 CONTAINER_LABEL = "devpilot.opencode"
 RUN_USER = "65534:65534"  # "nobody": numeric, so the image needs no passwd entry

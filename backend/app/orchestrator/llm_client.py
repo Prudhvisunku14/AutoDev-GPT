@@ -135,6 +135,7 @@ class OpenAIResponsesClient:
             "tools": request.tools,
             "parallel_tool_calls": False,
             "store": True,
+            "service_tier": "default",  # "auto" follows the project's setting, which may be the dearer Fast tier
         }
         if request.tools:
             kwargs["tool_choice"] = "required"

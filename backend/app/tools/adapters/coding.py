@@ -269,6 +269,16 @@ def _settle(plan: _CodingPlan, guard: AttemptGuard, session: CodingSession, outc
     return _CodingResult(outcome, changes=[], violations=violations, phase=str(final.phase), quarantined=final.quarantined, restored=restored, detail=final.detail)
 
 
+def attempt_cost(ledger: dict[str, Any], allowance: float | None) -> float | None:
+    """What an attempt spent, by its gateway's ledger. A ledger that could not be read counts as the
+    whole allowance, because spending must never go unseen. None when no gateway was involved."""
+    if not ledger:
+        return None
+    if ledger.get("cost_usd") is not None:
+        return float(ledger["cost_usd"])
+    return (allowance or 0.0) if not ledger.get("all_known") else 0.0
+
+
 def _finish_generate_code(runtime: CodingRuntime, ctx: ToolContext, plan: _CodingPlan, result: _CodingResult) -> dict[str, object]:
     run = ctx.run
     outcome = result.outcome
@@ -279,7 +289,7 @@ def _finish_generate_code(runtime: CodingRuntime, ctx: ToolContext, plan: _Codin
     unreported = max(result.ledger.get("charged_tokens", 0) - outcome.tokens_in - outcome.tokens_out, 0)
     run.tokens_in += unreported
     if run.cost_known:
-        spent = result.ledger.get("cost_usd")
+        spent = attempt_cost(result.ledger, plan.usd_budget)
         if spent is None:
             spent = outcome.cost_usd if outcome.cost_usd is not None else turn_cost_usd(Usage(input_tokens=outcome.tokens_in + unreported, output_tokens=outcome.tokens_out), ctx.settings)
         run.cost_usd += spent or 0.0
@@ -511,6 +521,15 @@ class _ServerGone:
         raise ControlError("the backend restarted")
 
 
+def _charge_lost_attempt(sessions: sessionmaker[Session], record: AttemptRecord, launcher: CodingLauncher, settings: Settings) -> None:
+    """The backend stopped before it could count this attempt's spending. Unreadable means the worst."""
+    with sessions.begin() as s:
+        run = s.get(Run, record.run_id)
+        if run is not None and run.cost_known:
+            allowance = max(settings.run_budget_usd - run.cost_usd, 0.0)
+            run.cost_usd += attempt_cost(launcher.usage_for(record.run_id, record.call_id), allowance) or 0.0
+
+
 def recover_attempts(runtime: CodingRuntime, settings: Settings, sessions: sessionmaker[Session]) -> list[AttemptRecord]:
     """Finish what a stopped backend left. Runs at startup, before any run advances. An attempt whose
     container cannot be confirmed stopped is quarantined, and its copy stays for a person to review."""
@@ -523,6 +542,7 @@ def recover_attempts(runtime: CodingRuntime, settings: Settings, sessions: sessi
             fingerprint=partial(workspace_fingerprint, root), policy=runtime.stop_policy,
         )  # fmt: skip
         report = guard.recover(_ServerGone())
+        _charge_lost_attempt(sessions, record, launcher, settings)
         checkpoint = Checkpoint.find(settings.coding_checkpoints_dir, record.run_id, record.call_id)
         if report.safe_to_restore and checkpoint is not None:
             try:
