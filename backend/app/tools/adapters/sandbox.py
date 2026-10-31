@@ -45,10 +45,12 @@ def begin_sandbox_command(ctx: ToolContext, args: RunSandboxCommandArgs) -> _Pla
     """In a transaction: check the request against the approval table and record the start."""
     if ctx.sandbox is None or ctx.workspace is None:
         raise ToolError(ErrorClass.TOOL_ERROR, "the Docker sandbox is not configured for this backend")
+    # Once a run has a disposable copy, that copy is the project: the real one has none of its changes yet.
+    in_copy = ctx.candidates is not None and ctx.candidates.has_project(ctx.run.id)
+    workspace, owner = (ctx.candidates, ctx.run.id) if in_copy else (ctx.workspace, ctx.project.id)
+    assert workspace is not None
     try:
-        spec = build_spec(
-            args.command, args.target, workspace=ctx.workspace, project_id=ctx.project.id, settings=ctx.settings
-        )
+        spec = build_spec(args.command, args.target, workspace=workspace, project_id=owner, settings=ctx.settings)
     except SandboxPolicyError as exc:
         raise ToolError(ErrorClass.INVALID_ARGS, str(exc)) from exc
     _record(ctx, "sandbox.started", _spec_payload(spec))
@@ -79,7 +81,7 @@ def sandbox_tool_spec() -> ToolSpec:
         ),
         args_model=RunSandboxCommandArgs,
         risk=RiskLevel.SANDBOX_EXEC,
-        states=frozenset({RunState.IMPLEMENTING}),
+        states=frozenset({RunState.IMPLEMENTING, RunState.REPAIRING}),
         handler=None,
         external=ExternalStep(begin=begin_sandbox_command, run=run_sandbox_container, finish=finish_sandbox_command),
     )

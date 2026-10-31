@@ -33,6 +33,7 @@ from edge.filter_policy import (
     check_body,
     check_framing,
     find_route,
+    json_depth,
     parse_head,
     split_target,
 )
@@ -588,3 +589,10 @@ def test_the_log_gets_the_path_and_never_the_query() -> None:
 def test_split_target_gives_path_and_query() -> None:
     assert split_target(f"/config?{QUERY}") == ("/config", QUERY)
     assert split_target("/doc") == ("/doc", "")
+
+
+def test_nesting_is_measured_without_recursing_on_it() -> None:
+    deep: Any = "x"
+    for _ in range(50_000):
+        deep = [deep]
+    assert json_depth(deep) == 50_000 and json_depth("x") == 0 and json_depth({}) == 1 and json_depth({"a": [1]}) == 2

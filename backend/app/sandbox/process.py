@@ -6,10 +6,11 @@ DockerSandbox always removes the container afterwards with `docker rm -f`.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import IO, Protocol
 
@@ -41,6 +42,7 @@ class ProcessRunner(Protocol):
         timeout: float,
         cancel: threading.Event | None = None,
         capture_bytes: int = DEFAULT_CAPTURE_BYTES,
+        env: Mapping[str, str] | None = None,
     ) -> ProcessResult: ...
 
 
@@ -85,10 +87,14 @@ class SubprocessRunner:
         timeout: float,
         cancel: threading.Event | None = None,
         capture_bytes: int = DEFAULT_CAPTURE_BYTES,
+        env: Mapping[str, str] | None = None,
     ) -> ProcessResult:
+        """`env` adds to this process's environment, for values docker reads by name, so that a secret
+        never appears on a command line."""
         proc = subprocess.Popen(
-            list(argv), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False
-        )
+            list(argv), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
+            env={**os.environ, **env} if env else None,
+        )  # fmt: skip
         assert proc.stdout is not None and proc.stderr is not None
         capture = _Capture(capture_bytes)
         readers = [

@@ -32,7 +32,7 @@ from typing import Any
 from app.coding.audit import preexisting_violations, take_snapshot
 from app.coding.opencode_artifact import ArtifactError, verify_binary
 from app.coding.opencode_contract import CONTRACT_VERSION
-from app.coding.opencode_policy import GATEWAY_KEY_PLACEHOLDER, config_problems
+from app.coding.opencode_policy import GATEWAY_KEY_PLACEHOLDER, GATEWAY_TOKEN_PREFIX, config_problems
 from app.config import REPO_ROOT, Settings
 
 # The binary of opencode-linux-x64-musl 1.19.5, recorded when it was verified (docs/PROGRESS.md).
@@ -53,6 +53,10 @@ BINARY_TARGET = "/opt/opencode"
 CONFIG_TARGET = "/etc/opencode"
 WORKSPACE_TARGET = "/workspace"
 SERVER_ARGV = (f"{BINARY_TARGET}/opencode", "serve", "--hostname", "127.0.0.1", "--port", "4096", "--print-logs")
+# Internal Docker networks have no route out. OpenCode's only peers are the API filter and the gateway.
+CORE_NETWORK = "devpilot-core"
+MODEL_NETWORK = "devpilot-model"
+PRODUCTION_SERVER_ARGV = (f"{BINARY_TARGET}/opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096", "--print-logs")
 # Fixed and secret-free. Each OPENCODE_* name below appears in the pinned binary's flag code.
 SERVER_ENV: tuple[tuple[str, str], ...] = (
     ("HOME", "/tmp/home"),
@@ -156,6 +160,12 @@ INSTALL_PATHS: tuple[InstallPath, ...] = (
         needs_runtime_image=True,
     ),
     InstallPath(
+        "fff native search library (libfff_c)", "file search, when the library is present",
+        InstallControl.ATTEMPT_PREVENTED,
+        "looked up only on the local disk beside the binary; when absent, OpenCode falls back to ripgrep. No download path exists for it",
+        Evidence.BINARY,
+    ),
+    InstallPath(
         "language server download", "opening a file of a supported language",
         InstallControl.ATTEMPT_PREVENTED, "lsp is false (C8) and OPENCODE_DISABLE_LSP_DOWNLOAD=1", Evidence.BINARY,
     ),
@@ -233,7 +243,7 @@ def allowed_env_names() -> frozenset[str]:
 
 
 def isolation_flags() -> list[str]:
-    """Every hardening flag, in one place. There is no network until the filter and gateway exist."""
+    """Every hardening flag, in one place, as the no-network check container runs them."""
     return [
         "--network", "none",
         "--cap-drop", "ALL",
@@ -248,6 +258,14 @@ def isolation_flags() -> list[str]:
         "--ulimit", "nofile=1024:1024",
         "--init",
     ]  # fmt: skip
+
+
+def production_flags() -> list[str]:
+    """The same flags, with the two internal networks in place of no network at all."""
+    flags = isolation_flags()
+    at = flags.index("--network")
+    flags[at : at + 2] = ["--network", CORE_NETWORK, "--network", MODEL_NETWORK]
+    return flags
 
 
 def verified_binary(manifest_path: Path) -> VerifiedBinary:
@@ -350,8 +368,9 @@ def managed_config_problems(config: Any, *, secrets: Iterable[str]) -> list[str]
     if any(secret and secret in text for secret in secrets):
         problems.append("the managed configuration holds a configured secret")
     options = ((config.get("provider") or {}).get("openai") or {}).get("options") or {}
-    if options.get("apiKey") != GATEWAY_KEY_PLACEHOLDER:
-        problems.append("the managed configuration must hold only the gateway placeholder, never a provider key")
+    key = options.get("apiKey")
+    if key != GATEWAY_KEY_PLACEHOLDER and not (isinstance(key, str) and key.startswith(GATEWAY_TOKEN_PREFIX)):
+        problems.append("the managed configuration must hold only the gateway's token, never a provider key")
     return problems
 
 
@@ -378,26 +397,26 @@ def build_production_args(c: ProductionContainer, settings: Settings) -> list[st
         "--name", c.name,
         "--pull", "never",
         "--label", f"{CONTAINER_LABEL}=true",
-        *isolation_flags(),
+        *production_flags(),
         "--workdir", WORKSPACE_TARGET,
         *env,
         "--env", PASSWORD_ENV,
         *mounts,
         c.image.image_id,
-        *SERVER_ARGV,
+        *PRODUCTION_SERVER_ARGV,
     ]  # fmt: skip
 
 
 # --- What `docker inspect` must show --------------------------------------------------------------
 
 
-def inspect_problems(inspect: Mapping[str, Any], *, mounts: Mapping[str, bool], tmp_exec: bool = False) -> list[str]:
+def inspect_problems(inspect: Mapping[str, Any], *, mounts: Mapping[str, bool], tmp_exec: bool = False, network: str = "none") -> list[str]:
     """Settings from `docker inspect` that differ from the hardening. `mounts`: container path to read-only."""
     host = inspect.get("HostConfig") or {}
     config = inspect.get("Config") or {}
     problems: list[str] = []
     expect = {
-        "NetworkMode": "none",
+        "NetworkMode": network,
         "Privileged": False,
         "ReadonlyRootfs": True,
         "PublishAllPorts": False,
@@ -461,10 +480,21 @@ def environment_problems(env: Iterable[Any], *, fixed: Iterable[tuple[str, str]]
 def deployment_problems(inspect: Mapping[str, Any], c: ProductionContainer) -> list[str]:
     """What the running production container got wrong. Empty means the definition was really applied."""
     config = inspect.get("Config") or {}
-    problems = inspect_problems(inspect, mounts={target: read_only for _, target, read_only in c.mounts()})
+    mounts = {target: read_only for _, target, read_only in c.mounts()}
+    problems = inspect_problems(inspect, mounts=mounts, network=CORE_NETWORK)
     problems += environment_problems(config.get("Env") or [], fixed=production_environment())
     if inspect.get("Image") != c.image.image_id:
         problems.append("the container does not run the approved image")
-    if list(config.get("Cmd") or []) != list(SERVER_ARGV) or config.get("Entrypoint"):
+    if list(config.get("Cmd") or []) != list(PRODUCTION_SERVER_ARGV) or config.get("Entrypoint"):
         problems.append("the container's command is not the OpenCode server")
+    networks = ((inspect.get("NetworkSettings") or {}).get("Networks")) or {}
+    if set(networks) != {CORE_NETWORK, MODEL_NETWORK}:
+        problems.append(f"the container is on {sorted(networks)}, not only the two internal networks")
     return problems
+
+
+def network_problems(name: str, inspect: Mapping[str, Any] | None) -> list[str]:
+    """Why this network cannot carry OpenCode's traffic. An internal network has no route out."""
+    if inspect is None:
+        return [f"{name} could not be read"]
+    return [] if inspect.get("Internal") is True else [f"{name} is not internal, so it has a route out"]

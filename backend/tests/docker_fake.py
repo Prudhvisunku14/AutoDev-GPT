@@ -7,7 +7,7 @@ Each call is recorded in `calls`, which lets tests check the order and the flags
 from __future__ import annotations
 
 import threading
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from app.sandbox.process import DEFAULT_CAPTURE_BYTES, ProcessResult
@@ -47,6 +47,7 @@ class FakeDockerHost:
         timeout: float,
         cancel: threading.Event | None = None,
         capture_bytes: int = DEFAULT_CAPTURE_BYTES,
+        env: Mapping[str, str] | None = None,
     ) -> ProcessResult:
         if self.cli_missing:
             raise FileNotFoundError(argv[0])

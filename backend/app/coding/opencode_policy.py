@@ -88,8 +88,10 @@ _MUST_ALLOW: dict[str, tuple[str, ...]] = {
 }
 _ACTIONS = frozenset({"allow", "ask", "deny"})
 
-# The value of `apiKey`: OpenCode needs one to start, and DevPilot's model gateway ignores it.
+# The value of `apiKey` where no gateway runs: OpenCode needs one to start.
 GATEWAY_KEY_PLACEHOLDER = "devpilot-model-gateway"
+# A per-run gateway token starts with this. It is worthless anywhere but that run's gateway.
+GATEWAY_TOKEN_PREFIX = "devpilot-gw-"
 # SDK packages the 1.19.5 binary bundles for the openai provider. Any other package name makes OpenCode
 # install it from npm the first time the model is used (Npm.add, read from the binary).
 BUNDLED_PROVIDER_PACKAGES = frozenset({"@ai-sdk/openai"})
@@ -122,18 +124,18 @@ def _managed_permission() -> dict[str, Any]:
     return permission
 
 
-def managed_config(*, model: str, gateway_base_url: str) -> dict[str, Any]:
+def managed_config(*, model: str, gateway_base_url: str, gateway_token: str = GATEWAY_KEY_PLACEHOLDER) -> dict[str, Any]:
     """The configuration mounted read-only at /etc/opencode/opencode.json in the OpenCode container.
 
     The OpenAI key is not in it: OpenCode talks to DevPilot's model gateway, which adds the
-    key outside the container (ARCHITECTURE §6). `apiKey` is a placeholder the gateway ignores.
+    key outside the container (ARCHITECTURE §6). `apiKey` carries the run's gateway token, never a provider key.
     """
     return {
         "$schema": "https://opencode.ai/config.json",
         "model": model,
         "small_model": model,
         "enabled_providers": ["openai"],
-        "provider": {"openai": {"options": {"baseURL": gateway_base_url, "apiKey": GATEWAY_KEY_PLACEHOLDER}}},
+        "provider": {"openai": {"options": {"baseURL": gateway_base_url, "apiKey": gateway_token}}},
         "autoupdate": False,
         "share": "disabled",
         "lsp": False,

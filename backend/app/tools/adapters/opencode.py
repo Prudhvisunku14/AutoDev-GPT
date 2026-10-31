@@ -367,6 +367,11 @@ class _Control:
             raise ControlError(exc.message) from exc
 
 
+def session_control(api: OpenCodeApi) -> _Control:
+    """The API as session_control.py sees it, for the caller that stops an attempt after a task."""
+    return _Control(api)
+
+
 class OpenCodeProvider:
     """The CodingProvider that drives a real OpenCode server, through the API filter."""
 

@@ -171,6 +171,11 @@ class Run(Base):
     # User messages (e.g. reminders) to send with the next GPT request.
     pending_messages_json: Mapped[str | None] = mapped_column(Text, default=None)
 
+    # --- Phase 4 slice: verification, repair and the final report ------------------
+    repairs: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    verification_json: Mapped[str | None] = mapped_column(Text, default=None)  # the last test run, judged
+    report_json: Mapped[str | None] = mapped_column(Text, default=None)  # written when the run ends
+
     project: Mapped[Project] = relationship(back_populates="runs")
 
     @property

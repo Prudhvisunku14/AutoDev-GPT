@@ -115,3 +115,10 @@ def test_the_approved_table_is_small_and_has_no_shell_or_network_entries() -> No
         assert command.argv[0] == "python"
         assert "sh" not in command.argv and "bash" not in command.argv
         assert command.image in {"python-runner"}
+
+
+def test_the_test_command_takes_no_argument_from_gpt_and_writes_no_bytecode(tmp_path: Path, workspace: WorkspaceFS) -> None:
+    command = APPROVED_COMMANDS["python-unittest"]
+    assert command.target_suffix is None and "-I" in command.argv and "-B" in command.argv and command.argv[3:6] == ("-m", "unittest", "discover")
+    with pytest.raises(SandboxPolicyError, match="takes no target"):
+        _spec(tmp_path, workspace, "python-unittest", "anything.py")

@@ -19,6 +19,7 @@ def make_settings(tmp_path: Path, **overrides: object) -> Settings:
         "database_url": f"sqlite:///{(tmp_path / 'data' / 'test.db').as_posix()}",
         "workspaces_dir": tmp_path / "workspaces",
         "coding_checkpoints_dir": tmp_path / "checkpoints",
+        "coding_work_dir": tmp_path / "work",
         "egress_allowlist_file": ALLOWLIST_FILE,
         "openai_api_key": FAKE_OPENAI_KEY,
         "github_token": FAKE_GITHUB_TOKEN,

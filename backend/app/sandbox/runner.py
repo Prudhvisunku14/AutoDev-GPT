@@ -34,7 +34,8 @@ class DockerSandbox:
     def __init__(self, cli: DockerCli, *, settings: Settings) -> None:
         self._cli = cli
         self._settings = settings
-        self._root = settings.workspaces_dir.resolve()
+        # A run's disposable copy is tested here too, read-only, so nothing unverified reaches the real workspace.
+        self._roots = (settings.workspaces_dir.resolve(), settings.coding_work_dir.resolve())
         self._approved_references = {img.reference for img in APPROVED_IMAGES.values()}
 
     @classmethod
@@ -93,7 +94,8 @@ class DockerSandbox:
         host = Path(spec.workspace_dir)
         if host.is_symlink() or host.is_junction():
             raise SandboxError("the workspace must not be a symlink or junction")
-        if not host.resolve().is_relative_to(self._root) or host.resolve() == self._root:
+        resolved = host.resolve()
+        if not any(resolved.is_relative_to(root) and resolved != root for root in self._roots):
             raise SandboxError("the workspace is outside the approved workspaces folder")
 
 

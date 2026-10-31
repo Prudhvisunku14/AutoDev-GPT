@@ -37,6 +37,7 @@ from app.db.models import (
     Approval,
     ApprovalKind,
     InvocationStatus,
+    PlanTask,
     Project,
     Requirement,
     Run,
@@ -79,6 +80,7 @@ class Orchestrator:
         sandbox: SandboxRunner | None = None,
         workspace: WorkspaceFS | None = None,
         coding: CodingProvider | None = None,
+        candidates: WorkspaceFS | None = None,
         orchestrated_states: frozenset[RunState] = ORCHESTRATED_STATES,
     ) -> None:
         self._settings = settings
@@ -92,6 +94,7 @@ class Orchestrator:
         self._sandbox = sandbox
         self._workspace = workspace
         self._coding = coding
+        self._candidates = candidates
         self._orchestrated = orchestrated_states
         self._guard = RunGuard(settings)
         self._stop = threading.Event()
@@ -286,6 +289,7 @@ class Orchestrator:
             workspace=self._workspace,
             cancel=self._stop,  # backend shutdown stops any container still running
             coding=self._coding,
+            candidates=self._candidates,
             call_id=call_id,
         )
 
@@ -346,6 +350,7 @@ class Orchestrator:
                 (r.code, r.text)
                 for r in s.scalars(select(Requirement).where(Requirement.run_id == run_id).order_by(Requirement.code))
             ]
+            tasks = [(t.order, t.title, t.status) for t in s.scalars(select(PlanTask).where(PlanTask.run_id == run_id).order_by(PlanTask.order))]
             project_stack = s.get(Project, run.project_id).stack  # type: ignore[union-attr]
             request = LLMRequest(
                 instructions=prompts.instructions_for(
@@ -353,6 +358,7 @@ class Orchestrator:
                     catalog=self._catalog,
                     requirements=requirements,
                     stack=self._catalog.get(project_stack or ""),
+                    tasks=tasks,
                 ),
                 input=items,
                 tools=self._registry.schemas_for(run.state),

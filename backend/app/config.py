@@ -98,6 +98,23 @@ class Settings(BaseSettings):
     opencode_max_attempts_per_task: int = Field(default=3, ge=1, le=10)
     # Pre-images of the workspace, kept while a coding task runs so it can be reverted.
     coding_checkpoints_dir: Path = Path("./data/checkpoints")
+    # A run's disposable copy of the project. Outside the repository: the launcher refuses to mount from it.
+    coding_work_dir: Path = Path("D:/DevPilotCache/work")
+    # How many times a failed verification may go back to REPAIRING. Coding attempts per task are above.
+    max_repair_attempts: int = Field(default=2, ge=0, le=5)
+
+    # --- Isolated launcher: stays refused until each of these is approved -----
+    # The approved runtime image's ID (sha256:...). Must also be in opencode_container.APPROVED_RUNTIME_IMAGES.
+    opencode_runtime_image: str | None = None
+    # The verified binary's manifest, written by scripts/fetch_opencode.py.
+    opencode_manifest_file: Path | None = None
+    # A person's approval of Docker networks and a real model call. Nothing else starts a live coding run.
+    coding_live_approved: bool = False
+
+    # --- Model gateway budgets, per coding attempt ------------------------------
+    gateway_max_requests_per_task: int = Field(default=40, gt=0)
+    gateway_max_output_tokens: int = Field(default=8_000, gt=0)
+    gateway_max_usd_per_task: float | None = Field(default=None, gt=0)
 
     # --- Credentials used by later phases ---------------------------------
     # Declared here only so the redactor knows their values. Phase 1 never uses them.
@@ -130,6 +147,9 @@ class Settings(BaseSettings):
         "openai_model",
         "openai_base_url",
         "opencode_model",
+        "opencode_runtime_image",
+        "opencode_manifest_file",
+        "gateway_max_usd_per_task",
         "openai_max_output_tokens",
         "openai_price_input_per_mtok",
         "openai_price_output_per_mtok",
@@ -180,6 +200,7 @@ class Settings(BaseSettings):
         self.workspaces_dir = _from_repo_root(self.workspaces_dir)
         self.egress_allowlist_file = _from_repo_root(self.egress_allowlist_file)
         self.coding_checkpoints_dir = _from_repo_root(self.coding_checkpoints_dir)
+        self.coding_work_dir = _from_repo_root(self.coding_work_dir)
         return self
 
     @property

@@ -26,6 +26,8 @@ class StackEntry(BaseModel):
     frameworks: tuple[str, ...]
     description: str = Field(min_length=1)
     test_methods: tuple[TestMethod, ...] = Field(min_length=1)
+    # The approved sandbox command that runs this stack's tests. None: nothing can verify it yet.
+    test_command: str | None = None
 
 
 class StackCatalog:
@@ -58,6 +60,7 @@ class StackCatalog:
     def describe(self) -> str:
         """Plain-text list for the planning prompt."""
         return "\n".join(
-            f"- {e.id}: {e.description} (language: {e.language}; verification methods: {', '.join(e.test_methods)})"
+            f"- {e.id}: {e.description} (language: {e.language}; verification methods: {', '.join(e.test_methods)}; "
+            f"can be built and tested now: {'yes' if e.test_command else 'no'})"
             for e in sorted(self._entries.values(), key=lambda e: e.id)
         )

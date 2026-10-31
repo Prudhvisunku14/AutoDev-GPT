@@ -47,6 +47,7 @@ class Harness:
         risky_tool: bool = False,
         extra_tools: list[ToolSpec] | None = None,
         sandbox: SandboxRunner | None = None,
+        candidates: WorkspaceFS | None = None,
         orchestrated_states: frozenset[RunState] = ORCHESTRATED_STATES,
         **overrides: Any,
     ) -> None:
@@ -89,6 +90,7 @@ class Harness:
             llm_provider=lambda: self.llm,
             sandbox=sandbox,
             workspace=self.workspace,
+            candidates=candidates,
             orchestrated_states=orchestrated_states,
         )
 

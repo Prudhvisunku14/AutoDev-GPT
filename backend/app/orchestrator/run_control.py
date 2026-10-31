@@ -60,6 +60,16 @@ def end_run(
     events.record(session, project_id=run.project_id, run_id=run.id, type=event_type, payload=payload)
 
 
+def complete_run(session: Session, run: Run, events: EventRecorder, *, detail: str) -> None:
+    """The one way to COMPLETED: the delivery has happened."""
+    change_state(session, run, RunState.COMPLETED, events, reason="delivered")
+    run.outcome = "completed"
+    run.status_detail = detail
+    run.pause_reason = None
+    run.ended_at = utcnow()
+    events.record(session, project_id=run.project_id, run_id=run.id, type="run.completed", payload={"detail": detail})
+
+
 def cancel_run(session: Session, run: Run, events: EventRecorder) -> None:
     previous = run.state
     _close_open_work(session, run)

@@ -104,6 +104,8 @@ class ToolContext:
     cancel: threading.Event | None = None
     # Phase 4: the coding engine.
     coding: CodingProvider | None = None
+    # The jail holding each run's disposable copy. Sandbox commands run there once a run has one.
+    candidates: WorkspaceFS | None = None
     # The GPT function call being executed. Tools key their side effects (such as a workspace
     # checkpoint) by it, so the `recover` hook, which receives the same call_id, can find them.
     call_id: str | None = None

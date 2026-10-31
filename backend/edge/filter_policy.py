@@ -187,7 +187,7 @@ def parse_head(raw: bytes) -> Head:
     return Head(match[1].decode("ascii"), match[2].decode("ascii"), tuple(headers))
 
 
-def check_framing(head: Head) -> int:
+def check_framing(head: Head, *, max_body: int = MAX_REQUEST_BYTES) -> int:
     """How long the body is. Anything that could frame the request two ways is refused."""
     found = sorted({name for name, _ in head.headers} & _REFUSED_HEADERS)
     if found:
@@ -205,7 +205,7 @@ def check_framing(head: Head) -> int:
     if not _LENGTH.fullmatch(lengths[0]):
         raise Refused(400, "a malformed Content-Length")
     length = int(lengths[0])
-    if length > MAX_REQUEST_BYTES:
+    if length > max_body:
         raise Refused(413, "the request body is too large")
     return length
 
@@ -269,7 +269,7 @@ def _refuse_constant(_: str) -> None:
     raise Refused(403, "a value JSON does not define")
 
 
-def _strict_json(body: bytes) -> Any:
+def strict_json(body: bytes) -> Any:
     try:
         text = body.decode("utf-8")
         return json.loads(text, object_pairs_hook=_no_duplicates, parse_constant=_refuse_constant)
@@ -348,8 +348,8 @@ def check_body(operation: Operation, head: Head, body: bytes, policy: Policy) ->
     media = (head.values("content-type") or [""])[0].split(";", 1)[0].strip().lower()
     if len(head.values("content-type")) != 1 or media != "application/json":
         raise Refused(403, "the body must be declared as application/json")
-    payload = _strict_json(body)
-    if _depth(payload) > _MAX_JSON_DEPTH:
+    payload = strict_json(body)
+    if json_depth(payload) > _MAX_JSON_DEPTH:
         raise Refused(403, "the body is nested too deeply")
     if operation.body == "session":
         clean = _check_session(payload, policy)
@@ -360,12 +360,17 @@ def check_body(operation: Operation, head: Head, body: bytes, policy: Policy) ->
     return json.dumps(clean, ensure_ascii=True, separators=(",", ":")).encode("ascii")
 
 
-def _depth(value: Any) -> int:
-    if isinstance(value, dict):
-        return 1 + max((_depth(item) for item in value.values()), default=0)
-    if isinstance(value, list):
-        return 1 + max((_depth(item) for item in value), default=0)
-    return 0
+def json_depth(value: Any) -> int:
+    """How deeply a value nests. Iterative: nesting is what it measures, so it must not recurse on it."""
+    deepest = 0
+    pending = [(value, 1)]
+    while pending:
+        item, level = pending.pop()
+        children = item.values() if isinstance(item, dict) else item if isinstance(item, list) else None
+        if children is not None:
+            deepest = max(deepest, level)
+            pending.extend((child, level + 1) for child in children)
+    return deepest
 
 
 # --- Answers ----------------------------------------------------------------------------------------

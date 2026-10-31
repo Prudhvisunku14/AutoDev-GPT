@@ -21,15 +21,17 @@ from app.coding.opencode_container import (
     APPROVED_RUNTIME_IMAGES,
     GLOBAL_CONFIG_TARGET,
     GUARD_CONFIG_HOME,
+    CORE_NETWORK,
     INSTALL_PATHS,
     MEMORY_BYTES,
+    MODEL_NETWORK,
     NANO_CPUS,
     OPENCODE_GITIGNORE,
     PASSWORD_ENV,
     PIDS_LIMIT,
     PINNED_BINARY_SHA256,
+    PRODUCTION_SERVER_ARGV,
     RUN_USER,
-    SERVER_ARGV,
     ContainerPolicyError,
     Evidence,
     InstallControl,
@@ -42,13 +44,14 @@ from app.coding.opencode_container import (
     environment_problems,
     host_folder_problems,
     managed_config_problems,
+    network_problems,
     production_environment,
     production_problems,
     protected_paths,
     unresolved_install_paths,
     verified_binary,
 )
-from app.coding.opencode_policy import managed_config
+from app.coding.opencode_policy import GATEWAY_TOKEN_PREFIX, managed_config
 from app.config import REPO_ROOT, Settings
 from tests.helpers import FAKE_OPENAI_KEY, make_settings
 
@@ -167,7 +170,7 @@ def test_the_baseline_runs_the_same_environment_and_flags_as_production(tmp_path
 def test_every_hardening_flag_is_present(tmp_path: Path, settings: Settings, approved: None) -> None:
     args = build_production_args(_container(tmp_path), settings)
     joined = " ".join(args)
-    for flag in ("--network none", "--cap-drop ALL", "--security-opt no-new-privileges", "--read-only", f"--user {RUN_USER}",
+    for flag in (f"--network {CORE_NETWORK} --network {MODEL_NETWORK}", "--cap-drop ALL", "--security-opt no-new-privileges", "--read-only", f"--user {RUN_USER}",
                  "--memory 1g", "--memory-swap 1g", "--cpus 1", f"--pids-limit {PIDS_LIMIT}", "--ulimit nofile=1024:1024",
                  "--pull never", "--init", "/tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777"):  # fmt: skip
         assert flag in joined, flag
@@ -178,7 +181,13 @@ def test_every_hardening_flag_is_present(tmp_path: Path, settings: Settings, app
 
 def test_it_runs_the_pinned_image_by_id_and_only_the_server(tmp_path: Path, settings: Settings, approved: None) -> None:
     args = build_production_args(_container(tmp_path), settings)
-    assert args[-(len(SERVER_ARGV) + 1) :] == [IMAGE_ID, *SERVER_ARGV]
+    assert args[-(len(PRODUCTION_SERVER_ARGV) + 1) :] == [IMAGE_ID, *PRODUCTION_SERVER_ARGV]
+
+
+def test_no_port_of_opencode_is_ever_published(tmp_path: Path, settings: Settings, approved: None) -> None:
+    args = build_production_args(_container(tmp_path), settings)
+    assert not {"-p", "--publish", "--publish-all", "-P"} & set(args)
+    assert args.count("--network") == 2 and "bridge" not in args and "host" not in args
 
 
 def test_only_the_private_copy_is_writable(tmp_path: Path, settings: Settings, approved: None) -> None:
@@ -397,7 +406,7 @@ def test_the_managed_configuration_passes_and_holds_only_a_placeholder() -> None
 
 @pytest.mark.parametrize(
     ("key", "reason"),
-    [("sk-real-looking-key", "gateway placeholder"), ("{env:OPENAI_API_KEY}", "read variables"), ("{file:/run/key}", "read variables")],
+    [("sk-real-looking-key", "gateway's token"), ("{env:OPENAI_API_KEY}", "read variables"), ("{file:/run/key}", "read variables")],
 )
 def test_a_key_or_a_way_to_fetch_one_is_refused(key: str, reason: str) -> None:
     config = _config()
@@ -405,6 +414,11 @@ def test_a_key_or_a_way_to_fetch_one_is_refused(key: str, reason: str) -> None:
     problems = managed_config_problems(config, secrets=[])
     assert any(reason in p for p in problems)
     assert key not in " ".join(problems)
+
+
+def test_a_per_run_gateway_token_is_accepted() -> None:
+    config = managed_config(model="openai/x", gateway_base_url="http://gw.invalid/v1", gateway_token=GATEWAY_TOKEN_PREFIX + "abc")
+    assert managed_config_problems(config, secrets=[FAKE_OPENAI_KEY]) == []
 
 
 def test_a_configured_secret_is_found_anywhere_and_never_echoed() -> None:
@@ -448,13 +462,14 @@ def _inspect(c: ProductionContainer) -> dict[str, Any]:
     return {
         "Image": IMAGE_ID,
         "HostConfig": {
-            "NetworkMode": "none", "Privileged": False, "ReadonlyRootfs": True, "PublishAllPorts": False,
+            "NetworkMode": CORE_NETWORK, "Privileged": False, "ReadonlyRootfs": True, "PublishAllPorts": False,
             "Memory": MEMORY_BYTES, "MemorySwap": MEMORY_BYTES, "NanoCpus": NANO_CPUS, "PidsLimit": PIDS_LIMIT,
             "CapDrop": ["ALL"], "CapAdd": None, "SecurityOpt": ["no-new-privileges"], "PortBindings": {},
             "Tmpfs": {"/tmp": "rw,noexec,nosuid,nodev,size=256m,mode=1777"}, "Devices": [], "PidMode": "", "IpcMode": "private",
         },
-        "Config": {"User": RUN_USER, "Env": _env(), "Cmd": list(SERVER_ARGV), "Entrypoint": None},
+        "Config": {"User": RUN_USER, "Env": _env(), "Cmd": list(PRODUCTION_SERVER_ARGV), "Entrypoint": None},
         "Mounts": [{"Type": "bind", "Source": str(host), "Destination": target, "RW": not ro} for host, target, ro in c.mounts()],
+        "NetworkSettings": {"Networks": {CORE_NETWORK: {}, MODEL_NETWORK: {}}},
     }  # fmt: skip
 
 
@@ -481,6 +496,9 @@ def test_a_matching_deployment_passes(tmp_path: Path) -> None:
         (lambda i: i["Config"].update(Env=_env(HOME="/root")), "HOME is missing or differs"),
         (lambda i: i["Config"].update(Env=_env(XDG_CONFIG_HOME="/tmp/home/.config")), "XDG_CONFIG_HOME is missing or differs"),
         (lambda i: i["HostConfig"].update(NetworkMode="bridge"), "NetworkMode"),
+        (lambda i: i["NetworkSettings"]["Networks"].update(bridge={}), "not only the two internal networks"),
+        (lambda i: i["NetworkSettings"]["Networks"].pop(MODEL_NETWORK), "not only the two internal networks"),
+        (lambda i: i["HostConfig"].update(PortBindings={"4096/tcp": [{"HostPort": "4096"}]}), "a port is published"),
         (lambda i: i["HostConfig"].update(Memory=0), "Memory"),
         (lambda i: i["Config"].update(User="0:0"), "user"),
         (lambda i: i["Mounts"][3].update(RW=False), "read-only"),
@@ -495,6 +513,15 @@ def test_each_deviation_in_the_real_container_is_reported(tmp_path: Path, change
     found = _inspect(c)
     change(found)
     assert any(reason in p for p in deployment_problems(found, c)), deployment_problems(found, c)
+
+
+@pytest.mark.parametrize(
+    ("inspect", "reason"),
+    [({"Internal": True}, None), ({"Internal": False}, "route out"), ({}, "route out"), (None, "could not be read")],
+)
+def test_opencodes_networks_must_be_internal(inspect: Any, reason: str | None) -> None:
+    problems = network_problems(CORE_NETWORK, inspect)
+    assert (not problems) if reason is None else (reason in problems[0])
 
 
 def test_environment_problems_name_variables_but_never_show_values() -> None:

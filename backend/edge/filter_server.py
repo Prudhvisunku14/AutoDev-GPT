@@ -61,7 +61,7 @@ STREAM_MAX_SECONDS = 900.0
 MAX_CONNECTIONS = 32
 _DRAIN_SECONDS = 0.1
 _STATUS_TEXT = {200: "OK", 204: "No Content", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 408: "Request Timeout",
-                413: "Content Too Large", 431: "Request Header Fields Too Large", 502: "Bad Gateway", 503: "Service Unavailable", 504: "Gateway Timeout"}  # fmt: skip
+                413: "Content Too Large", 429: "Too Many Requests", 431: "Request Header Fields Too Large", 502: "Bad Gateway", 503: "Service Unavailable", 504: "Gateway Timeout"}  # fmt: skip
 _CONFIG_KEYS = frozenset({"directory", "provider_id", "model_id", "session_rules", "upstream_host", "upstream_port"})
 
 
@@ -76,6 +76,12 @@ class UpstreamReply(Protocol):
 
 class Upstream(Protocol):
     def send(self, method: str, target: str, body: bytes | None, *, stream: bool) -> UpstreamReply: ...
+
+
+class Connections(Protocol):
+    """Serves one request on one connection. The filter and the model gateway both do."""
+
+    def handle(self, conn: socket.socket) -> None: ...
 
 
 class _HttpReply:
@@ -130,10 +136,10 @@ class Filter:
             self._serve(conn, record)
         except Refused as exc:
             record.update(status=exc.status, reason=exc.reason)
-            self._reply_error(conn, exc)
+            reply_error(conn, exc)
         except TimeoutError:
             record.update(status=408, reason="the client was too slow")
-            self._reply_error(conn, Refused(408, "the client was too slow"))
+            reply_error(conn, Refused(408, "the client was too slow"))
         except OSError as exc:
             record.update(status=record["status"] or 499, reason=f"the connection failed ({type(exc).__name__})")
         finally:
@@ -141,7 +147,7 @@ class Filter:
             self._audit(record)
 
     def _serve(self, conn: socket.socket, record: dict[str, Any]) -> None:
-        raw, rest = _read_head(conn)
+        raw, rest = read_head(conn)
         head = parse_head(raw)
         record.update(method=head.method[:16], target=audit_target(head.target))
         length = check_framing(head)
@@ -151,9 +157,9 @@ class Filter:
         record["operation"] = route.operation.template
         if route.operation.answer == "local":
             record["status"] = 200
-            _send(conn, 200, "application/json", json.dumps({"service": FILTER_SERVICE, "healthy": True}).encode())
+            send_answer(conn, 200, "application/json", json.dumps({"service": FILTER_SERVICE, "healthy": True}).encode())
             return
-        body = check_body(route.operation, head, _read_body(conn, rest, length), self._policy)
+        body = check_body(route.operation, head, read_body(conn, rest, length), self._policy)
         self._forward(conn, route.operation, route.upstream_target, body, record)
 
     def _forward(self, conn: socket.socket, operation: Operation, target: str, body: bytes | None, record: dict[str, Any]) -> None:
@@ -173,20 +179,21 @@ class Filter:
             if stream:
                 _relay_stream(conn, reply)
                 return
-            data = _read_all(reply)
-            _send(conn, reply.status, "application/json" if reply.status != 204 else "", data)
+            data = read_all(reply)
+            send_answer(conn, reply.status, "application/json" if reply.status != 204 else "", data)
             record["bytes"] = len(data)
         finally:
             reply.close()
 
-    def _reply_error(self, conn: socket.socket, refusal: Refused) -> None:
-        # Nothing about the rules for a caller who has not shown the token.
-        public = refusal.reason if refusal.status == 403 else _STATUS_TEXT.get(refusal.status, "refused")
-        try:
-            _send(conn, refusal.status, "application/json", json.dumps({"error": public}).encode())
-            _drain(conn)
-        except OSError:
-            pass
+
+def reply_error(conn: socket.socket, refusal: Refused) -> None:
+    # Nothing about the rules for a caller who has not shown the token.
+    public = refusal.reason if refusal.status == 403 else _STATUS_TEXT.get(refusal.status, "refused")
+    try:
+        send_answer(conn, refusal.status, "application/json", json.dumps({"error": public}).encode())
+        _drain(conn)
+    except OSError:
+        pass
 
 
 def _drain(conn: socket.socket) -> None:
@@ -197,7 +204,7 @@ def _drain(conn: socket.socket) -> None:
         pass
 
 
-def _read_head(conn: socket.socket) -> tuple[bytes, bytes]:
+def read_head(conn: socket.socket) -> tuple[bytes, bytes]:
     data = bytearray()
     while True:
         end = data.find(b"\r\n\r\n")
@@ -215,7 +222,7 @@ def _read_head(conn: socket.socket) -> tuple[bytes, bytes]:
         data.extend(chunk)
 
 
-def _read_body(conn: socket.socket, rest: bytes, length: int) -> bytes:
+def read_body(conn: socket.socket, rest: bytes, length: int) -> bytes:
     if len(rest) > length:
         raise Refused(400, "more bytes than the declared length")
     data = bytearray(rest)
@@ -227,7 +234,7 @@ def _read_body(conn: socket.socket, rest: bytes, length: int) -> bytes:
     return bytes(data)
 
 
-def _read_all(reply: UpstreamReply) -> bytes:
+def read_all(reply: UpstreamReply) -> bytes:
     data = bytearray()
     while True:
         chunk = reply.read(65536)
@@ -252,7 +259,7 @@ def _relay_stream(conn: socket.socket, reply: UpstreamReply) -> None:
         conn.sendall(chunk)
 
 
-def _send(conn: socket.socket, status: int, media: str, body: bytes) -> None:
+def send_answer(conn: socket.socket, status: int, media: str, body: bytes) -> None:
     lines = [f"HTTP/1.1 {status} {_STATUS_TEXT.get(status, 'Status')}"]
     if status != 204:
         lines += [f"Content-Type: {media}", f"Content-Length: {len(body)}"]
@@ -260,7 +267,7 @@ def _send(conn: socket.socket, status: int, media: str, body: bytes) -> None:
     conn.sendall("\r\n".join(lines).encode("ascii") + (b"" if status == 204 else body))
 
 
-class _Audit:
+class JsonLines:
     """One JSON line per decision. Only the filter's own fields are ever written."""
 
     def __init__(self, stream: TextIO) -> None:
@@ -280,14 +287,14 @@ class _Server(socketserver.ThreadingTCPServer):
     request_queue_size = 64
 
 
-def build_server(listen: tuple[str, int], filter_: Filter) -> _Server:
+def build_server(listen: tuple[str, int], filter_: Filter | Connections) -> _Server:
     slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
 
     class Handler(socketserver.BaseRequestHandler):
         def handle(self) -> None:
             if not slots.acquire(blocking=False):
                 try:
-                    _send(self.request, 503, "application/json", b'{"error":"busy"}')
+                    send_answer(self.request, 503, "application/json", b'{"error":"busy"}')
                 except OSError:
                     pass
                 return
@@ -333,7 +340,7 @@ def main() -> int:
         return 2
     with args.audit.open("a", encoding="utf-8", buffering=1) as stream:
         upstream = HttpUpstream(config["upstream_host"], config["upstream_port"], password)
-        server = build_server((args.listen_host, args.listen_port), Filter(policy, token, upstream, audit=_Audit(stream)))
+        server = build_server((args.listen_host, args.listen_port), Filter(policy, token, upstream, audit=JsonLines(stream)))
         with server:
             server.serve_forever()
     return 0

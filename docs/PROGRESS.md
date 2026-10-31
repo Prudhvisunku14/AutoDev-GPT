@@ -1,6 +1,8 @@
 # DevPilot AI: Progress
 
-**Current phase:** Phase 4 (OpenCode) in progress. The foundation, the contract checks, the verified binary and the precedence experiment are committed (2026-10-30).
+**Current state (2026-10-31):** the end-to-end MVP works offline. A requirement goes through the real API, orchestrator, audit and Docker tests to a delivered, verified project, with GPT and the coding provider simulated. **No real GPT-to-OpenCode coding has run yet;** it needs approvals listed under "First real demonstration" at the end of this file.
+
+Phase 4 (OpenCode) in progress. The foundation, the contract checks, the verified binary and the precedence experiment are committed (2026-10-30).
 
 Phase 4D Round 1 (2026-10-31):
 - The production container definition, the install guard and the A1/A2 lifecycle are tested and committed.
@@ -18,10 +20,10 @@ Phase 4D Round 3 (2026-10-31): the API filter and independent container terminat
 | 1 | Backend foundation | ✅ Done (2026-10-29) | Python 3.12.9 at `D:\python.exe` |
 | 2 | GPT orchestrator | ✅ Done (2026-10-29), verified with FakeLLM; first live GPT call verified (analysis accepted, 1 call, 919 tokens) | OpenAI API key (user) for live use |
 | 3 | Docker sandbox | 🟡 Isolation controls verified in real containers (2026-10-30); install proxy and orphan-sweep test on a real container still open | Docker Desktop running, data on D:, `python:3.12-alpine` present |
-| 4 | OpenCode integration | 🟡 Foundation committed; binary verified; precedence verified; Phase 4D Stages 1–4 committed as `f4aa786` (2026-10-31). Stages 5 and 6 committed as `53070e8`: adapter, tool allowlist, read-only real-server check (28 PASS, 0 FAIL). Round 3 committed: API filter and independent termination, isolated filter run 42 PASS, 0 FAIL. Not wired into runs | Model gateway, launcher, runtime image with ripgrep, approval for live use |
-| 5 | Verification-guided development | ⏳ Not started | — |
-| 6 | Failure classification and recovery | ⏳ Not started | — |
-| 7 | Adaptive tool selection | ⏳ Not started | — |
+| 4 | OpenCode integration | 🟡 Foundation committed; binary verified; precedence verified; Phase 4D Stages 1–4 committed as `f4aa786` (2026-10-31). Stages 5 and 6 committed as `53070e8`: adapter, tool allowlist, read-only real-server check (28 PASS, 0 FAIL). Round 3 committed as `ab3f447`: API filter and independent termination, isolated filter run 42 PASS, 0 FAIL. MVP slice built and demonstrated offline: gateway, launcher, disposable copy, `generate_code`, verification, recovery, delivery, report. The live path has not run | Runtime image with ripgrep, Docker networks, paid-call approval |
+| 5 | Verification-guided development | 🟡 MVP core only: tests in Docker judged against MUST criteria. No frozen tests or score | — |
+| 6 | Failure classification and recovery | 🟡 MVP core only: a small rule table with bounded repair and retry. No 40-log classifier | — |
+| 7 | Adaptive tool selection | 🟡 MVP core only: deterministic provider choice with recorded exclusions. No scoring from past outcomes | — |
 | 8 | GitHub, Google Drive and n8n integrations, with document retrieval | ⏳ Not started | Google OAuth client, GitHub PAT, n8n container (user) |
 | 9 | React frontend | ⏳ Not started | Node.js (installed) |
 | 10 | Evaluation and competition demonstration | ⏳ Not started | all of the above |
@@ -790,3 +792,75 @@ Evidence: `D:\DevPilotCache\opencode-check\reports\20261031T064332Z-filter-check
 **Tests:** 2245 passed, 10 skipped (opt-in Docker and live OpenAI tests), 0 failed. Coverage is 96%, with or without the adapter. `filter_policy.py` and `container_stop.py` are at 100%. The adapter is at 88% offline, and 92% with the real filter run. `filter_server.py` is at 76%: its listener, `HttpUpstream` and `main` ran on the real path, but that run measured only the adapter. A mutation check broke the new logic in 59 ways in a throwaway copy. The tests caught 57. One survivor exposed a real gap, stop evidence not proven redacted, now tested and caught. The other was an ineffective break, rewritten and caught. `ruff` and `mypy` are not installed in this virtual environment, so neither ran.
 
 **Open:** see "Phase 4D Round 3" in ARCHITECTURE_OPTIMIZATION.md, which also holds the review of what remains and the recommended Round 4 scope.
+
+### MVP slice: end-to-end workflow, offline (2026-10-31)
+
+Priorities changed: finish a working workflow instead of more Phase 4 rounds. Round 3 is committed as `ab3f447`. This slice is not committed.
+
+**Built:**
+- **Model gateway** (`edge/gateway_policy.py`, `gateway_server.py`). A per-run token, the approved model only, function tools only, and budgets for requests, tokens and dollars, enforced before forwarding. The upstream is fixed in code. Offline tests use an in-memory fake. **No real API call was made.**
+- **Launcher** (`coding/launcher.py`). Four networks, three hardened containers, secrets by name, confirmed stop. Tested against a fake Docker only. It refuses to start until each approval below exists.
+- **Disposable workspace** (`coding/candidate.py`). The real project is written once, by `finish`, with exactly the files that were tested.
+- **Tools** (`tools/adapters/coding.py`): `generate_code`, `submit_implementation`, `finish`. GPT stays the only orchestrator.
+- **Minimal engines:** `verification/`, `recovery/`, `selection/`. Phases 5 to 7 had not been started, so these are small working cores, not those phases.
+- **Simulated provider** (`coding/simulated.py`) and the demonstration (`python -m app.demo.mvp`).
+
+**What the pinned binary showed (read as bytes, never run):**
+- The `openai` provider calls `sdk.responses(...)`, which is `POST {baseURL}/responses`. WebSockets sit behind an experimental flag that the environment allowlist refuses.
+- `gpt-6.1-sol` is in the bundled catalog, at $2 and $10 per million tokens.
+- `rg` is looked for on `PATH` first. Without it, OpenCode downloads ripgrep 15.1.0 from GitHub.
+- The native `fff` library is looked up on local disk only. It has no download path.
+
+**Verified on real Docker, no model:** neither image on disk holds `rg`. User 65534 can create, change, rename and delete on a D: bind mount, and modification times match on the host, which closes that open item from Round 3.
+
+**Offline demonstration, on real Docker:** 6 of 6 scenarios ended as expected, and no container was left. Evidence: `D:\DevPilotCache\mvp-demo\mvp-demo.json` and `mvp-demo.md`. A pass reached the real workspace only through `finish`. In both failed scenarios the real workspace was unchanged, by hash.
+
+**Tests:** 2560 passed, 17 skipped (opt-in Docker and live OpenAI tests), 0 failed. With Docker enabled, those 16 tests pass too. Coverage is 95%, and 96% without the three modules that hold the real network clients, which offline tests cannot reach. A mutation check broke the new logic in 91 ways in a throwaway copy. 90 are caught, after 7 survivors exposed test gaps that are now closed. The last one changes nothing, because `AttemptGuard.restore` refuses as well. `ruff` and `mypy` are not installed in this virtual environment, so neither ran.
+
+**Limits:**
+- The launcher, the gateway's TLS path, the four networks and repeated `--network` flags have never run for real. Network isolation stays unproven.
+- The tests in a run come from the same engine as the code, so a pass shows they agree, not that either is right.
+- Selection, recovery and verification are the small cores described above.
+
+### First real demonstration (prepared, not run)
+
+Nothing below has run. `CODING_LIVE_APPROVED=false` and an empty `APPROVED_RUNTIME_IMAGES` keep the live path refused until each step is approved.
+
+**Requirement:** the same calculator, so the result can be compared with the offline run.
+
+| Item | Value |
+|---|---|
+| GPT model | `gpt-6.1-sol` (already in `.env`) |
+| OpenCode model | `openai/gpt-6.1-sol`, through the gateway (in the bundled catalog) |
+| Expected model calls | GPT 6 to 9. OpenCode about 4 to 8 per task, including its title call |
+| Hard call limits | `MAX_TURNS=14`, `MAX_TOOL_CALLS=14`, `GATEWAY_MAX_REQUESTS_PER_TASK=15` |
+| Token limits | `RUN_MAX_TOKENS=300000`, `OPENCODE_MAX_TOKENS_PER_TASK=100000`, `GATEWAY_MAX_OUTPUT_TOKENS=8000`, `OPENAI_MAX_OUTPUT_TOKENS=4000` |
+| Cost | Expected about $0.50. **Hard limit `RUN_BUDGET_USD=1.50`**, plus at most one GPT turn past it (about $0.07): **ceiling $1.60** |
+| Prices used | `OPENAI_PRICE_INPUT_PER_MTOK=2`, `OPENAI_PRICE_OUTPUT_PER_MTOK=10`. Confirm on OpenAI's pricing page first |
+| Per-attempt spend | `GATEWAY_MAX_USD_PER_TASK=0.75`, or what the run has left, whichever is lower |
+| Timeouts | `OPENCODE_TIMEOUT_SECONDS=300` per attempt, 120 s for the tests, `RUN_WALL_CLOCK_SECONDS=1200` |
+| Bounds | `MAX_REPAIR_ATTEMPTS=1`, `OPENCODE_MAX_ATTEMPTS_PER_TASK=2` |
+| OpenCode tools | `read`, `glob`, `grep`, `edit`, `write`, `apply_patch`, `todowrite`, plus `invalid`, which executes nothing. Everything else is denied |
+
+**Networks, created for each attempt and removed afterwards:** `devpilot-core` and `devpilot-model` (internal), `devpilot-ingress` (the filter, published on `127.0.0.1:4096` only) and `devpilot-egress` (the gateway's route to `api.openai.com:443`). A bridge network cannot limit destinations, so the gateway's single destination is enforced in its code.
+
+**Runtime image:** `devpilot/opencode-runtime:1.19.5`, which is `devpilot/opencode-check:1.19.5` plus one verified file, built with no network:
+
+```powershell
+$d = "D:\DevPilotCache\opencode\ripgrep-15.1.0"; New-Item -ItemType Directory -Force $d
+curl.exe -L --fail -o "$d\rg.tar.gz" https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/ripgrep-15.1.0-x86_64-unknown-linux-musl.tar.gz
+(Get-FileHash "$d\rg.tar.gz" -Algorithm SHA256).Hash   # must be 1C9297BE4A084EEA7ECAEDF93EB03D058D6FAAE29BBC57ECDAF5063921491599
+tar -xzf "$d\rg.tar.gz" -C $d --strip-components=1 ripgrep-15.1.0-x86_64-unknown-linux-musl/rg
+Set-Content "$d\Dockerfile" "FROM devpilot/opencode-check:1.19.5`nCOPY rg /usr/local/bin/rg" -NoNewline
+docker build --network none --pull=false -t devpilot/opencode-runtime:1.19.5 $d
+```
+
+The source is GitHub's release of BurntSushi/ripgrep, the version OpenCode 1.19.5 itself pins. The archive is 2,263,077 bytes. `rg` on `PATH` stops OpenCode's download. The image's ID then goes into `APPROVED_RUNTIME_IMAGES` and `OPENCODE_RUNTIME_IMAGE`.
+
+**Verification, in order, stopping at the first failure:**
+1. Without a model: start the containers, confirm the networks are internal and `deployment_problems` is empty, confirm OpenCode has no route out and no published port, and that `rg` is found.
+2. Send one prompt. Confirm the gateway's ledger, the filter's audit and the session show only allowed tools.
+3. The generated tests run in the same Docker sandbox as offline, and `finish` delivers only what passed.
+4. Compare the ledger with OpenAI's usage page, and check no container or network is left.
+
+**Failure and cleanup:** the same paths the offline run exercised. A failed attempt stops the container, confirms it from an independent read, and restores the disposable copy. Over budget, the gateway answers 429 and the run stops. If a stop cannot be confirmed, the run is quarantined and everything stays for review. The real project is written only by `finish`, after a pass.

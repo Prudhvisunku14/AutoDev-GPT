@@ -13,6 +13,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
 from app.api import approvals, health, projects, runs
+from app.coding.attempt_store import SqlAttemptStore
+from app.coding.candidate import CandidateWorkspaces
 from app.config import Settings, get_settings
 from app.core.egress import EgressPolicy
 from app.core.events import EventRecorder
@@ -22,9 +24,12 @@ from app.db.session import create_db_engine, create_session_factory, init_db
 from app.orchestrator.llm_client import LLMClient, OpenAIResponsesClient, llm_config_problem
 from app.orchestrator.loop import Orchestrator
 from app.orchestrator.run_manager import RunManager
+from app.orchestrator.state_machine import FULL_RUN_STATES, ORCHESTRATED_STATES
 from app.sandbox.docker_cli import SandboxError
 from app.sandbox.runner import SandboxRunner
+from app.selection.selector import ProviderSelector
 from app.stacks.catalog import StackCatalog
+from app.tools.adapters.coding import CodingRuntime, recover_attempts, register_coding_tools
 from app.tools.adapters.sandbox import register_sandbox_tools
 from app.tools.adapters.workspace_fs import WorkspaceFS
 from app.tools.executor import ToolExecutor
@@ -38,12 +43,17 @@ logger = logging.getLogger("devpilot.http")
 
 
 def create_app(
-    settings: Settings | None = None, *, llm: LLMClient | None = None, sandbox: SandboxRunner | None = None
+    settings: Settings | None = None,
+    *,
+    llm: LLMClient | None = None,
+    sandbox: SandboxRunner | None = None,
+    coding: ProviderSelector | None = None,
 ) -> FastAPI:
     """Build the app. `llm` replaces the OpenAI client (tests and the offline demo use FakeLLM).
 
     `sandbox` enables the Docker sandbox tool. Without it no container is ever started, so
-    tests never touch Docker.
+    tests never touch Docker. `coding`, which needs a sandbox, chooses who writes the code and lets
+    GPT drive a run to the end. Without it a run pauses at IMPLEMENTING.
     """
     settings = settings or get_settings()
     redactor = Redactor(settings.secret_values())
@@ -66,6 +76,15 @@ def create_app(
     register_phase2_tools(registry)
     if sandbox is not None:
         register_sandbox_tools(registry)
+    gpt_label = "FakeLLM (scripted)" if llm is not None else "OpenAI Responses API"
+    runtime: CodingRuntime | None = None
+    candidates: WorkspaceFS | None = None
+    if coding is not None:
+        if sandbox is None:
+            raise ValueError("a coding provider needs the sandbox: nothing could verify its work")
+        candidates = WorkspaceFS(settings.coding_work_dir, max_file_bytes=settings.workspace_max_file_bytes, max_files=settings.workspace_max_files)
+        runtime = CodingRuntime(selector=coding, store=SqlAttemptStore(session_factory, redactor), candidates=CandidateWorkspaces(candidates), sandbox=sandbox, gpt_label=gpt_label)
+        register_coding_tools(registry, runtime)
     executor = ToolExecutor(registry, PolicyEngine(), redactor, max_output_chars=settings.tool_output_max_chars)
     llm_provider, llm_problem = _llm_wiring(settings, egress, llm)
     orchestrator = Orchestrator(
@@ -79,6 +98,8 @@ def create_app(
         llm_provider=llm_provider,
         sandbox=sandbox,
         workspace=workspace_fs,
+        candidates=candidates,
+        orchestrated_states=FULL_RUN_STATES if runtime is not None else ORCHESTRATED_STATES,
     )
     run_manager = RunManager(orchestrator)
 
@@ -87,6 +108,8 @@ def create_app(
         logger.info("startup", extra={"version": __version__, "workspaces": str(workspace_fs.root)})
         if sandbox is not None:
             _sweep_sandbox(sandbox)
+        if runtime is not None:  # before any run can advance and report an interrupted call to GPT
+            recover_attempts(runtime, settings, session_factory)
         await run_manager.start()
         yield
         await run_manager.stop()
@@ -115,6 +138,7 @@ def create_app(
     app.state.run_manager = run_manager
     app.state.llm_problem = llm_problem
     app.state.sandbox = sandbox
+    app.state.gpt_label = gpt_label
 
     app.add_middleware(
         CORSMiddleware,

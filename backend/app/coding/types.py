@@ -11,6 +11,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
@@ -91,6 +92,7 @@ class CodingTask:
     abort_first: bool  # the earlier attempt was interrupted: stop that session before prompting
     max_tokens: int
     timeout_seconds: float
+    workspace: Path | None = None  # the disposable copy on the host; a provider in a container sees its own mount
 
 
 @dataclass

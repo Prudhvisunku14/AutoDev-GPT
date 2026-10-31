@@ -73,6 +73,13 @@ APPROVED_COMMANDS: dict[str, ApprovedCommand] = {
             argv=("python", "-I", "-B"),
             target_suffix=".py",
         ),
+        ApprovedCommand(
+            name="python-unittest",
+            description="run the project's unittest tests (test*.py); the workspace is read-only and there is no network",
+            image="python-runner",
+            argv=("python", "-I", "-B", "-m", "unittest", "discover", "-v", "-s", ".", "-p", "test*.py"),
+            timeout_seconds=120.0,
+        ),
     )
 }
 

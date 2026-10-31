@@ -84,8 +84,19 @@ class WorkspaceFS:
             raise PathRejected("path escapes the workspace")
         return current
 
+    def has_project(self, project_id: str) -> bool:
+        return self._project_path(project_id).is_dir()
+
     def write_text(self, project_id: str, rel_path: str, content: str) -> Path:
-        data = content.encode("utf-8")
+        return self.write_bytes(project_id, rel_path, content.encode("utf-8"))
+
+    def delete(self, project_id: str, rel_path: str) -> None:
+        target = self.resolve(project_id, rel_path)
+        if not target.is_file():
+            raise WorkspaceNotFound("file does not exist")
+        target.unlink()
+
+    def write_bytes(self, project_id: str, rel_path: str, data: bytes) -> Path:
         if len(data) > self._max_file_bytes:
             raise WorkspaceLimitExceeded(f"file exceeds {self._max_file_bytes} bytes")
         target = self.resolve(project_id, rel_path)

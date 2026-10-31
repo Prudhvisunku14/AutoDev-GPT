@@ -11,8 +11,9 @@ stacks:
     name: Python command-line application
     language: python
     frameworks: []
-    description: A Python 3.12 program run from the command line, tested with pytest.
+    description: A Python 3.12 program using only the standard library, run from the command line and tested with unittest.
     test_methods: [unit, static]
+    test_command: python-unittest
 
   python-fastapi:
     name: Python web API with FastAPI

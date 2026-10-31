@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from app.sandbox.docker_cli import DockerCli, SandboxUnavailable
+from app.sandbox.docker_cli import DockerCli, SandboxError, SandboxUnavailable
 from app.sandbox.policy import build_spec
 from app.sandbox.runner import DockerSandbox
 from app.sandbox.spec import ExecSpec, ExecStatus
@@ -171,3 +171,41 @@ def test_the_sandbox_is_built_from_settings_without_calling_docker(tmp_path: Pat
     sandbox = DockerSandbox.from_settings(settings)
     assert sandbox.settings is settings
     assert sandbox.cli is not None
+
+
+# --- A run's disposable copy ----------------------------------------------------------------------
+
+
+def _copy_spec(settings, tmp_path: Path) -> ExecSpec:  # noqa: ANN001
+    fs = WorkspaceFS(settings.coding_work_dir, max_file_bytes=100_000, max_files=100)
+    fs.create_project(PROJECT_ID)
+    return build_spec("python-unittest", None, workspace=fs, project_id=PROJECT_ID, settings=settings)
+
+
+def test_a_runs_disposable_copy_may_be_tested(host: FakeDockerHost, settings, tmp_path: Path) -> None:  # noqa: ANN001
+    result = DockerSandbox(DockerCli("docker", host), settings=settings).run(_copy_spec(settings, tmp_path))
+    assert result.status is ExecStatus.SUCCEEDED
+    create = next(call for call in host.calls if call[0] == "create")
+    assert any(a.endswith("target=/workspace,readonly") for a in create) and "none" in create
+
+
+def test_the_copy_is_mounted_read_only_with_no_network_like_any_workspace(host: FakeDockerHost, settings, tmp_path: Path) -> None:  # noqa: ANN001
+    DockerSandbox(DockerCli("docker", host), settings=settings).run(_copy_spec(settings, tmp_path))
+    create = next(call for call in host.calls if call[0] == "create")
+    assert create[create.index("--network") + 1] == "none" and "--read-only" in create
+
+
+def test_the_work_root_itself_may_not_be_mounted(host: FakeDockerHost, settings, tmp_path: Path) -> None:  # noqa: ANN001
+    spec = _copy_spec(settings, tmp_path)
+    whole = ExecSpec(command=spec.command, image=spec.image, argv=spec.argv, workspace_dir=settings.coding_work_dir, timeout_seconds=1, container_name="c")
+    with pytest.raises(SandboxError, match="outside the approved"):
+        DockerSandbox(DockerCli("docker", host), settings=settings).run(whole)
+
+
+def test_a_folder_outside_both_roots_is_refused(host: FakeDockerHost, settings, tmp_path: Path) -> None:  # noqa: ANN001
+    spec = _copy_spec(settings, tmp_path)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    other = ExecSpec(command=spec.command, image=spec.image, argv=spec.argv, workspace_dir=outside, timeout_seconds=1, container_name="c")
+    with pytest.raises(SandboxError, match="outside the approved"):
+        DockerSandbox(DockerCli("docker", host), settings=settings).run(other)

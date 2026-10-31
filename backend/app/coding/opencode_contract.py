@@ -377,6 +377,16 @@ def opencode_config_problem(settings: Settings, egress: EgressPolicy) -> str | N
     provider, _, model_id = settings.opencode_model.partition("/")
     if provider != "openai" or not model_id:
         return 'OPENCODE_MODEL must look like "openai/<model-id>": DevPilot uses only OpenAI models'
+    problem = endpoint_problem(settings, egress)
+    if problem is not None:
+        return problem
+    if settings.opencode_server_password is None:
+        return "OPENCODE_SERVER_PASSWORD is not set: the OpenCode server must require a password"
+    return None
+
+
+def endpoint_problem(settings: Settings, egress: EgressPolicy) -> str | None:
+    """Why the backend may not talk to the configured address: it must be loopback and on the allowlist."""
     parts = urlsplit(settings.opencode_base_url)
     if parts.scheme != "http" or not parts.hostname or parts.port is None:
         return "OPENCODE_BASE_URL must look like http://127.0.0.1:<port>"
@@ -390,8 +400,6 @@ def opencode_config_problem(settings: Settings, egress: EgressPolicy) -> str | N
     decision = egress.check("backend", settings.opencode_base_url)
     if not decision.allowed:
         return f"OPENCODE_BASE_URL is refused by the egress allowlist: {decision.reason}"
-    if settings.opencode_server_password is None:
-        return "OPENCODE_SERVER_PASSWORD is not set: the OpenCode server must require a password"
     return None
 
 

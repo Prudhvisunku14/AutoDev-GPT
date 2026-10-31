@@ -21,6 +21,8 @@ _ENDINGS = frozenset({S.FAILED, S.CANCELLED, S.STOPPED_BY_POLICY})
 # States the orchestrator can drive in this build. A run that reaches any other
 # non-terminal state is paused until the phase that implements it exists.
 ORCHESTRATED_STATES = frozenset({S.ANALYZING, S.PLANNING, S.DEFINING_CRITERIA})
+# With a coding engine and a sandbox wired in, GPT drives the whole run.
+FULL_RUN_STATES = ORCHESTRATED_STATES | {S.IMPLEMENTING, S.VERIFYING, S.REPAIRING, S.DOCUMENTING}
 REQUIRED_PHASE = {
     S.IMPLEMENTING: "Phase 3 (Docker sandbox) and Phase 4 (OpenCode)",
     S.VERIFYING: "Phase 5 (verification-guided development)",

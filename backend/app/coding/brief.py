@@ -24,7 +24,9 @@ Rules (enforced by DevPilot; a task that breaks one is reverted as a whole):
 
 _PYTHON_NOTES = """\
 Python notes: use only the standard library unless the task says otherwise. Write tests with unittest in files named
-test_*.py at the project root: the sandbox runs `python -m unittest discover` with no network and a read-only folder."""
+test_*.py at the project root: the sandbox runs `python -m unittest discover` with no network and a read-only folder.
+Name each test after the acceptance criterion it proves, such as test_ac_002_divide_by_zero: a MUST criterion with no
+passing test of that name fails verification."""
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,7 @@ class BriefInput:
     language: str
     instructions: str  # from GPT
     existing_files: list[str]
+    last_failure: str = ""  # what the last verification reported, when this attempt is a repair
 
 
 def build_brief(spec: BriefInput) -> str:
@@ -57,6 +60,7 @@ def build_brief(spec: BriefInput) -> str:
         "Acceptance criteria for the project:\n" + data_block("data", criteria),
         "Orchestrator instructions for this task:\n" + data_block("instructions", spec.instructions),
         "Files already in the project:\n" + data_block("data", file_list),
+        *([f"What the last test run reported:\n{data_block('data', spec.last_failure)}"] if spec.last_failure else []),
         _RULES,
     ]
     if spec.language.casefold() == "python":

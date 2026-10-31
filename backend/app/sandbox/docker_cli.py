@@ -13,10 +13,13 @@ that does not exist.
 
 from __future__ import annotations
 
+import json
 import re
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 
 from app.config import Settings
 from app.sandbox.process import DEFAULT_CAPTURE_BYTES, ProcessResult, ProcessRunner
@@ -165,9 +168,33 @@ class DockerCli:
         line = _first_line(result.stderr)
         return line == f"Error response from daemon: No such container: {reference}", line or "docker rm did not finish"
 
-    def labelled_containers(self) -> list[str]:
+    def run_detached(self, args: list[str], *, env: Mapping[str, str] | None = None) -> str:
+        """`docker run --detach`. `env` holds values docker reads by name. Returns the full container ID."""
+        result = self._call(args, timeout=CLI_TIMEOUT_SECONDS, env=env)
+        container_id = result.stdout.decode("utf-8", errors="replace").strip()
+        if result.returncode != 0 or not FULL_ID.fullmatch(container_id):
+            raise SandboxError(f"could not start the container: {_first_line(result.stderr) or 'unknown error'}")
+        return container_id
+
+    def inspect_json(self, reference: str) -> dict[str, Any] | None:
+        """The whole `docker inspect` object. None when it cannot be read."""
+        return _first_object(self._call(["container", "inspect", reference], timeout=CLI_TIMEOUT_SECONDS))
+
+    def create_network(self, name: str, *, internal: bool) -> None:
+        args = ["network", "create", "--driver", "bridge", *(["--internal"] if internal else []), name]
+        result = self._call(args, timeout=CLI_TIMEOUT_SECONDS)
+        if result.returncode != 0:
+            raise SandboxError(f"could not create the network: {_first_line(result.stderr) or 'unknown error'}")
+
+    def inspect_network(self, name: str) -> dict[str, Any] | None:
+        return _first_object(self._call(["network", "inspect", name], timeout=CLI_TIMEOUT_SECONDS))
+
+    def remove_network(self, name: str) -> bool:
+        return self._call(["network", "rm", name], timeout=CLI_TIMEOUT_SECONDS).returncode == 0
+
+    def labelled_containers(self, label: str = CONTAINER_LABEL) -> list[str]:
         result = self._call(
-            ["ps", "-aq", "--no-trunc", "--filter", f"label={CONTAINER_LABEL}=true"], timeout=CLI_TIMEOUT_SECONDS
+            ["ps", "-aq", "--no-trunc", "--filter", f"label={label}=true"], timeout=CLI_TIMEOUT_SECONDS
         )
         if result.returncode != 0:
             raise SandboxError(f"could not list containers: {_first_line(result.stderr) or 'unknown error'}")
@@ -180,10 +207,12 @@ class DockerCli:
         timeout: float,
         cancel: threading.Event | None = None,
         capture_bytes: int = DEFAULT_CAPTURE_BYTES,
+        env: Mapping[str, str] | None = None,
     ) -> ProcessResult:
+        extra: dict[str, Any] = {"env": env} if env else {}
         try:
             return self._runner.run(
-                [self._executable, *args], timeout=timeout, cancel=cancel, capture_bytes=capture_bytes
+                [self._executable, *args], timeout=timeout, cancel=cancel, capture_bytes=capture_bytes, **extra
             )
         except FileNotFoundError as exc:
             raise SandboxUnavailable(
@@ -191,6 +220,16 @@ class DockerCli:
             ) from exc
         except OSError as exc:
             raise SandboxUnavailable(f"the Docker CLI could not be started ({type(exc).__name__})") from exc
+
+
+def _first_object(result: ProcessResult) -> dict[str, Any] | None:
+    if result.returncode != 0:
+        return None
+    try:
+        items = json.loads(result.stdout)
+    except ValueError:
+        return None
+    return items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else None
 
 
 def _parse_inspection(stdout: bytes, expected_id: str | None) -> Inspection:

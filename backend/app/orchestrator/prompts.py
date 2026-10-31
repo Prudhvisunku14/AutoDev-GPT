@@ -52,6 +52,33 @@ Every requirement must be referenced by at least one criterion, and at least one
 
 Requirements:
 {requirements}""",
+    RunState.IMPLEMENTING: """\
+Current state: IMPLEMENTING.
+Build the plan one task at a time. Call generate_code with a task's number and short instructions.
+Python builds the brief from the saved plan, chooses the coding provider, works in a disposable copy of the project,
+audits the result and reports what changed. Do not write code yourself.
+If a result has recovery.action RETRY, call generate_code for that task again with better instructions.
+When every task is DONE, call submit_implementation.
+
+Plan tasks:
+{tasks}
+
+Requirements:
+{requirements}""",
+    RunState.VERIFYING: """\
+Current state: VERIFYING.
+The tests have not given a result yet. Call submit_implementation to run them.""",
+    RunState.REPAIRING: """\
+Current state: REPAIRING.
+Verification failed. Read the failures in the last submit_implementation result, call generate_code for the task
+that needs the fix, then call submit_implementation again. Python limits the number of repairs.
+
+Plan tasks:
+{tasks}""",
+    RunState.DOCUMENTING: """\
+Current state: DOCUMENTING.
+The tests passed in the sandbox, and every MUST criterion has a passing test. Call finish with a short summary.
+Python copies the verified files into the project and writes the final report.""",
 }
 
 
@@ -61,6 +88,7 @@ def instructions_for(
     catalog: StackCatalog,
     requirements: list[tuple[str, str]],
     stack: StackEntry | None,
+    tasks: list[tuple[int, str, str]] | None = None,
 ) -> str:
     template = _STATE_INSTRUCTIONS.get(state, f"Current state: {state}.")
     body = template.format(
@@ -68,6 +96,7 @@ def instructions_for(
         requirements=data_block("data", "\n".join(f"{code}: {text}" for code, text in requirements) or "(none)"),
         stack=stack.id if stack else "unknown",
         methods=", ".join(stack.test_methods) if stack else "unknown",
+        tasks=data_block("data", "\n".join(f"{order}. [{status}] {title}" for order, title, status in tasks or []) or "(none)"),
     )
     return f"{BASE_INSTRUCTIONS}\n{body}"
 

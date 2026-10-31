@@ -23,6 +23,7 @@ from app.core.events import event_payload, list_events
 from app.db import repositories
 from app.db.models import AcceptanceCriterion, Event, PlanTask, Requirement, Run, RunState, ToolInvocation
 from app.orchestrator.run_control import cancel_run as cancel_run_and_close
+from app.verification.report import build_report
 from app.schemas.api import (
     AnalysisOut,
     CriterionOut,
@@ -168,6 +169,20 @@ def get_invocations(run_id: str, session: SessionDep) -> list[InvocationOut]:
         )
         for i in rows
     ]
+
+
+@router.get("/runs/{run_id}/report")
+def get_report(run_id: str, request: Request, session: SessionDep) -> dict[str, Any]:
+    """The final execution report, once the run has ended."""
+    run = load_run(session, run_id)
+    if run.report_json is not None:
+        report: dict[str, Any] = json.loads(run.report_json)
+        return report
+    if not run.is_terminal:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No final report yet")
+    # A run that ended outside the coding tools, such as on a limit or a GPT error, wrote no report.
+    state = request.app.state
+    return build_report(session, run, run.project, gpt=state.gpt_label, sandbox=type(state.sandbox).__name__)
 
 
 @router.get("/runs/{run_id}/events", response_model=list[EventOut])
