@@ -287,6 +287,7 @@ class CodingAttempt(Base):
     phase: Mapped[AttemptPhase] = mapped_column(Enum(AttemptPhase, native_enum=False, length=24), index=True)
     session_id: Mapped[str | None] = mapped_column(String(128), default=None)
     message_id: Mapped[str | None] = mapped_column(String(64), default=None)
+    container_id: Mapped[str | None] = mapped_column(String(64), default=None)
     known_messages_json: Mapped[str] = mapped_column(Text, default="[]")
     reconciliation: Mapped[str | None] = mapped_column(String(16), default=None)
     failure_reason: Mapped[str | None] = mapped_column(Text, default=None)  # redacted before storage
@@ -297,6 +298,7 @@ class CodingAttempt(Base):
     restore_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     late_results: Mapped[int] = mapped_column(Integer, default=0)
     detail: Mapped[str | None] = mapped_column(Text, default=None)  # redacted before storage
+    stop_evidence: Mapped[str | None] = mapped_column(Text, default=None)  # redacted before storage
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
 

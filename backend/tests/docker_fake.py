@@ -38,7 +38,7 @@ class FakeDockerHost:
     labelled: list[str] = field(default_factory=list)
 
     def verbs(self) -> list[str]:
-        return [call[0] for call in self.calls]
+        return [call[1] if call[0] == "container" else call[0] for call in self.calls]
 
     def run(
         self,
@@ -61,7 +61,7 @@ class FakeDockerHost:
             return self._create(args)
         if verb == "start":
             return self._start(args[-1], capture_bytes)
-        if verb == "inspect":
+        if verb == "container" and args[1] == "inspect":
             return self._inspect(args[-1])
         if verb == "rm":
             return self._rm(args[-1])
@@ -108,14 +108,15 @@ class FakeDockerHost:
     def _inspect(self, name: str) -> ProcessResult:
         container = self.containers.get(name)
         if container is None:
-            return ProcessResult(returncode=1, stderr=f"No such object: {name}".encode())
-        line = f"{container.status}|{container.exit_code}|{'true' if container.oom else 'false'}\n"
-        return ProcessResult(returncode=0, stdout=line.encode())
+            return ProcessResult(returncode=1, stderr=f"Error response from daemon: No such container: {name}\n".encode())
+        alive = container.status == "running"
+        fields = ("a" * 64, container.status, "true" if alive else "false", 4242 if alive else 0, container.exit_code, "true" if container.oom else "false")
+        return ProcessResult(returncode=0, stdout=("|".join(map(str, fields)) + "\n").encode())
 
     def _rm(self, name: str) -> ProcessResult:
         if self.remove_fails:
             return ProcessResult(returncode=1, stderr=b"device or resource busy")
         if name not in self.containers:
-            return ProcessResult(returncode=1, stderr=f"No such container: {name}".encode())
+            return ProcessResult(returncode=1, stderr=f"Error response from daemon: No such container: {name}\n".encode())
         del self.containers[name]
         return ProcessResult(returncode=0, stdout=f"{name}\n".encode())

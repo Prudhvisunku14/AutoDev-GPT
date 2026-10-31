@@ -70,7 +70,7 @@ class DockerSandbox:
                 cancel=cancel,
                 capture_bytes=self._settings.sandbox_max_output_bytes,
             )
-            state = self._cli.inspect(spec.container_name)
+            state = self._cli.final_state(spec.container_name)
         finally:
             duration_ms = int((time.monotonic() - started) * 1000)
             removed = self._cli.remove(spec.container_name)

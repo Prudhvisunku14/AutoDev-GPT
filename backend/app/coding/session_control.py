@@ -39,7 +39,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
 
-from app.coding.types import AttemptPhase, Progress, StopReport
+from app.coding.types import AttemptPhase, Progress, StopReport, Termination
 
 Phase = AttemptPhase
 # A workspace fingerprint, or None when it could not be read. None never counts as still.
@@ -124,8 +124,8 @@ class SessionControl(Protocol):
 class WriterControl(Protocol):
     """The thing that can really stop the writer: the launcher, for the isolated coding container."""
 
-    def terminate(self) -> bool:
-        """End the coding container and wait. True only when an independent read confirms it is gone."""
+    def terminate(self) -> Termination:
+        """End the coding container and wait. `confirmed` only when an independent read shows no process."""
         ...
 
 
@@ -148,6 +148,7 @@ class AttemptRecord:
     phase: AttemptPhase = Phase.PREPARED
     session_id: str | None = None
     message_id: str | None = None  # the exact message sent, when the server takes client ids
+    container_id: str | None = None  # the full ID of the coding container: a name can be reused
     known_messages: list[str] = field(default_factory=list)  # ids in the session before the send
     reconciliation: str | None = None
     failure_reason: str | None = None  # the first reason given; later ones never replace it
@@ -158,6 +159,7 @@ class AttemptRecord:
     restore_verified: bool = False
     late_results: int = 0  # results that arrived after the outcome was decided, and were ignored
     detail: str | None = None
+    stop_evidence: str | None = None  # what the stop saw, kept even when it could not be confirmed
 
 
 class AttemptStore(Protocol):
@@ -388,10 +390,10 @@ class AttemptGuard:
 
     @classmethod
     def open(
-        cls, *, store: AttemptStore, project_id: str, run_id: str, call_id: str, task_key: str, **deps: Any
+        cls, *, store: AttemptStore, project_id: str, run_id: str, call_id: str, task_key: str, container_id: str | None = None, **deps: Any
     ) -> AttemptGuard:
         """Claim the attempt. Raises AttemptRefused for a repeated call or a held project."""
-        record = AttemptRecord(project_id=project_id, run_id=run_id, call_id=call_id, task_key=task_key)
+        record = AttemptRecord(project_id=project_id, run_id=run_id, call_id=call_id, task_key=task_key, container_id=container_id)
         store.claim(record)
         return cls(record, store=store, **deps)
 
@@ -408,7 +410,7 @@ class AttemptGuard:
         return StopReport(
             phase=r.phase, abort_acknowledged=r.abort_acknowledged, observed_quiet=r.observed_quiet,
             process_terminated=r.process_terminated, workspace_stable=r.workspace_stable,
-            restore_verified=r.restore_verified, detail=self._summary(),
+            restore_verified=r.restore_verified, detail=self._summary(), stop_evidence=r.stop_evidence or "",
         )  # fmt: skip
 
     @property
@@ -577,8 +579,11 @@ class AttemptGuard:
 
     def _terminate(self) -> bool:
         try:
-            return self._writer.terminate() is True
-        except Exception:  # a stop that failed is an unconfirmed stop, whatever the reason
+            result = self._writer.terminate()
+            self._record.stop_evidence = result.evidence[:2000]
+            return result.confirmed is True
+        except Exception as exc:  # a stop that failed is an unconfirmed stop, whatever the reason
+            self._record.stop_evidence = f"the stop raised {type(exc).__name__}"
             return False
 
     def _still_after_stop(self) -> bool:

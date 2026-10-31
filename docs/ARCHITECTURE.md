@@ -231,15 +231,15 @@ Model IDs come only from configuration (`OPENAI_MODEL`, `OPENCODE_MODEL`).
 
 ## 6. Coding engine: OpenCode
 
-> **Status (2026-10-31):** the policy, the audit, the brief and the transaction-free tool path are built and tested. The official 1.19.5 binary is downloaded and verified on D:. The guarded real-server baseline passes (22 PASS, 0 FAIL, 2 NOT VERIFIED: unknown paths, which wait for the API filter, and the ripgrep download path). The effective policy is judged from the rules OpenCode enforces (`GET /agent`). The production container definition (`coding/opencode_container.py`) and the attempt lifecycle (`coding/session_control.py`) are built, tested and committed. The HTTP adapter uses that lifecycle, and its reading calls are verified on the real server, read-only. Its writing calls have never run on a real server. The container launcher, the API filter, the model gateway and the `generate_code` tool are not built. [ARCHITECTURE_OPTIMIZATION.md](ARCHITECTURE_OPTIMIZATION.md) lists the open P0 items and the Phase 4C design.
+> **Status (2026-10-31):** the policy, the audit, the brief and the transaction-free tool path are built and tested. The official 1.19.5 binary is downloaded and verified on D:. The guarded real-server baseline passes (22 PASS, 0 FAIL, 2 NOT VERIFIED: unknown paths, which the API filter now refuses, and the ripgrep download path). The effective policy is judged from the rules OpenCode enforces (`GET /agent`). The production container definition (`coding/opencode_container.py`) and the attempt lifecycle (`coding/session_control.py`) are built, tested and committed. The HTTP adapter uses that lifecycle, and its reading calls are verified on the real server, read-only. Its writing calls have never run on a real server, except session creation and an idle abort through the filter. The API filter (`backend/edge/`) and independent termination (`coding/container_stop.py`) are built, tested and committed, including one isolated real-server run. **The filter is not deployed: it has only run inside the check container, beside OpenCode, so network isolation is not proven.** The container launcher, the model gateway and the `generate_code` tool are not built. [ARCHITECTURE_OPTIMIZATION.md](ARCHITECTURE_OPTIMIZATION.md) lists the open P0 items and the Phase 4C design.
 
-**Deployment (design, not built)**
+**Deployment (design, not built, except the filter's code)**
 - **Binary.** The official `opencode-linux-x64-musl` binary, verified against its npm SHA-512 integrity and mounted read-only (`coding/opencode_artifact.py`). The runtime image is Alpine with `libstdc++` and `libgcc`.
 - **Containers per active project:**
   - an API filter, the only thing the backend reaches, at `127.0.0.1:4096`
   - the OpenCode server, on internal networks only
   - a model gateway that holds the key
-- **API filter.** It forwards an explicit allowlist of methods, paths, query keys and bodies. Everything else, including unknown paths, gets 403.
+- **API filter** (`edge/filter_policy.py`, `edge/filter_server.py`; standard library only, built and tested). It requires a per-run token and forwards an explicit allowlist of methods, paths, one directory query and bodies. Everything else, including unknown paths, gets 403 and never reaches OpenCode. Nothing is forwarded as received: the target, headers and body are rebuilt, on a new connection, for one request per connection.
 - **Workspace.** Only a private copy of the project is mounted, at `/workspace`, never the real workspace. DevPilot audits the copy before taking anything from it. Every API call carries `directory=/workspace`, because the API accepts any folder the container can see.
 - **No port of OpenCode is published.** HTTP basic auth uses a fresh random `OPENCODE_SERVER_PASSWORD` per start, passed to docker by name.
 - **Hardening.** The OpenCode container uses the sandbox's hardening flags (§7.2). Its only network peers are the filter and the model gateway.
@@ -263,7 +263,7 @@ Model IDs come only from configuration (`OPENAI_MODEL`, `OPENCODE_MODEL`).
    - Progress becomes `coding.*` events.
    - Every permission request and question is rejected and stops the attempt: the verified rules leave nothing to ask. The adapter uses whichever reply operation the server's `/doc` lists.
    - A tool outside the allowlist (`coding/opencode_tools.py`), a protected path, a path outside `/workspace`, a terminal or MCP event, an unreadable event or a token overrun stops the attempt.
-5. Completion is confirmed from the session's messages, by `parentID`, using the rule the server's own loop exits on. A dropped stream is reopened. Every stop goes through `AttemptGuard.secure`, which aborts, watches, ends the container and only then allows a restore.
+5. Completion is confirmed from the session's messages, by `parentID`, using the rule the server's own loop exits on. A dropped stream is reopened. Every stop goes through `AttemptGuard.secure`, which aborts, watches, ends the container and only then allows a restore. The container counts as ended only when a separate `docker container inspect` of its full ID shows it gone or stopped (`coding/container_stop.py`).
 6. The adapter never calls `/session/{id}/shell` or `/session/{id}/command`.
 
 **Audit after every task** (`coding/audit.py`, built and tested)
@@ -531,7 +531,7 @@ S(t,k) = w_s·Suit(t,k) + w_r·Rel(t,c) + w_l·(1 − L̂(t)) + w_c·(1 − Ĉ(t
 | `requirements` | run_id, code (R-xxx), text, kind (functional / non-functional) |
 | `tasks` | run_id, order, title, capability, features_json, status |
 | `acceptance_criteria` | run_id, code, given, when, then, priority, method, status, test_refs_json, frozen_hash |
-| `coding_attempts` | project_id, run_id, call_id (unique per run), task_key, phase, session_id, message_id, known_messages_json, reconciliation, failure_reason (redacted), abort_acknowledged, observed_quiet, process_terminated, workspace_stable, restore_verified, late_results, detail (redacted). One coding attempt's safety lifecycle, saved before each step. |
+| `coding_attempts` | project_id, run_id, call_id (unique per run), task_key, phase, session_id, message_id, container_id (full ID), known_messages_json, reconciliation, failure_reason (redacted), stop_evidence (redacted), abort_acknowledged, observed_quiet, process_terminated, workspace_stable, restore_verified, late_results, detail (redacted). One coding attempt's safety lifecycle, saved before each step. |
 | `tool_invocations` | run_id, seq, call_id (unique per run), response_id, tool, arguments_json (redacted), fingerprint, state_at_call, status (QUEUED → AWAITING_APPROVAL/APPROVED → STARTED → SUCCEEDED/FAILED/DENIED/INTERRUPTED, or SKIPPED), ok, error_class, output_json (exactly what GPT receives), delivered, latency_ms, capability, provider; later phases add cost, tokens, selection_json |
 | `tool_stats` | provider, category, successes, failures, ewma_latency_ms, ewma_cost_usd, consecutive_failures, breaker_until |
 | `test_runs` / `test_cases` | suite, passed, failed, errors, duration, junit_path / name, criterion_code, outcome, message |

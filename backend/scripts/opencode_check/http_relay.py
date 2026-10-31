@@ -22,7 +22,7 @@ import time
 from typing import Any
 
 HOST = "127.0.0.1"
-PORT = 4096
+PORTS = frozenset({4096, 8080})  # the server, and the API filter in front of it
 MAX_BODY = 8 * 1024 * 1024
 STREAM_SECONDS = 3.0
 STREAM_BYTES = 16 * 1024
@@ -60,11 +60,11 @@ def refusal(request: Any) -> str | None:
     return None
 
 
-def forward(request: dict[str, Any]) -> dict[str, Any]:
+def forward(request: dict[str, Any], port: int) -> dict[str, Any]:
     target = request["path"] + (f"?{request['query']}" if request.get("query") else "")
     headers = {k: v for k, v in (request.get("headers") or {}).items() if k in _FORWARDED_HEADERS}
     stream = request["path"] == "/event"
-    connection = http.client.HTTPConnection(HOST, PORT, timeout=STREAM_SECONDS if stream else 20.0)
+    connection = http.client.HTTPConnection(HOST, port, timeout=STREAM_SECONDS if stream else 20.0)
     try:
         connection.request("GET", target, headers=headers)
         response = connection.getresponse()
@@ -99,11 +99,12 @@ def main() -> int:
         request = json.load(sys.stdin)
     except ValueError:
         request = None
-    reason = refusal(request)
+    port = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 4096
+    reason = refusal(request) or (None if port in PORTS else f"the port {port} is not allowed")
     if reason is not None:
         sys.stdout.write(json.dumps({"refused": reason}))
         return 3
-    sys.stdout.write(json.dumps(forward(request)))
+    sys.stdout.write(json.dumps(forward(request, port)))
     return 0
 
 

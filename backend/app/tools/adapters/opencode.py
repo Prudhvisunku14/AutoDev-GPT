@@ -68,7 +68,6 @@ from app.coding.opencode_policy import PROMPTED_AGENT, is_protected, session_rul
 from app.coding.opencode_tools import relative_path, tool_inventory_problems, tool_problems
 from app.coding.session_control import AttemptGuard, ControlError, SubmitVerdict, new_entries, turn_finished
 from app.coding.types import AttemptPhase, CodingOutcome, CodingStatus, CodingTask, Progress
-from app.config import Settings
 
 PROVIDER_NAME = "opencode_server"
 PERMISSION_EVENTS = frozenset({"permission.asked", "permission.v2.asked"})
@@ -169,17 +168,21 @@ class OpenCodeClient:
         self,
         base_url: str,
         *,
-        username: str,
-        password: str | None,
+        token: str | None = None,
+        username: str | None = None,
+        password: str | None = None,
         directory: str,
         timeout: float = 30.0,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
+        """`token` is the filter's per-run credential, and every real use goes through it. A username
+        and password reach a bare server, which only the read-only compatibility check does."""
         self._base_url = base_url.rstrip("/")
         self._directory = directory
         self._http = httpx.Client(
             base_url=self._base_url,
-            auth=httpx.BasicAuth(username, password) if password else None,
+            auth=httpx.BasicAuth(username, password) if username and password else None,
+            headers={"Authorization": f"Bearer {token}"} if token else None,
             timeout=timeout,
             transport=transport,
         )
@@ -300,8 +303,10 @@ def _raise_for_status(response: httpx.Response, what: str) -> None:
     if code < 300:
         return
     detail = response.text.strip().replace("\n", " ")[:_DETAIL_CHARS]
-    if code in (401, 403):
+    if code == 401:
         raise OpenCodeError(CodingStatus.AUTH, f"OpenCode refused DevPilot's credentials ({code})")
+    if code == 403:
+        raise OpenCodeError(CodingStatus.PROTOCOL, f"{what} was refused by the API filter")
     if code == 404:
         raise OpenCodeNotFound(f"{what}: not found")
     if code >= 500:
@@ -383,19 +388,6 @@ class OpenCodeProvider:
         self._poll = poll_seconds
         self._max_reconnects = max_reconnects
         self._clock = clock
-
-    @classmethod
-    def from_settings(cls, settings: Settings) -> OpenCodeProvider:
-        if not settings.opencode_model:
-            raise ValueError("OPENCODE_MODEL is not set")
-        password = settings.opencode_server_password
-        client = OpenCodeClient(
-            settings.opencode_base_url,
-            username=settings.opencode_server_username,
-            password=password.get_secret_value() if password else None,
-            directory=settings.opencode_workspace_dir,
-        )
-        return cls(client, model=settings.opencode_model)
 
     def run_task(
         self, task: CodingTask, *, cancel: threading.Event | None, progress: Progress, guard: AttemptGuard

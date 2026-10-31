@@ -66,6 +66,7 @@ class SqlAttemptStore:
         row.phase = record.phase
         row.session_id = record.session_id
         row.message_id = record.message_id
+        row.container_id = record.container_id
         row.known_messages_json = json.dumps(record.known_messages)
         row.reconciliation = record.reconciliation
         row.failure_reason = self._safe(record.failure_reason)
@@ -76,6 +77,7 @@ class SqlAttemptStore:
         row.restore_verified = record.restore_verified
         row.late_results = record.late_results
         row.detail = self._safe(record.detail)
+        row.stop_evidence = self._safe(record.stop_evidence)
 
     def _safe(self, text: str | None) -> str | None:
         return None if text is None else self._redactor.redact_text(text)
@@ -84,9 +86,10 @@ class SqlAttemptStore:
 def _record(row: CodingAttempt) -> AttemptRecord:
     return AttemptRecord(
         project_id=row.project_id, run_id=row.run_id, call_id=row.call_id, task_key=row.task_key, phase=row.phase,
-        session_id=row.session_id, message_id=row.message_id, known_messages=json.loads(row.known_messages_json),
+        session_id=row.session_id, message_id=row.message_id, container_id=row.container_id,
+        known_messages=json.loads(row.known_messages_json),
         reconciliation=row.reconciliation, failure_reason=row.failure_reason, abort_acknowledged=row.abort_acknowledged,
         observed_quiet=row.observed_quiet, process_terminated=row.process_terminated,
         workspace_stable=row.workspace_stable, restore_verified=row.restore_verified,
-        late_results=row.late_results, detail=row.detail,
+        late_results=row.late_results, detail=row.detail, stop_evidence=row.stop_evidence,
     )  # fmt: skip

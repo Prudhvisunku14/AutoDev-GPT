@@ -22,7 +22,7 @@ from app.coding.session_control import (
     ControlError,
     StopPolicy,
 )
-from app.coding.types import AttemptPhase
+from app.coding.types import AttemptPhase, Termination
 
 SESSION = "ses_1"
 
@@ -135,14 +135,14 @@ class FakeWriter:
     raises: bool = False
     calls: int = 0
 
-    def terminate(self) -> bool:
+    def terminate(self) -> Termination:
         self.log.append("terminate")
         self.calls += 1
         if self.raises:
             raise RuntimeError("docker failed")
         if self.confirms and self.really_stops:
             self.engine.killed()
-        return self.confirms
+        return Termination(self.confirms, "confirmed by a read" if self.confirms else "still present")
 
 
 @dataclass

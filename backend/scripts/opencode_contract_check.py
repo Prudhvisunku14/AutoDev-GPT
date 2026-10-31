@@ -239,7 +239,7 @@ def _container(
     )
 
 
-def _prepare(c: CheckContainer, files: dict[str, str]) -> None:
+def _prepare(c: CheckContainer, files: dict[str, str], check_files: dict[str, bytes] | None = None) -> None:
     for folder in (c.config_dir, c.checks_dir, c.workspace_dir):
         folder.mkdir(parents=True, exist_ok=False)
     if c.guard_config_dir is not None:
@@ -250,6 +250,10 @@ def _prepare(c: CheckContainer, files: dict[str, str]) -> None:
     shutil.copyfile(PROBE, c.checks_dir / "probe.py")
     shutil.copyfile(RELAY, c.checks_dir / "http_relay.py")
     (c.checks_dir / "input.json").write_text(json.dumps(probe_input()) + "\n", encoding="utf-8")
+    for rel, data in (check_files or {}).items():
+        target = c.checks_dir.joinpath(*rel.split("/"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
     for rel, text in files.items():
         target = c.workspace_dir.joinpath(*rel.split("/"))
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -265,11 +269,13 @@ def one_run(
     tmp_exec: bool,
     guard: bool = False,
     exercise: Callable[[str, str], dict[str, Any]] | None = None,
+    check_files: dict[str, bytes] | None = None,
 ) -> dict[str, Any]:
     """Start one server, probe it, remove everything. Returns the redacted record.
 
     `exercise(container name, password)` replaces the probe, in the same container and with the same
-    checks and cleanup. It must catch its own failures: the container is removed either way."""
+    checks and cleanup. It must catch its own failures: the container is removed either way.
+    `check_files` adds files to the read-only checks folder."""
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     run_dir = RUNS / f"{stamp}-{label}-{secrets.token_hex(3)}"
     project_opencode = any(rel.startswith(".opencode/") for rel in files)
@@ -282,7 +288,7 @@ def one_run(
     token = base64.b64encode(f"opencode:{password}".encode()).decode()
     env = {**os.environ, PASSWORD_ENV: password}
     try:
-        _prepare(c, files)
+        _prepare(c, files, check_files)
         problems = mount_problems(c, check_root=CHECK_ROOT, binary_dir=binary_dir, forbidden=[REPO_ROOT, Path.home()])
         if problems:
             record["error"] = "refused mounts: " + "; ".join(problems)

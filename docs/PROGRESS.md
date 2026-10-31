@@ -6,7 +6,9 @@ Phase 4D Round 1 (2026-10-31):
 - The production container definition, the install guard and the A1/A2 lifecycle are tested and committed.
 - **The guarded baseline against the real server passes: 22 PASS, 0 FAIL, 2 NOT VERIFIED (C13, unknown paths, which depend on the API filter, and C18, the ripgrep download path, which depends on a runtime image).**
 
-Phase 4D Round 2 (2026-10-31): the adapter and the tool allowlist are built and tested, and the adapter's HTTP client reads the real server, read-only. They are committed. Nothing calls OpenCode. Phase 3 is verified in real containers.
+Phase 4D Round 2 (2026-10-31): the adapter and the tool allowlist are built and tested, and the adapter's HTTP client reads the real server, read-only. They are committed as `53070e8`. Nothing calls OpenCode. Phase 3 is verified in real containers.
+
+Phase 4D Round 3 (2026-10-31): the API filter and independent container termination are built and tested, and one isolated run through the filter against the real server passes (42 PASS, 0 FAIL). **C13 is verified at the filter, and the work is committed. Production network isolation is not proven.**
 
 ## Phase tracker
 
@@ -16,7 +18,7 @@ Phase 4D Round 2 (2026-10-31): the adapter and the tool allowlist are built and 
 | 1 | Backend foundation | ✅ Done (2026-10-29) | Python 3.12.9 at `D:\python.exe` |
 | 2 | GPT orchestrator | ✅ Done (2026-10-29), verified with FakeLLM; first live GPT call verified (analysis accepted, 1 call, 919 tokens) | OpenAI API key (user) for live use |
 | 3 | Docker sandbox | 🟡 Isolation controls verified in real containers (2026-10-30); install proxy and orphan-sweep test on a real container still open | Docker Desktop running, data on D:, `python:3.12-alpine` present |
-| 4 | OpenCode integration | 🟡 Foundation committed; binary verified; precedence verified; Phase 4D Stages 1–4 committed as `f4aa786` (2026-10-31). Stages 5 and 6 committed: adapter, tool allowlist, read-only real-server check (28 PASS, 0 FAIL). Not wired into runs | API filter, model gateway, launcher, runtime image with ripgrep, approval for live use |
+| 4 | OpenCode integration | 🟡 Foundation committed; binary verified; precedence verified; Phase 4D Stages 1–4 committed as `f4aa786` (2026-10-31). Stages 5 and 6 committed as `53070e8`: adapter, tool allowlist, read-only real-server check (28 PASS, 0 FAIL). Round 3 committed: API filter and independent termination, isolated filter run 42 PASS, 0 FAIL. Not wired into runs | Model gateway, launcher, runtime image with ripgrep, approval for live use |
 | 5 | Verification-guided development | ⏳ Not started | — |
 | 6 | Failure classification and recovery | ⏳ Not started | — |
 | 7 | Adaptive tool selection | ⏳ Not started | — |
@@ -750,3 +752,41 @@ Committed after approval, without the `127.0.0.1:4096` egress line. No prompt, m
 **Tests:** 1593 passed, 10 skipped, 0 failed. Coverage is 96%, or 97% without the adapter. The adapter is at 84% offline, and 90% with the real read-only run. A mutation check broke the new logic in 52 ways in a throwaway copy. The tests caught 51; the survivor exposed a gap, now tested, and caught. Lines still unexercised are the client's writing calls, which a read-only check cannot reach.
 
 **Open:** see "Phase 4D Round 2" in ARCHITECTURE_OPTIMIZATION.md.
+
+### Phase 4D Round 3: API filter and container termination (2026-10-31)
+
+**Stages 5 and 6 are committed as `53070e8`,** 19 files, without the egress line. On an export of the staged files: 1593 passed, 10 skipped, 0 failed.
+
+Round 3 is committed after review, without the egress line. No prompt, model call, paid API, image build, download or network change was made. The gateway, launcher and `generate_code` are not built.
+
+**Termination** (`sandbox/docker_cli.py`, `coding/container_stop.py`).
+- `docker rm -f` exits 0 for a container that does not exist, so its exit code proves nothing.
+- `inspect_container` returns RUNNING, STOPPED, NOT_FOUND or UNKNOWN_ERROR, and never raises. Only Docker's exact line for the exact reference is NOT_FOUND. A daemon failure, timeout, permission error, unreadable answer or different identity is UNKNOWN_ERROR.
+- `ContainerTerminator` identifies the container by its full ID and confirms only from a separate read after asking for the stop. An unconfirmed stop quarantines, and the workspace is not restored.
+- `coding_attempts` gains `container_id` and `stop_evidence` (redacted). The original failure is kept.
+- The one caller of the old `inspect` was the sandbox's final state. It now calls `final_state`, with the same behaviour. `remove` keeps its meaning.
+
+**API filter** (`backend/edge/`). A pure policy and a small byte mover, standard library only. The checks run in the order framing, authentication, route, body. It allows 15 operations, one of them its own health check, and 13 of the 188 in the server's spec. Nothing is forwarded as received. The per-run token is compared in constant time, and the OpenCode password stays in the filter. ARCHITECTURE_OPTIMIZATION.md has the endpoints, schemas and protections.
+
+**Adapter.** `OpenCodeClient` takes the filter's token. A 403 now means the filter refused, a protocol failure. `from_settings` is gone: it had no callers, and static credentials contradict a per-run token.
+
+**Bugs found on the way:**
+- Tests caught `answer_problem` letting `200 application/json` through on `prompt_async`, which should only ever answer 204.
+- The event limiter counted the tail twice across chunks.
+- An unread request body could destroy the error reply with a TCP reset, so refused requests now drain first.
+
+**Isolated filter run** (one run, approved): 42 PASS, 0 FAIL, 18.6 s. Same guarded container as the baseline, with no network, no ports and no credentials. **C13 is verified at the filter:** 8 unknown paths got 403, not the web page.
+- **All 175 other operations in the server's spec were refused,** along with 9 unknown methods, 19 encoded or normalized paths, 20 unapproved directories, 18 prompts, 7 sessions, 2 permission grants, 7 failed logins and 13 ambiguous requests.
+- A witness in front of OpenCode counted 10 requests before and after those 280 refusals, so none reached it. It saw 15 requests in all, each an allowed operation, and no prompt.
+- One inert session was created through the filter, and an idle abort answered `true`. This is the first real writing traffic, and it is disclosed here because it goes beyond reading.
+- The filter's token got 401 directly on OpenCode. No credential is in the audit, witness log or report.
+- On one real container, `inspect_container` and `ContainerTerminator` gave the right answer for running, a wrong identity, a confirmed stop and a missing container.
+- Afterwards: 0 containers, images and networks unchanged, no run folders.
+
+Evidence: `D:\DevPilotCache\opencode-check\reports\20261031T064332Z-filter-check.json`.
+
+**Not proven:** production network isolation. The filter and OpenCode shared one container and one user. That proof belongs to the launcher stage.
+
+**Tests:** 2245 passed, 10 skipped (opt-in Docker and live OpenAI tests), 0 failed. Coverage is 96%, with or without the adapter. `filter_policy.py` and `container_stop.py` are at 100%. The adapter is at 88% offline, and 92% with the real filter run. `filter_server.py` is at 76%: its listener, `HttpUpstream` and `main` ran on the real path, but that run measured only the adapter. A mutation check broke the new logic in 59 ways in a throwaway copy. The tests caught 57. One survivor exposed a real gap, stop evidence not proven redacted, now tested and caught. The other was an ineffective break, rewritten and caught. `ruff` and `mypy` are not installed in this virtual environment, so neither ran.
+
+**Open:** see "Phase 4D Round 3" in ARCHITECTURE_OPTIMIZATION.md, which also holds the review of what remains and the recommended Round 4 scope.

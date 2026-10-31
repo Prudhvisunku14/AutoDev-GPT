@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from app.coding.opencode_contract import PERMISSION_REPLY_OPERATIONS, QUESTION_REJECT_OPERATION, REQUIRED_OPERATIONS, json_answer
@@ -23,7 +24,7 @@ from app.coding.opencode_policy import managed_config, session_rules
 from app.coding.session_control import AttemptRefused, ControlError, RestoreForbidden
 from app.coding.types import AttemptPhase, CodingOutcome, CodingStatus, CodingTask
 from app.tools.adapters import opencode
-from app.tools.adapters.opencode import OpenCodeError, OpenCodeNotFound, OpenCodeProvider, _checked, _Control
+from app.tools.adapters.opencode import OpenCodeClient, OpenCodeError, OpenCodeNotFound, OpenCodeProvider, _checked, _Control
 from tests.coding_fakes import SESSION, Scene
 from tests.helpers import OPENCODE_1_19_5_TOOLS, opencode_agents
 
@@ -209,6 +210,43 @@ def _stopped_for_policy(scene: Scene, *events: dict[str, Any]) -> tuple[CodingOu
 
 def _assert_nothing_sent(scene: Scene, api: FakeApi) -> None:
     assert scene.engine.prompts == [] and scene.log == [] and api.created == []
+
+
+# --- The client's credential and status mapping (no request is made) -----------------------------
+
+
+def test_the_client_presents_the_filters_token_and_no_password() -> None:
+    client = OpenCodeClient("http://filter.invalid", token="t" * 43, directory="/workspace")
+    assert client._http.headers["authorization"] == "Bearer " + "t" * 43
+    assert client._http.auth is None
+
+
+def test_a_bare_server_login_is_only_there_for_the_read_only_check() -> None:
+    client = OpenCodeClient("http://server.invalid", username="opencode", password="p", directory="/workspace")
+    assert "authorization" not in client._http.headers and client._http.auth is not None
+    assert OpenCodeClient("http://server.invalid", directory="/workspace")._http.auth is None
+
+
+def test_the_provider_cannot_be_built_from_long_lived_settings() -> None:
+    assert not hasattr(OpenCodeProvider, "from_settings")  # the token is per run, handed over by the launcher
+
+
+@pytest.mark.parametrize(
+    ("status", "expected", "reason"),
+    [(401, CodingStatus.AUTH, "credentials"), (403, CodingStatus.PROTOCOL, "refused by the API filter"), (500, CodingStatus.UNAVAILABLE, "server error"),
+     (502, CodingStatus.UNAVAILABLE, "server error"), (504, CodingStatus.UNAVAILABLE, "server error"), (400, CodingStatus.PROTOCOL, "was refused"), (302, CodingStatus.PROTOCOL, "was refused")],
+)  # fmt: skip
+def test_each_failure_status_means_what_it_should(status: int, expected: CodingStatus, reason: str) -> None:
+    with pytest.raises(OpenCodeError, match=reason) as caught:
+        opencode._raise_for_status(httpx.Response(status, text="detail"), "GET /x")
+    assert caught.value.status is expected
+
+
+def test_a_missing_thing_is_its_own_error_and_success_is_silent() -> None:
+    with pytest.raises(OpenCodeNotFound):
+        opencode._raise_for_status(httpx.Response(404), "GET /x")
+    opencode._raise_for_status(httpx.Response(200), "GET /x")
+    opencode._raise_for_status(httpx.Response(204), "GET /x")
 
 
 # --- Before anything is sent: valid and invalid servers ------------------------------------------

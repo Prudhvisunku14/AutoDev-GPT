@@ -1001,3 +1001,160 @@ This must finish before `loop._recover_interrupted` reports the call to GPT, so 
 - **To verify in Stage 9:** that user 65534 can write to a bind mount on Docker Desktop. Nothing has written to one yet.
 
 **7. The API filter's allowlist** gains `GET /experimental/tool/ids`. It sits under the sensitive `/experimental` prefix and is the one such operation DevPilot needs. `prompt_async` must also refuse `tools`, `system`, `noReply`, `format` and `variant`. A second API tree exists under `/api/*`; the filter's default refusal covers it.
+
+---
+
+# Phase 4D Round 3: API filter, termination and what remains (2026-10-31)
+
+Committed after review. Stages 5 and 6 are committed as `53070e8`. Neither includes the `127.0.0.1:4096` egress line. No prompt, model call, paid API, image build, download or network change was made. The gateway, launcher and `generate_code` are not built.
+
+This section replaces items 1, 3 (the token), 5 and 7 of "What the next stages must do" above.
+
+## Termination
+
+Captured from real Docker 29.9.2:
+
+| Command | Container missing | Daemon unreachable |
+|---|---|---|
+| `docker container inspect` | exit 1, `Error response from daemon: No such container: <ref>` | exit 1, `error during connect: ...` |
+| `docker inspect` | exit 1, `error: no such object: <ref>` | not captured |
+| `docker rm -f` | **exit 0, no output** | not captured |
+
+So the exit code of `docker rm` proves nothing, and only one exact line means "gone".
+
+| Outcome | Meaning | Confirms the stop? |
+|---|---|---|
+| `RUNNING` | running, paused, restarting or removing | No |
+| `STOPPED` | exited, dead or created, with `running=false` and PID 0 | Yes |
+| `NOT_FOUND` | Docker's exact line for this exact reference | Yes |
+| `UNKNOWN_ERROR` | anything else: daemon down, timeout, permission error, unreadable answer, a contradiction, another container's identity | **No** |
+
+`DockerCli.inspect_container(reference, expected_id=...)` never raises. `ContainerTerminator.terminate()` refuses anything but a full 64-character ID, reads the state, asks Docker to remove the container, and confirms only from a separate read. It retries, and an unconfirmed stop stays unconfirmed. `AttemptGuard` accepts only `confirmed is True`, so anything else quarantines, and the workspace is not restored.
+
+The failure reason is kept. The evidence of the stop goes into its own redacted column, and the container's ID into another, so a restarted backend can stop the right container.
+
+The old `DockerCli.inspect` had one caller, the sandbox's final state. It is now `final_state`, and behaves the same for that caller: `None` still ends in an error, not a pass. `DockerCli.remove` keeps its meaning.
+
+**Limit:** a stopped container counts as terminated, because it runs no process. Nothing in the launcher uses this yet.
+
+## API filter as built
+
+`backend/edge/filter_policy.py` decides, on bytes, with no sockets and no files. `backend/edge/filter_server.py` moves bytes. Both use only the standard library and neither imports `app`, so the filter can run from a read-only mount.
+
+**Order of checks:** framing, authentication, route, body. A caller without the token learns only the status, not which rule was broken.
+
+| Method and path | Directory query | Body | Answer the filter accepts |
+|---|---|---|---|
+| `GET /devpilot/health` | none | none | Answered by the filter itself |
+| `GET /global/health`, `GET /doc` | none | none | 200 JSON |
+| `GET /config`, `/agent`, `/experimental/tool/ids`, `/session/status` | required | none | 200 JSON |
+| `GET /session/{ses_}`, `/session/{ses_}/message` | required | none | 200 JSON |
+| `GET /event` | required | none | 200 `text/event-stream` only, limited per event |
+| `POST /session` | required | `title`, `permission` | 200 JSON |
+| `POST /session/{ses_}/prompt_async` | required | `agent`, `model`, `parts`, optional `messageID` | 204 |
+| `POST /session/{ses_}/abort` | required | none | 200 JSON |
+| `POST /permission/{per_}/reply` | required | `reply`, optional `message` | 200 JSON |
+| `POST /question/{que_}/reject` | required | none | 200 JSON |
+
+A 400 or 404 in JSON also passes on every forwarded operation except the event stream, so the adapter can tell "missing" from "refused". The filter answers anything else from upstream with a generic error of its own.
+
+**Body rules:**
+- **Session:** exactly `title` (at most 200 characters, no control characters) and `permission`, which must equal the approved rule list.
+- **Prompt:** `agent` must be `build`. `model` must equal the approved provider and model. `parts` must be exactly one `{type: text, text}`, at most 64 KiB. `messageID` must have the server's shape. `tools`, `system`, `noReply`, `format`, `variant` and anything else are refused.
+- **Permission reply:** `reply` must be `reject`.
+- **JSON:** duplicate keys, `NaN`, excess nesting and a wrong content type are refused.
+
+**Authentication.** `Authorization: Bearer <token>` with a per-run token of at least 32 characters, read from `DEVPILOT_FILTER_TOKEN`. It is compared with `hmac.compare_digest` over SHA-256 digests, and exactly one header must be present. The OpenCode password stays inside the filter, which adds it to each forwarded request. The client's token is never sent on.
+
+**Bypass protections:**
+- Nothing is forwarded as received. The target is rebuilt from the route, the query is written in one form, the headers are a fixed list, and the body is re-serialized from the checked fields.
+- Each request gets a new connection upstream, and each client connection carries one request. Request smuggling has nothing to smuggle into.
+- The filter parses HTTP itself, strictly: CRLF only, no folding, HTTP/1.1, origin form.
+- `%`, `\`, `;`, `#`, empty segments, `.` and `..` are refused, not decoded. An ID must match its exact shape.
+- Conflicting or malformed `Content-Length`, any `Transfer-Encoding`, `Upgrade`, `Expect`, method-override and rewrite headers, a body on an operation without one, and bytes after the body are refused.
+- Answers are limited to the expected status and type, so an HTML page never reaches the backend. The client sees only four fixed headers.
+- The JSON audit line holds the method, path, status and reason, and no header value, query or body.
+- Limits: head 16 KiB, 48 headers, request 128 KiB, answer 8 MiB, event 8 MiB, 15 s for the client, 30 s upstream, a stream 30 s idle and 15 minutes in all, 32 connections.
+
+**Changes to the adapter.** `OpenCodeClient` takes a filter token, and Basic login remains only for the read-only check on a bare server. A 403 now means the filter refused the request, a protocol failure, not bad credentials. `OpenCodeProvider.from_settings` is removed: it had no callers, and static credentials contradict a per-run token.
+
+## C13 and the isolated run
+
+One approved run: **42 PASS, 0 FAIL**. Same guarded container as the baseline, confirmed by `docker inspect`: no network, no ports, read-only root, no capabilities, user 65534, no provider credential. The container held the real OpenCode, the real filter, and a small witness between them that logged each request line reaching OpenCode.
+
+**C13 is now verified at the filter:** all 8 unknown paths answered 403. None returned the web page.
+
+| Refused | Count | Status |
+|---|---|---|
+| Other operations in the server's own spec, including `/api/*` | **175 of 188** (13 allowed) | 403 |
+| Unknown paths, unknown methods | 8, 9 | 403 |
+| Encoded or normalized paths | 19 | 403 |
+| Unapproved directories | 20 | 403 |
+| Prompts (tools, other agents and models, file, agent and subtask parts, and more) | 18 | 403 |
+| Sessions, permission grants | 7, 2 | 403 |
+| Missing or wrong credentials | 7 | 401 |
+| Ambiguous framing | 13 | 400 |
+| Oversized body, oversized head | 1, 1 | 413, 431 |
+
+The witness counted 10 requests before and after the refusals, so none of the 280 reached OpenCode. All 15 lines it saw were allowed operations. No prompt was sent, and the only POST targets were `session` and `abort`.
+
+Allowed traffic went through the adapter's real client, with the gate, contract, policy, tool and event checks all passing. One inert session was created through the filter and passed `parse_session` with the exact rules, then an idle abort answered `true`. The filter's token got 401 directly on OpenCode. No credential is in the audit, the witness log or the report. Evidence: `D:\DevPilotCache\opencode-check\reports\20261031T064332Z-filter-check.json`.
+
+## Limits of this evidence
+
+- **Production network isolation is not proven.** The filter and OpenCode shared one container and one user. Anything in that container could have reached OpenCode directly. That proof belongs to the launcher stage.
+- `docker exec` relays replaced the host socket hop, so real TCP timeouts and a slow client were not tested on the real path.
+- A valid `prompt_async` was never forwarded: the real 204, `messageID` and real tool events remain unobserved.
+- `reject_permission` and `reject_question` have never run on a real server.
+- Abort-to-idle on a busy session and session-level rule precedence are unmeasured.
+- The filter's listener, `HttpUpstream` and `main` ran on the real path, but that run measured no coverage for them (see PROGRESS.md).
+
+## Review of what remains
+
+**1. How the filter deploys with the launcher.**
+- One filter container per project set: read-only root, non-root, no capabilities, `no-new-privileges`, limits, the two `edge` files and `filter.json` mounted read-only.
+- It joins `dp-<p>-ingress` and `dp-<p>-core`. Only `127.0.0.1:<port>:8080` is published. The launcher must pass `--listen-host`, because the default binds to loopback inside the container.
+- The launcher creates the token, the password and `filter.json` fresh for each run, and passes the secrets by name. The backend keeps only the token, in memory.
+- It uses the Python image already on disk, pinned by digest, so it needs no new image. That choice needs confirming at the launcher stage.
+- The launcher waits for `GET /devpilot/health`, then the adapter's own gate runs. A dead filter makes the attempt fail safe, and the attempt is never resumed through a replacement filter.
+- **Design gap:** the design says "one set per active project" and also a fixed `127.0.0.1:4096`, and only one set can hold that port. Decision: one active coding project at a time, and the launcher refuses a second. That keeps the single egress line honest, and suits this laptop. Commit the egress line only when the filter publishes there.
+
+**2. How untrusted clients stay off OpenCode's listener.**
+- OpenCode publishes no port and joins only internal networks. Its only peers are the filter (core) and the gateway (model).
+- The password exists only in the filter and in OpenCode, and the filter's token is worthless upstream. That last part is shown; the rest is not.
+- Generated programs never run in that container, and `bash` is denied, so nothing inside should connect to it. A local process on the host meets only the filter, and needs the token.
+- **The launcher stage must prove it with real containers:** `docker inspect` shows no published port; a connection from the host and from the ingress network to OpenCode fails; the gateway's network cannot reach the core network; OpenCode cannot reach anything but the gateway.
+
+**3. Startup recovery: yes.** Item 2 of the earlier list stands, with the stop now specified.
+- It goes in `main.py`'s `lifespan`, beside `_sweep_sandbox`, before any run advances and so before `loop._recover_interrupted` reports the call to GPT.
+- For each unresolved attempt, build `ContainerTerminator` from the persisted `container_id`, then call `guard.recover`.
+- An attempt with no ID, or a daemon that is down, is unconfirmed, so it quarantines. The startup must not fail the whole backend for that, and must not block a project that has no attempt.
+- `_sweep_sandbox` removes only containers labelled `devpilot.sandbox`. OpenCode's containers carry `devpilot.opencode`, so recovery alone owns them, and a separate sweep for leftovers must run after it, never before.
+
+**4. Quarantine review and release.**
+- A person decides, never GPT and never a timer. It is an authenticated API action, with a recorded reason, and no GPT tool can reach it.
+- Release requires a fresh independent read of the persisted ID showing `NOT_FOUND`, at the moment of release. A stale record is not enough, and neither is a person's word.
+- It is a dedicated guarded transition, with one audit event. Unknown states stay quarantined.
+- With the disposable copy in place, the real workspace was never touched, so release needs no restore. The copy is kept for inspection, and deleted only by that decision.
+
+**5. Gateway credentials and budgets.**
+- The OpenAI key lives only in the gateway, passed by name. OpenCode holds a per-run gateway token that is worthless anywhere else.
+- It allows only the approved model and `function` tools, refuses hosted tools, and caps output tokens on each request.
+- Budgets are enforced in the gateway, because OpenCode cannot be relied on: tokens per task, requests per run, a timeout per request. The check happens before forwarding, and over budget it answers 429. The adapter's own token limit stays as a second layer.
+- A request with no usable usage figure counts against the budget at its cap, so missing numbers cannot make spending invisible.
+- Upstream is fixed: `api.openai.com`, TLS verified, no redirects, proxy variables ignored. A ledger line per request holds no prompt text.
+- It should reuse the filter's pattern: a pure policy, a small byte mover, nothing forwarded as received.
+
+**6. Ripgrep without downloads.** Without `rg`, the first `grep` or `glob` tries github.com, and only the missing network stops it. Two routes: a pinned `rg` in the approved runtime image, or a verified `rg` binary mounted read-only on `PATH`, not on the `noexec` tmpfs. **Recommended: the runtime image,** because it already needs `libstdc++` and `libgcc`, and the production builder already refuses an image without `rg`. Either route needs approval for a download. C18 stays NOT VERIFIED until then. Without a model, the check can only show `rg` is found and runs. It cannot show that OpenCode picks it, which waits for the first live task.
+
+**7. Writable mounts for user 65534 on Docker Desktop: unverified.** Nothing has written to a bind mount as that user. The launcher stage needs a no-model test on a throwaway D: folder: create, write, rename and delete inside the container as 65534, then compare contents and modification times on the host. Modification times matter because DevPilot's stability check uses them. **Fallback if it fails:** a per-attempt named Docker volume, which DevPilot copies in and out. That costs speed but keeps the host's file system further away. The check must not change the user to root to make the test pass.
+
+## Recommended Round 4 scope
+
+1. Review and commit Round 3, without the egress line.
+2. **Stage 8, gateway, offline.** Policy and byte mover with tests. No key and no upstream call.
+3. **Stage 9, launcher, no model.** Per-project networks, filter and OpenCode containers, the one-project rule, the disposable copy, the isolation proof above, and the 65534 write test.
+4. **Startup recovery and quarantine release.**
+5. **Decide ripgrep,** with the download it needs.
+
+Keep `generate_code` and the first live prompt for the round after that, once isolation is proven. Round 4 needs approval for: Docker networks, starting the filter and OpenCode containers together, and the ripgrep download or image.

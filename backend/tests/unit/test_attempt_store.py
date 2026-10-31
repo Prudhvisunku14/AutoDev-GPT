@@ -74,6 +74,8 @@ def test_every_fact_round_trips(sessions: sessionmaker[Session], run: Run) -> No
     record.restore_verified = True
     record.late_results = 2
     record.detail = "why"
+    record.container_id = "c" * 64
+    record.stop_evidence = "before: RUNNING; after: NOT_FOUND"
     store.save(record)
     assert _store(sessions).get(run.id, "call_1") == record
 
@@ -119,10 +121,12 @@ def test_failure_text_is_redacted_before_it_is_stored(sessions: sessionmaker[Ses
     record = _record(run)
     record.failure_reason = "the server said s3cret-value-123456"
     record.detail = "again s3cret-value-123456"
+    record.stop_evidence = "docker said s3cret-value-123456"
     store.claim(record)
     saved = store.get(run.id, "call_1")
     assert saved is not None
-    assert "s3cret" not in str(saved.failure_reason) and "s3cret" not in str(saved.detail)
+    assert "s3cret" not in str(saved.failure_reason) and "s3cret" not in str(saved.detail) and "s3cret" not in str(saved.stop_evidence)
+    assert saved.stop_evidence is not None and saved.stop_evidence.startswith("docker said")  # kept, only the secret goes
 
 
 def test_a_full_attempt_is_durable_at_each_step_and_a_new_process_can_finish_it(sessions: sessionmaker[Session], run: Run) -> None:

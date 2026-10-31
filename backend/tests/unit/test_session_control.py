@@ -31,7 +31,7 @@ from app.coding.session_control import (
     turn_finished,
     workspace_fingerprint,
 )
-from app.coding.types import AttemptPhase
+from app.coding.types import AttemptPhase, Termination
 from tests.coding_fakes import PHASES, SESSION, Scene, StoreCrash
 
 P = AttemptPhase
@@ -335,7 +335,7 @@ def test_an_acknowledged_abort_is_not_quiescence() -> None:
     guard = scene.guard()
     scene.submit(guard)
     seen: list[AttemptPhase] = []
-    scene.writer.terminate = lambda: (seen.append(guard.phase), False)[1]  # type: ignore[method-assign]
+    scene.writer.terminate = lambda: (seen.append(guard.phase), Termination(False))[1]  # type: ignore[method-assign]
     report = guard.secure(scene.engine, "a timeout")
     assert report.abort_acknowledged and not report.observed_quiet and not report.process_terminated
     assert seen == [P.QUIESCENCE_CHECK] and report.quarantined
@@ -388,7 +388,7 @@ def test_a_stop_that_says_gone_while_the_workspace_still_changes_is_quarantined(
 
 def test_a_workspace_that_cannot_be_read_after_the_stop_is_quarantined() -> None:
     scene = Scene()
-    scene.writer.terminate = lambda: (setattr(scene.workspace, "unreadable", True), True)[1]  # type: ignore[method-assign]
+    scene.writer.terminate = lambda: (setattr(scene.workspace, "unreadable", True), Termination(True))[1]  # type: ignore[method-assign]
     _, report = _stopped(scene)
     assert report.quarantined and not report.workspace_stable
 

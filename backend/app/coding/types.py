@@ -53,6 +53,14 @@ class AttemptPhase(StrEnum):
 
 
 @dataclass(frozen=True)
+class Termination:
+    """The answer to "is the coding container gone?". `confirmed` only from an independent read."""
+
+    confirmed: bool
+    evidence: str = ""  # what each step saw, kept with the attempt; safe to log
+
+
+@dataclass(frozen=True)
 class StopReport:
     """What is known about a stopped attempt. The three middle facts are never interchangeable."""
 
@@ -63,6 +71,7 @@ class StopReport:
     workspace_stable: bool = False  # unchanged after termination
     restore_verified: bool = False  # verified restoration: the workspace equals the checkpoint
     detail: str = ""
+    stop_evidence: str = ""  # what the stop saw, step by step
 
     @property
     def safe_to_restore(self) -> bool:
