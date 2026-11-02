@@ -19,8 +19,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from app.sandbox.policy import APPROVED_COMMANDS
-from app.sandbox.spec import WORKSPACE_TARGET
-from app.verification.results import TestCounts, parse_unittest
+from app.sandbox.spec import WORKSPACE_TARGET, ExecResult, ExecStatus
+from app.verification.results import TestCounts, Verdict, VerificationResult, parse_unittest
 
 UNITTEST, PYTEST, VITEST_JSON = "unittest-verbose", "pytest-verbose", "vitest-json"
 FOLDER = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
@@ -158,6 +158,25 @@ def parse_vitest_json(output: str) -> TestCounts:
             (passed if case.get("status") == "passed" else failed if case.get("status") == "failed" else []).append(_name(case.get("fullName") or case.get("title", "")))
     return TestCounts(True, int(data["numTotalTests"]), int(data.get("numFailedTests", 0)), 0, int(data.get("numPendingTests", 0)), tuple(passed), tuple(failed),
                       f"{data.get('numPassedTests', 0)} passed, {data.get('numFailedTests', 0)} failed")  # fmt: skip
+
+
+def judge_recipe(recipe: Recipe, result: ExecResult) -> VerificationResult:
+    """One component's run, judged by its recipe's parser. Every way of not knowing is NOT_RUN or FAILED, never PASSED."""
+    tail = (result.stdout + result.stderr)[-4_000:]
+    base = {"exec_status": result.status.value, "exit_code": result.exit_code, "output_tail": tail, "container": result.container, "duration_ms": result.duration_ms, "cleanup": result.cleanup}
+    if result.status in (ExecStatus.UNAVAILABLE, ExecStatus.ERROR, ExecStatus.CANCELLED):
+        return VerificationResult(Verdict.NOT_RUN, result.detail or f"the sandbox ended with {result.status.value}", counts=TestCounts(readable=False), criteria=(), **base)
+    counts = parse(recipe, result.stdout, result.stderr)
+    reason = None
+    if result.status not in (ExecStatus.SUCCEEDED, ExecStatus.FAILED):
+        reason = result.detail or f"the tests ended with {result.status.value}"
+    elif not counts.readable:
+        reason = f"the {recipe.name} output could not be read"
+    elif counts.ran == 0:
+        reason = "no tests ran"
+    elif result.status is ExecStatus.FAILED or result.exit_code != 0 or counts.failures or counts.errors:
+        reason = f"{counts.failures} failed and {counts.errors} errored of {counts.ran} tests"
+    return VerificationResult(Verdict.PASSED if reason is None else Verdict.FAILED, reason or "every test passed", counts=counts, criteria=(), **base)
 
 
 def parse(recipe: Recipe, stdout: str, stderr: str) -> TestCounts:

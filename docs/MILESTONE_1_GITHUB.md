@@ -12,6 +12,23 @@
 | D. Real Docker execution | Verified before Stages 2 to 4 (historical). Pending for the Stage 2 to 4 and Milestone 1 code |
 | E. Independent acceptance | Implemented, offline-tested with replayed results. Pending in the real sandbox. The weather suite is checked by parsing only |
 
+## Full-stack coding interfaces (after the milestone commit `6ead6b3`; not committed)
+
+| | Status |
+|---|---|
+| GitHub milestone | Committed locally as `6ead6b314c3b2fc674b08e383c942c2569bc8772` |
+| Full-stack coding interfaces | Implemented: component tasks, per-component recipes and evidence, component folder enforcement |
+| Scripted full-stack behaviour | Tested offline: FakeLLM, scripted files, fixture repositories and fixture sandbox output |
+| Real GitHub connectivity | Pending |
+| FastAPI and React runtime images | Pending: not built, so both stacks stay blocked |
+| Docker verification of this code | Pending |
+| Real AI code generation | Pending |
+
+- **Provider declarations:** the simulated provider declares `python-cli`, `python-fastapi` and `react-vite`. OpenCode keeps claiming only `python-cli`, where it has been shown working (a Stage 2 rule). Declaring a stack never makes it runnable: `generate_code` stops the run before any selection when that stack's recipe has no approved runtime.
+- **Component work:** GPT asks for a task, and the task names its component. The provider sees the disposable copy, but the audit refuses any change outside that component's folder, which counts as a security violation, so recovery stops. A task waits for its dependencies. Reused code in a component's folder can be adapted, and a component without reused code is built from scratch.
+- **Verification:** for a multi-stack plan, `submit_implementation` builds one sandbox job per component from its recipe (Python chooses the image and the argument list), checks the declared dependencies against the runtime first, and blocks the run with the missing names otherwise. Each component is judged by its own parser and recorded as `verification.component`. The project passes only when every component passes and every MUST criterion is proved by a passing test somewhere, and the evaluator's suite runs in the Python component's runtime. Nothing is delivered otherwise.
+- **The contract test** (`tests/unit/test_fullstack_coding.py`) approves the two runtimes inside the test only, labelled as simulated, to check what happens after that point. The weather request is coded in four component tasks; the back end fails its tests once, is repaired and passes; the front end passes; acceptance passes 7 of 7; and the files are delivered. Without that simulated approval, the same request stops at the first coding step.
+
 ## What was reused
 
 The tool registry and executor, the policy engine and approval queue (`EXTERNAL_NETWORK` always needs a person), the egress allowlist (its `github` component), the workspace jail, the audit's rules for paths that could reconfigure the coding engine, the event log, the report, the selector and recovery, and independent acceptance. Nothing existing was replaced. There was no GitHub or Git code before; `GITHUB_TOKEN` was only declared so the redactor hides it.

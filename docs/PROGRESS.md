@@ -1006,6 +1006,8 @@ These figures describe a scenario mix in which the preferred tool is usually wro
 - Adapt and test the existing code in the sandbox, with the same verification and acceptance suite as generated code.
 - Needs: GitHub access through the approval queue (SECURITY.md §10), egress allowlist entries, and Docker for the tests.
 
+**Full-stack coding interfaces (2026-11-02, after commit `6ead6b3`, not committed):** component tasks confined to their folders, per-component recipes and evidence, and a project that passes only when every component and every MUST criterion pass. Tested with scripted outputs and a simulated runtime approval; the real FastAPI and React runtimes, Docker verification, live GitHub and real code generation are pending. Details: [MILESTONE_1_GITHUB.md](MILESTONE_1_GITHUB.md).
+
 **B. Google Drive-to-RAG development** (the next requested capability; not started)
 - User-authorised OAuth access (SECURITY.md §7).
 - Narrowly scoped permissions: only the folders or documents the user picks.
@@ -1014,6 +1016,8 @@ These figures describe a scenario mix in which the preferred tool is usually wro
 - A chatbot whose answers cite their sources.
 - Document-access and privacy protections: no document content in logs or prompts beyond what the user selected, encrypted refresh tokens, and deletion on request.
 - Needs: a Google OAuth client, an embedding model and approval for its cost, and the parser container.
+
+**C. Live App Preview** (on the roadmap; not started): show a generated application running, from a verified build only.
 
 ### First real demonstration (proposed, not authorized)
 

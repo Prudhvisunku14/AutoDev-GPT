@@ -4,8 +4,8 @@ Nothing here is invented to make a comparison look richer. There is one real cod
 that has never been measured stays None and is scored cautiously: no real model has run through OpenCode,
 so its quality, duration and cost are unknown, and it is IMPLEMENTED rather than VERIFIED.
 
-Only `python-cli` has an approved test command (app/stacks/catalog.yaml). The other stacks can be planned
-but not verified, so no tool claims them.
+The simulated provider declares `python-cli`, `python-fastapi` and `react-vite`; OpenCode claims only `python-cli`, where it has been shown. Only `python-cli` has an approved verification runtime;
+the others are blocked before selection until their runtime images are built and approved.
 """
 
 from __future__ import annotations
@@ -24,7 +24,11 @@ if TYPE_CHECKING:
 OPENCODE_NAME = "opencode_server"
 CODING_CAPABILITIES = frozenset({"code_generation", "test_generation", "documentation"})
 _ALL_CAPABILITIES = dict.fromkeys(CODING_CAPABILITIES, 1.0)
-_VERIFIED_STACKS = {"python-cli": 1.0}
+# What a tool can write. Whether that work can run is a separate gate: generate_code stops a run before any selection
+# when a stack's verification recipe has no approved runtime (app/verification/recipes.py).
+_DECLARED_STACKS = {"python-cli": 1.0, "python-fastapi": 1.0, "react-vite": 1.0}
+# OpenCode claims only the stacks it has been shown working in (Stage 2). It gains one after a real run proves it.
+_SHOWN_STACKS = {"python-cli": 1.0}
 _KINDS = {BUILD: 1.0, REPAIR: 1.0}
 DOCKER_INTERNAL, IN_PROCESS = "docker-internal", "in-process"
 OPENAI_KEY_NAME, OPENAI_HOST = "OPENAI_API_KEY", "api.openai.com"
@@ -34,8 +38,8 @@ _MEASURED_REQUEST_TOKENS = 16_690 + 512
 _OPENCODE_MEMORY_MB = 1_536
 
 PLANNED_TOOLS = (
-    ToolProfile("opencode_via_n8n", ToolStatus.PLANNED, _ALL_CAPABILITIES, _VERIFIED_STACKS, _KINDS, environment="planned"),
-    ToolProfile("gpt_writer", ToolStatus.PLANNED, _ALL_CAPABILITIES, _VERIFIED_STACKS, _KINDS, environment="planned"),
+    ToolProfile("opencode_via_n8n", ToolStatus.PLANNED, _ALL_CAPABILITIES, _DECLARED_STACKS, _KINDS, environment="planned"),
+    ToolProfile("gpt_writer", ToolStatus.PLANNED, _ALL_CAPABILITIES, _DECLARED_STACKS, _KINDS, environment="planned"),
 )
 
 
@@ -45,12 +49,12 @@ def opencode_profile(settings: Settings) -> ToolProfile:
     if settings.openai_price_input_per_mtok is not None and settings.openai_price_output_per_mtok is not None:
         floor = (_MEASURED_REQUEST_TOKENS * settings.openai_price_input_per_mtok + settings.gateway_max_output_tokens * settings.openai_price_output_per_mtok) / 1_000_000
     return ToolProfile(
-        OPENCODE_NAME, ToolStatus.IMPLEMENTED, _ALL_CAPABILITIES, _VERIFIED_STACKS, _KINDS, environment=DOCKER_INTERNAL, credentials=frozenset({OPENAI_KEY_NAME}), network=frozenset({OPENAI_HOST}),
+        OPENCODE_NAME, ToolStatus.IMPLEMENTED, _ALL_CAPABILITIES, _SHOWN_STACKS, _KINDS, environment=DOCKER_INTERNAL, credentials=frozenset({OPENAI_KEY_NAME}), network=frozenset({OPENAI_HOST}),
         min_cost_usd=floor, min_tokens=_MEASURED_REQUEST_TOKENS + settings.gateway_max_output_tokens, memory_mb=_OPENCODE_MEMORY_MB,
     )  # fmt: skip
 
 
-SIMULATED_PROFILE = ToolProfile(SIMULATED_NAME, ToolStatus.IMPLEMENTED, _ALL_CAPABILITIES, _VERIFIED_STACKS, _KINDS, environment=IN_PROCESS, seconds=0.0, cost_usd=0.0, min_cost_usd=0.0, memory_mb=16)
+SIMULATED_PROFILE = ToolProfile(SIMULATED_NAME, ToolStatus.IMPLEMENTED, _ALL_CAPABILITIES, _DECLARED_STACKS, _KINDS, environment=IN_PROCESS, seconds=0.0, cost_usd=0.0, min_cost_usd=0.0, memory_mb=16)
 
 
 def eligibility_policy(settings: Settings, egress: EgressPolicy) -> EligibilityPolicy:

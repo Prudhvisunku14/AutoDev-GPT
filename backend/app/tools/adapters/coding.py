@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -57,9 +58,9 @@ from app.tools.base import ErrorClass, ExternalStep, RecoveryInfo, RiskLevel, To
 from app.tools.gates import MAX_TASKS
 from app.tools.registry import ToolRegistry
 from app.verification import acceptance
-from app.verification.recipes import readiness
+from app.verification.recipes import command_for, dependency_problems, judge_recipe, readiness, recipe_for
 from app.verification.report import build_report
-from app.verification.results import Criterion, Verdict, VerificationResult, failure_kind, judge
+from app.verification.results import Criterion, CriterionStatus, TestCounts, Verdict, VerificationResult, failure_kind, judge, judge_criteria
 
 logger = logging.getLogger("devpilot.coding")
 
@@ -121,6 +122,7 @@ class _CodingPlan:
     selection: dict[str, Any] = field(default_factory=dict)  # what GPT is told about the choice
     recovers_from: str | None = None  # the failure this attempt is meant to fix
     recovery_action: str | None = None
+    folder: str | None = None  # a component task may change only this folder
 
 
 @dataclass
@@ -152,7 +154,7 @@ def _begin_generate_code(runtime: CodingRuntime, ctx: ToolContext, args: Generat
         raise ToolError(ErrorClass.POLICY_REFUSED, f"task {task.order} depends on tasks that are not done yet: {', '.join(map(str, waiting))}")
     stack_id = _task_stack(ctx, task)
     stack = ctx.catalog.get(stack_id or "")
-    if stack is None or stack.test_command is None:
+    if stack is None or (stack.test_command is None and recipe_for(stack.id) is None):  # readiness above already required an approved recipe
         raise ToolError(ErrorClass.POLICY_REFUSED, f"stack {stack_id} cannot be verified yet, so no code is written for it; python-cli can")
     if ctx.workspace is None or ctx.call_id is None:
         raise ToolError(ErrorClass.TOOL_ERROR, "the workspace is not configured for this backend")
@@ -190,6 +192,7 @@ def _begin_generate_code(runtime: CodingRuntime, ctx: ToolContext, args: Generat
         project.id, run.id, ctx.call_id, task.order, coding_task, root, checkpoint, before, selection.launcher, selection.provider, selection.simulated, ctx.settings, left,
         category=task_category(task.capability, stack.id, context.kind), evidence=evidence_of(simulated=selection.simulated, sandbox=runtime.sandbox), selection=selection.summary(),
         recovers_from=directive.category or None, recovery_action=directive.action or None,
+        folder=next((c["path"] for c in _components(ctx) if c["name"] and c["name"] == task.component), None),
     )  # fmt: skip
 
 
@@ -303,10 +306,11 @@ def _settle(plan: _CodingPlan, guard: AttemptGuard, session: CodingSession, outc
                 max_files=plan.settings.workspace_max_files, secrets=plan.settings.secret_values(),
             )  # fmt: skip
             changes = [c.to_dict() for c in report.changes]
-            if report.clean:
+            outside = [c.path for c in report.changes if plan.folder and not c.path.startswith(f"{plan.folder}/")]
+            violations = [*report.violations, *(f"{p}: outside this task's component folder {plan.folder}/" for p in outside)]
+            if not violations:
                 guard.keep()
                 return _CodingResult(outcome, kept=True, changes=changes, phase=str(guard.phase))
-            violations = report.violations
             outcome.status = CodingStatus.POLICY_VIOLATION
             reason = "the audit refused the changes: " + "; ".join(violations[:5])
         else:
@@ -419,6 +423,62 @@ def _stop_blocked(runtime: CodingRuntime, ctx: ToolContext, blocked: list[dict[s
     ctx.run.report_json = json.dumps(_report(runtime, ctx))
 
 
+def _begin_components_submit(runtime: CodingRuntime, ctx: ToolContext, args: SubmitImplementationArgs) -> _VerifyPlan:
+    """Python picks each component's recipe; nothing is installed. A missing runtime or dependency stops the run."""
+    run = ctx.run
+    problems = [f"task {t.order} ({t.title}) is {t.status}" for t in _unfinished_tasks(ctx)]
+    if not runtime.candidates.exists(run.id):
+        problems.append("no code was generated yet")
+    if problems:
+        raise ToolError(ErrorClass.VALIDATION_FAILED, "the implementation is not ready to verify", problems)
+    components = _components(ctx)
+    files = acceptance.read_tree(runtime.candidates.path(run.id))
+    blocked = _verification_blocked(ctx)
+    for c in components:
+        recipe = recipe_for(c["stack"])
+        blocked += [{"component": c["name"], "stack": c["stack"], "reason": why} for why in (dependency_problems(recipe, files, c["path"]) if recipe else [])]
+    if blocked:
+        why = "; ".join(f"{b['component']} ({b['stack']}): {b['reason']}" for b in blocked)
+        raise ToolError(ErrorClass.POLICY_REFUSED, f"verification is blocked: {why}", [b["reason"] for b in blocked], after_rollback=partial(_stop_blocked, runtime, ctx, blocked))
+    root = runtime.candidates.path(run.id)
+    parts = []
+    for c in components:
+        recipe = recipe_for(c["stack"])
+        assert recipe is not None
+        spec = ExecSpec(recipe.name, recipe.runtime.image, command_for(recipe, c["path"]), root, recipe.runtime.timeout_seconds, f"devpilot-sbx-{secrets.token_hex(8)}")
+        parts.append((c["name"], recipe, spec))
+    criteria = tuple(Criterion(c.code, c.priority) for c in ctx.session.scalars(select(AcceptanceCriterion).where(AcceptanceCriterion.run_id == run.id).order_by(AcceptanceCriterion.code)))
+    python_image = next((r.runtime.image for _n, r, _s in parts if r.argv[0] == "python"), None)
+    independent = _plan_acceptance(runtime, ctx, "python-unittest", python_image) if python_image else None
+    if run.state is not RunState.VERIFYING:
+        _change_state(ctx, RunState.VERIFYING, "submit_implementation accepted")
+    _record(ctx, "verification.started", {"components": [{"component": n, "recipe": r.name, "image": r.runtime.image, "argv": list(s.argv)} for n, r, s in parts],
+                                          "repairs_so_far": run.repairs, "summary": args.summary, "independent_acceptance": independent is not None})  # fmt: skip
+    return _VerifyPlan(runtime.sandbox, parts[0][2], criteria, runtime.candidates.digest(run.id), independent, tuple(parts))
+
+
+def _judge_components(ctx: ToolContext, plan: _VerifyPlan, verified: _Verified) -> VerificationResult:
+    """Each component judged by its own recipe, with its own evidence. The project passes only when every component's
+    tests pass and every MUST criterion is proved by a passing test somewhere."""
+    parts = []
+    for name, recipe, _spec in plan.components:
+        v = judge_recipe(recipe, verified.components[name])
+        _record(ctx, "verification.component", {"component": name, "recipe": recipe.name, "image": recipe.runtime.image, **_verification_event(v)})
+        parts.append((name, v))
+    counts = TestCounts(
+        readable=all(v.counts.readable for _, v in parts), ran=sum(v.counts.ran for _, v in parts), failures=sum(v.counts.failures for _, v in parts),
+        errors=sum(v.counts.errors for _, v in parts), skipped=sum(v.counts.skipped for _, v in parts), passed_names=tuple(n for _, v in parts for n in v.counts.passed_names),
+        failed_names=tuple(n for _, v in parts for n in v.counts.failed_names), summary="; ".join(f"{name}: {v.counts.summary or v.verdict.value}" for name, v in parts),
+    )  # fmt: skip
+    judged = judge_criteria(plan.criteria, counts)
+    lead = next((v for _, v in parts if v.verdict is Verdict.NOT_RUN), None) or next((v for _, v in parts if v.verdict is Verdict.FAILED), parts[0][1])
+    unproved = [c.code for c in judged if c.priority == "MUST" and c.status is not CriterionStatus.PASSED]
+    failing = [f"{name}: {v.reason}" for name, v in parts if v.verdict is not Verdict.PASSED]
+    verdict = Verdict.NOT_RUN if lead.verdict is Verdict.NOT_RUN else Verdict.FAILED if failing or unproved else Verdict.PASSED
+    reason = "; ".join(failing) or (f"no passing test proves {', '.join(unproved)}" if unproved else "every component's tests and every MUST criterion passed")
+    return VerificationResult(verdict, reason, lead.exec_status, lead.exit_code, counts, judged, lead.output_tail, lead.container, sum(v.duration_ms for _, v in parts), lead.cleanup, plan.digest)
+
+
 # --- Recovery -------------------------------------------------------------------------------------
 
 
@@ -512,15 +572,19 @@ class _VerifyPlan:
     criteria: tuple[Criterion, ...]
     digest: str
     independent: _AcceptancePlan | None = None  # the evaluator's frozen suite, when the project has one
+    components: tuple[tuple[str, Any, ExecSpec], ...] = ()  # (name, recipe, spec) per component of a multi-stack plan
 
 
 @dataclass(frozen=True)
 class _Verified:
     tests: ExecResult  # the project's own tests, written by the coding provider
     independent: ExecResult | None  # the frozen acceptance suite; None when it did not run
+    components: dict[str, ExecResult] = field(default_factory=dict)  # per component of a multi-stack plan
 
 
 def _begin_submit(runtime: CodingRuntime, ctx: ToolContext, args: SubmitImplementationArgs) -> _VerifyPlan:
+    if any(c["name"] for c in _components(ctx)):
+        return _begin_components_submit(runtime, ctx, args)
     run = ctx.run
     stack = ctx.catalog.get(ctx.project.stack or "")
     problems = [f"task {t.order} ({t.title}) is {t.status}" for t in _unfinished_tasks(ctx)]
@@ -548,7 +612,7 @@ def _acceptance_fs(settings: Settings) -> WorkspaceFS:
     return WorkspaceFS(settings.coding_work_dir / "acceptance", max_file_bytes=settings.workspace_max_file_bytes, max_files=settings.workspace_max_files)
 
 
-def _plan_acceptance(runtime: CodingRuntime, ctx: ToolContext, command: str) -> _AcceptancePlan | None:
+def _plan_acceptance(runtime: CodingRuntime, ctx: ToolContext, command: str, image: str | None = None) -> _AcceptancePlan | None:
     """The frozen suite, staged with the candidate's files but not its tests. A changed copy ends the run."""
     run = ctx.run
     if run.acceptance_suite_json is None or run.acceptance_sha256 is None:
@@ -562,6 +626,7 @@ def _plan_acceptance(runtime: CodingRuntime, ctx: ToolContext, command: str) -> 
     try:
         acceptance.stage(fs, run.id, acceptance.evaluation_files(acceptance.read_tree(runtime.candidates.path(run.id)), suite))
         spec = build_spec(command, None, workspace=fs, project_id=run.id, settings=ctx.settings)
+        spec = replace(spec, image=image) if image else spec  # a multi-stack project's suite runs in its Python component's runtime
     except (WorkspaceError, SandboxPolicyError) as exc:
         acceptance.discard(fs, run.id)
         raise ToolError(ErrorClass.TOOL_ERROR, f"the acceptance run could not be prepared: {exc}") from exc
@@ -569,6 +634,11 @@ def _plan_acceptance(runtime: CodingRuntime, ctx: ToolContext, command: str) -> 
 
 
 def _run_verification(plan: _VerifyPlan, cancel: threading.Event | None, progress: Progress) -> _Verified:
+    if plan.components:  # each component in its own recipe's runtime
+        results = {name: _in_sandbox(plan.sandbox, spec, cancel) for name, _recipe, spec in plan.components}
+        all_ran = all(r.status is ExecStatus.SUCCEEDED for r in results.values())
+        independent = _in_sandbox(plan.sandbox, plan.independent.spec, cancel) if plan.independent is not None and all_ran else None
+        return _Verified(next(iter(results.values())), independent, results)
     tests = _in_sandbox(plan.sandbox, plan.spec, cancel)
     independent = None
     if plan.independent is not None and tests.status is ExecStatus.SUCCEEDED:  # the evaluator's tests judge only code whose own tests passed
@@ -590,7 +660,7 @@ def _finish_submit(runtime: CodingRuntime, ctx: ToolContext, plan: _VerifyPlan, 
     result = verified.tests
     if plan.independent is not None:
         acceptance.discard(_acceptance_fs(ctx.settings), run.id)
-    verification = replace(judge(result, plan.criteria), fingerprint=plan.digest)
+    verification = _judge_components(ctx, plan, verified) if plan.components else replace(judge(result, plan.criteria), fingerprint=plan.digest)
     run.verification_json = json.dumps(verification.to_dict())
     for row in ctx.session.scalars(select(AcceptanceCriterion).where(AcceptanceCriterion.run_id == run.id)):
         judged = next((c for c in verification.criteria if c.code == row.code), None)
