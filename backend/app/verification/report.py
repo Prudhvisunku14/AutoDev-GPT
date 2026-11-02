@@ -30,8 +30,9 @@ def build_report(session: Session, run: Run, project: Project, *, gpt: str, sand
     selections = by_type.get("selection.chosen", [])
     providers = sorted({s["provider"] for s in selections})
     tests = "test execution (replayed from recorded runs, not Docker)" if sandbox == REPLAY_SANDBOX else "Docker tests"
+    searches = by_type.get("repository.searched", [])
     simulated = [name for name, flag in (("GPT orchestration", gpt.startswith("FakeLLM")), ("coding provider", any(s["simulated"] for s in selections)),
-                                         (tests, sandbox != REAL_SANDBOX)) if flag]  # fmt: skip
+                                         (tests, sandbox != REAL_SANDBOX), ("repository data (fixtures, not GitHub)", any(s["source"] == "fixture" for s in searches))) if flag]  # fmt: skip
     delivered = by_type.get("delivery.finished", [{}])[-1].get("files", [])
     if run.acceptance_json is not None:
         independent = json.loads(run.acceptance_json)
@@ -44,13 +45,18 @@ def build_report(session: Session, run: Run, project: Project, *, gpt: str, sand
         "run": {"id": run.id, "state": run.state.value, "outcome": run.outcome, "detail": run.status_detail, "turns": run.turns,
                 "tokens": run.tokens_in + run.tokens_out, "cost_usd": run.cost_usd if run.cost_known else None, "repairs": run.repairs},
         "requirements": [{"code": r.code, "text": r.text} for r in session.scalars(select(Requirement).where(Requirement.run_id == run.id).order_by(Requirement.code))],
-        "tasks": [{"order": t.order, "title": t.title, "status": t.status} for t in session.scalars(select(PlanTask).where(PlanTask.run_id == run.id).order_by(PlanTask.order))],
+        "tasks": [{"order": t.order, "title": t.title, "status": t.status, "component": t.component, "depends_on": json.loads(t.depends_on_json or "[]")}
+                  for t in session.scalars(select(PlanTask).where(PlanTask.run_id == run.id).order_by(PlanTask.order))],
+        "components": json.loads(run.plan_json or "{}").get("components") or [],
+        "verification_blocked": (by_type.get("verification.blocked") or [None])[-1],
         "criteria": [{"code": c.code, "priority": c.priority, "status": c.status, "tests": json.loads(c.test_refs_json)}
                      for c in session.scalars(select(AcceptanceCriterion).where(AcceptanceCriterion.run_id == run.id).order_by(AcceptanceCriterion.code))],
         "selection": selections,
         "coding_attempts": [{k: a.get(k) for k in ("task_order", "provider", "status", "kept", "restored", "quarantined", "phase", "detail", "changes", "violations")}
                             for a in by_type.get("coding.finished", [])],
         "verifications": by_type.get("verification.finished", []),
+        "repositories": {"searches": searches, "evaluated": by_type.get("repository.evaluated", []), "decision": (by_type.get("repository.decision") or [None])[-1],
+                         "decisions": by_type.get("repository.decision", []), "imported": (by_type.get("repository.imported") or [None])[-1], "imports": by_type.get("repository.imported", [])},
         "acceptance": independent,
         "acceptance_runs": by_type.get("acceptance.finished", []),
         "recovery": by_type.get("recovery.decided", []),

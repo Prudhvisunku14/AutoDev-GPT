@@ -51,11 +51,13 @@ from app.sandbox.spec import ExecResult, ExecSpec, ExecStatus
 from app.selection.history import attempt_seconds, evidence_of, failed_in_run, failed_tools, last_attempt, load_history, record_attempt, repair_record, settle_verification
 from app.selection.model import BUILD, REPAIR, SelectionContext, task_category
 from app.selection.selector import NoProvider, Selector
+from app.tools.adapters.repositories import imported_record
 from app.tools.adapters.workspace_fs import WorkspaceError, WorkspaceFS
 from app.tools.base import ErrorClass, ExternalStep, RecoveryInfo, RiskLevel, ToolArgs, ToolContext, ToolError, ToolSpec
 from app.tools.gates import MAX_TASKS
 from app.tools.registry import ToolRegistry
 from app.verification import acceptance
+from app.verification.recipes import readiness
 from app.verification.report import build_report
 from app.verification.results import Criterion, Verdict, VerificationResult, failure_kind, judge
 
@@ -140,9 +142,18 @@ def _begin_generate_code(runtime: CodingRuntime, ctx: ToolContext, args: Generat
     task = ctx.session.scalars(select(PlanTask).where(PlanTask.run_id == run.id, PlanTask.order == args.task_order)).first()
     if task is None:
         raise ToolError(ErrorClass.INVALID_ARGS, f"the plan has no task {args.task_order}")
-    stack = ctx.catalog.get(project.stack or "")
+    blocked = _verification_blocked(ctx)
+    if blocked:  # code that cannot be verified is never written: the run stops and says exactly why
+        why = "; ".join(f"{b['component']} ({b['stack']}): {b['reason']}" for b in blocked)
+        raise ToolError(ErrorClass.POLICY_REFUSED, f"verification is blocked, so no code is written: {why}", [b["reason"] for b in blocked],
+                        after_rollback=partial(_stop_blocked, runtime, ctx, blocked))  # fmt: skip
+    waiting = _waiting_for(ctx, task)
+    if waiting:
+        raise ToolError(ErrorClass.POLICY_REFUSED, f"task {task.order} depends on tasks that are not done yet: {', '.join(map(str, waiting))}")
+    stack_id = _task_stack(ctx, task)
+    stack = ctx.catalog.get(stack_id or "")
     if stack is None or stack.test_command is None:
-        raise ToolError(ErrorClass.POLICY_REFUSED, f"stack {project.stack} cannot be verified yet, so no code is written for it; python-cli can")
+        raise ToolError(ErrorClass.POLICY_REFUSED, f"stack {stack_id} cannot be verified yet, so no code is written for it; python-cli can")
     if ctx.workspace is None or ctx.call_id is None:
         raise ToolError(ErrorClass.TOOL_ERROR, "the workspace is not configured for this backend")
     left = _money_left(ctx)  # attempts together stay inside the run's budget
@@ -364,6 +375,48 @@ def _finish_generate_code(runtime: CodingRuntime, ctx: ToolContext, plan: _Codin
         keep_copy = result.quarantined or decision.category == FailureCategory.AMBIGUOUS_STATE
         _end_failed(runtime, ctx, outcome="quarantined" if result.quarantined else "coding_failed", detail=f"{decision.reason}: {outcome.detail}", keep_copy=keep_copy)
     return data
+
+
+# --- Components and verification readiness -------------------------------------------------------
+
+
+def _components(ctx: ToolContext) -> list[dict[str, Any]]:
+    """The plan's components, or the project as one component when the plan has none."""
+    plan = json.loads(ctx.run.plan_json or "{}")
+    return plan.get("components") or [{"name": None, "stack": ctx.project.stack, "path": None}]
+
+
+def _task_stack(ctx: ToolContext, task: PlanTask) -> str | None:
+    if task.component is None:
+        return ctx.project.stack
+    return next((c["stack"] for c in _components(ctx) if c["name"] == task.component), None)
+
+
+def _verification_blocked(ctx: ToolContext) -> list[dict[str, Any]]:
+    """Every component whose stack cannot be verified now, with the exact reason. Empty when all can."""
+    blocked = []
+    for component in _components(ctx):
+        ok, reason = readiness(component["stack"] or "")
+        if not ok:
+            blocked.append({"component": component["name"] or "the project", "stack": component["stack"], "reason": reason})
+    return blocked
+
+
+def _waiting_for(ctx: ToolContext, task: PlanTask) -> list[int]:
+    needed = json.loads(task.depends_on_json or "[]")
+    if not needed:
+        return []
+    rows = ctx.session.scalars(select(PlanTask).where(PlanTask.run_id == ctx.run.id, PlanTask.order.in_(needed)))
+    return sorted(t.order for t in rows if t.status != _FINISHED_TASK)
+
+
+def _stop_blocked(runtime: CodingRuntime, ctx: ToolContext, blocked: list[dict[str, Any]]) -> None:
+    """Nothing was written. The run ends as stopped by policy, with a report that names every blocked component."""
+    _record(ctx, "verification.blocked", {"components": blocked})
+    if not ctx.run.is_terminal:
+        detail = "verification is blocked: " + "; ".join(f"{b['component']} ({b['stack']}): {b['reason']}" for b in blocked)
+        end_run(ctx.session, ctx.run, RunState.STOPPED_BY_POLICY, ctx.events, outcome="verification_unavailable", detail=detail, reason="verification_unavailable")
+    ctx.run.report_json = json.dumps(_report(runtime, ctx))
 
 
 # --- Recovery -------------------------------------------------------------------------------------
@@ -625,6 +678,11 @@ def _finish_project(runtime: CodingRuntime, ctx: ToolContext, args: FinishArgs) 
     last = json.loads(run.verification_json or "null")
     if not isinstance(last, dict) or last.get("verdict") != Verdict.PASSED.value:
         raise ToolError(ErrorClass.POLICY_REFUSED, "nothing is delivered without a passed verification")
+    imported = imported_record(ctx.session, run.id)
+    if imported is not None:  # reused code goes out with its licence and its notice, or not at all
+        missing = [rel for rel in (imported["notices_file"], *imported["license_files"]) if not (runtime.candidates.path(run.id) / rel).is_file()]
+        if missing:
+            raise ToolError(ErrorClass.POLICY_REFUSED, "the imported repository's licence and notices must be delivered with it", missing)
     assert ctx.workspace is not None
     settings = ctx.settings
     try:

@@ -224,6 +224,8 @@ class PlanTask(Base):
     features_json: Mapped[str] = mapped_column(Text)
     requirement_refs_json: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(16), default="PENDING")
+    component: Mapped[str | None] = mapped_column(String(32), default=None)  # the plan's component, for a multi-stack project
+    depends_on_json: Mapped[str | None] = mapped_column(Text, default=None)  # task numbers that must be done first
 
 
 class AcceptanceCriterion(Base):

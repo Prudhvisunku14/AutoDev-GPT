@@ -147,6 +147,20 @@ cd backend
 & $env:DEVPILOT_PYTHON -m app.demo.competition --serve    # then a local read-only dashboard at /ui
 ```
 
+### GitHub-assisted, multi-stack development (offline-tested)
+
+DevPilot can search public repositories, judge their licences and evidence, import an approved one at a pinned commit into a component's folder, and plan projects with several stacks (for example a FastAPI back end and a React front end). Status, plainly:
+
+- **Offline-tested:** repository discovery, evaluation and safe import (fixtures, never GitHub); multi-stack planning; the FastAPI and React verification recipes' contracts and parsers.
+- **Not yet verified:** live GitHub access (off by default, `REPOSITORY_SOURCE=github`); the FastAPI and React recipes, whose runtime images are not built, so such projects stop with a precise blocked status; real code generation; real Docker execution of this code.
+
+```powershell
+cd backend
+& $env:DEVPILOT_PYTHON -m app.demo.fullstack    # the offline React + FastAPI rehearsal; reports in data\fullstack-rehearsal
+```
+
+Details: [docs/MILESTONE_1_GITHUB.md](docs/MILESTONE_1_GITHUB.md).
+
 ## Documentation
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): system design, orchestration protocol, algorithms, data model and APIs
@@ -154,6 +168,7 @@ cd backend
 - [docs/PROGRESS.md](docs/PROGRESS.md): phase tracker, acceptance criteria and phase log
 - [docs/COMPETITION.md](docs/COMPETITION.md): the offline demonstration, what is real and what is simulated, and feature status
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): the four ways to run DevPilot and the proposed cloud architecture (not deployed)
+- [docs/MILESTONE_1_GITHUB.md](docs/MILESTONE_1_GITHUB.md): GitHub-assisted development (repository discovery, evaluation and safe import, offline-tested with fixtures), the weather application's specification, and what a first real run needs
 - [CLAUDE.md](CLAUDE.md): rules for the AI development assistant used to build this project
 
 ## Acknowledgements

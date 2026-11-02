@@ -81,5 +81,6 @@ Checked on 2026-11-02 by automated tests, and visually with the installed Chrome
 
 **Not built**
 - Cloud deployment and a remote execution worker: see [DEPLOYMENT.md](DEPLOYMENT.md)
-- GitHub-assisted development and Google Drive-to-RAG development: in the product backlog ([PROGRESS.md](PROGRESS.md), "Product backlog")
+- GitHub-assisted development: discovery, evaluation and safe import are built and offline-tested with fixtures (Real-World Milestone 1, [MILESTONE_1_GITHUB.md](MILESTONE_1_GITHUB.md)); live GitHub access, and adapting and testing reused code, are not
+- Google Drive-to-RAG development: the next requested capability, in the product backlog ([PROGRESS.md](PROGRESS.md)); not started
 - n8n integration, stacks other than `python-cli`, and a corpus of real failure logs

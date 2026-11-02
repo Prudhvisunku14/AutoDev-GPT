@@ -8,6 +8,8 @@
 
 **Stage 4 (2026-11-02):** an offline competition demonstration of the whole workflow, independent acceptance verification, a three-configuration evaluation and a dashboard. Not validated with a real model or on real Docker in this stage. See "Stage 4" near the end of this file.
 
+**Real-World Milestone 1 (2026-11-02):** GitHub-assisted development: public repository discovery, evaluation and safe import, offline-tested with fixtures. No live GitHub request, real model or Docker run; the weather application was not generated. See [MILESTONE_1_GITHUB.md](MILESTONE_1_GITHUB.md).
+
 Phase 4 (OpenCode) in progress. The foundation, the contract checks, the verified binary and the precedence experiment are committed (2026-10-30).
 
 Phase 4D Round 1 (2026-10-31):
@@ -30,7 +32,7 @@ Phase 4D Round 3 (2026-10-31): the API filter and independent container terminat
 | 5 | Verification-guided development | 🟡 Tests in Docker judged against MUST criteria; Stage 4 adds a frozen, hidden evaluator suite with per-criterion evidence (offline-tested, replayed). No score | Docker for the acceptance run |
 | 6 | Failure classification and recovery | 🟡 Stage 3 implemented and tested offline (2026-11-02), not validated on real failures. Simulated recovery 59.8% against 66.3% for the bounded baseline (55.7% as deployed), at lower cost. Escalation off, repeat limit 2. No real-failure dataset | Docker for the deferred tests, then real failure data |
 | 7 | Adaptive tool selection | 🟡 Python-only Stage 2 built (2026-11-02): eligibility filter, utility ranking, verified history, fallback. One real provider, so no real comparison. Target not met in simulation, and the breaker is not built | Docker for the deferred tests |
-| 8 | GitHub, Google Drive and n8n integrations, with document retrieval | ⏳ Not started | Google OAuth client, GitHub PAT, n8n container (user) |
+| 8 | GitHub, Google Drive and n8n integrations, with document retrieval | 🟡 Milestone 1 (2026-11-02): public repository discovery, evaluation and safe import, multi-stack plans and framework recipes, offline-tested with fixtures; live GitHub not reached and recipes never executed. Google Drive and n8n not started | `codeload.github.com` in the egress allowlist, approvals, a read-only token or a lower search limit; Google OAuth client; n8n container |
 | 9 | React frontend | 🟡 Stage 4: a read-only dashboard in plain HTML and JavaScript at `/ui`, no packages. No React app | — |
 | 10 | Evaluation and competition demonstration | 🟡 Stage 4: offline demonstration (six scenarios) and a pre-registered simulated evaluation. No real model, no Docker in this stage | Docker and model approval for a real demonstration |
 
@@ -983,16 +985,28 @@ These figures describe a scenario mix in which the preferred tool is usually wro
 - Real AI not yet tested beyond one live GPT call (2026-10-29): a full real-GPT run, model-written code, the classifier on real failures.
 - Not built: cloud deployment and a remote worker ([DEPLOYMENT.md](DEPLOYMENT.md)), and the integrations below.
 
+### Real-World Milestone 1: GitHub-assisted development (2026-11-02)
+
+**Offline-tested with fixtures; live GitHub, real OpenCode generation and real Docker execution pending.** Details, blockers and the permissions a first real run needs: [MILESTONE_1_GITHUB.md](MILESTONE_1_GITHUB.md).
+
+**Built:** `app/repos/` (repository model, licence policy, evaluation and the reuse-or-build decision, `GitHubSource` and fixtures, the safe importer) and two approval-gated GPT tools, `search_repositories` and `import_repository`, in PLANNING. Delivery refuses reused code without its licence and `THIRD_PARTY_NOTICES.md`. The weather request's specification and frozen acceptance suite are in `app/demo/weather.py`.
+
+**Found offline, first pass:** the full weather request was refused at planning, because a plan named one stack and React and FastAPI are two; a back-end-only scope stopped at `generate_code`, because `python-fastapi` had no approved test command.
+
+**Readiness round (same day):** multi-stack plans (components with their own stacks and folders, tasks per component, dependencies across components, every requirement covered, one-stack plans unchanged); verification recipes for `python-fastapi` (pytest) and `react-vite` (Vitest) with fixed commands, checked folders, runtimes, dependency checks and parsers, **defined but never executed** because their runtime images are not built; a precise blocked status (`STOPPED_BY_POLICY`, `verification_unavailable`, each component and its reason) instead of writing code that cannot be verified; per-component repository search and import; and the GitHub client wired into `python -m app` behind `REPOSITORY_SOURCE=github`, off by default. A defect found by the rehearsal is fixed: criteria were checked against the main stack's test methods only. `python -m app.demo.fullstack` rehearses the full-stack request offline: 13 of 13 checks pass, and it ends blocked, with nothing generated.
+
+**Tests:** 97 new across the milestone; whole offline suite 3,385 passed, 17 skipped, 0 failed; the fence refused nothing. Live GitHub, real code generation, real Docker execution and the framework recipes remain unverified.
+
 ### Product backlog (requested 2026-11-02, not built)
 
-**A. GitHub-assisted development**
+**A. GitHub-assisted development** (discovery, evaluation and import built offline in Milestone 1; adapting and testing reused code waits on the blockers there)
 - Search public repositories for projects relevant to a requirement.
 - Evaluate their relevance and their licences, and propose only projects whose licence fits the intended use.
 - Clone approved projects, after the user approves each one, into isolated workspaces under the same jail and disposable-copy rules as generated code.
 - Adapt and test the existing code in the sandbox, with the same verification and acceptance suite as generated code.
 - Needs: GitHub access through the approval queue (SECURITY.md §10), egress allowlist entries, and Docker for the tests.
 
-**B. Google Drive-to-RAG development**
+**B. Google Drive-to-RAG development** (the next requested capability; not started)
 - User-authorised OAuth access (SECURITY.md §7).
 - Narrowly scoped permissions: only the folders or documents the user picks.
 - Ingestion of PDF, DOCX and Google Docs, parsed in the no-network document-parser container (SECURITY.md §8).

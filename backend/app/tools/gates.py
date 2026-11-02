@@ -8,9 +8,9 @@ savepoint (ToolExecutor.invoke): a rejected submission leaves no rows behind.
 from __future__ import annotations
 
 import json
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import Field, StringConstraints
+from pydantic import Field, StringConstraints, model_validator
 from sqlalchemy import select
 
 from app.db.models import AcceptanceCriterion, PlanTask, Requirement, RunState
@@ -53,19 +53,42 @@ class TaskFeatures(ToolArgs):
     size: Literal["small", "medium", "large"]
 
 
+ComponentName = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_-]{0,31}$")]
+
+
+class ComponentItem(ToolArgs):
+    name: ComponentName = Field(description="A short name, e.g. frontend or backend")
+    stack: StackId = Field(description="An id from the stack catalog")
+    path: ComponentName = Field(description="The component's folder in the project, one level deep")
+
+
 class PlanTaskItem(ToolArgs):
     title: ShortText
     description: LongText
     capability: Literal["code_generation", "test_generation", "documentation"]
     requirement_refs: list[RequirementCode] = Field(min_length=1, description="Requirements this task implements")
     features: TaskFeatures
+    component: ComponentName | None = Field(description="The component this task belongs to; null when the plan has no components")
+    depends_on: list[Annotated[int, Field(ge=1, le=MAX_TASKS)]] = Field(max_length=MAX_TASKS, description="Numbers of the tasks that must be done first, in any component")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _single_stack_defaults(cls, data: Any) -> Any:
+        """A plan written before components existed omits these: it means no component and no dependency."""
+        return {"component": None, "depends_on": [], **data} if isinstance(data, dict) else data
 
 
 class SubmitPlanArgs(ToolArgs):
-    stack: StackId = Field(description="An id from the stack catalog")
+    stack: StackId = Field(description="An id from the stack catalog; with components, the main component's stack")
     stack_rationale: Text
     summary: LongText
     tasks: list[PlanTaskItem] = Field(min_length=1, max_length=MAX_TASKS)
+    components: list[ComponentItem] | None = Field(max_length=8, description="The project's parts, each with its own stack and folder; null for a one-stack project")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _one_stack_default(cls, data: Any) -> Any:
+        return {"components": None, **data} if isinstance(data, dict) else data
 
 
 class CriterionItem(ToolArgs):
@@ -127,6 +150,19 @@ def submit_plan(ctx: ToolContext, args: SubmitPlanArgs) -> dict[str, object]:
     if stack is None:
         problems.append(f"unknown stack {args.stack!r}; choose one of: {', '.join(ctx.catalog.ids)}")
 
+    components = {c.name: c for c in args.components or []}
+    component_stacks = {}
+    if args.components:
+        for label, values in (("names", [c.name for c in args.components]), ("folders", [c.path for c in args.components])):
+            if len(set(values)) != len(values):
+                problems.append(f"component {label} must be unique")
+        for c in args.components:
+            component_stacks[c.name] = ctx.catalog.get(c.stack)
+            if component_stacks[c.name] is None:
+                problems.append(f"component {c.name}: unknown stack {c.stack!r}; choose one of: {', '.join(ctx.catalog.ids)}")
+        if args.stack not in {c.stack for c in args.components}:
+            problems.append(f"stack {args.stack!r} must be the stack of one of the components")
+
     titles: dict[str, int] = {}
     covered: set[str] = set()
     for i, task in enumerate(args.tasks, start=1):
@@ -138,8 +174,26 @@ def submit_plan(ctx: ToolContext, args: SubmitPlanArgs) -> dict[str, object]:
         if unknown:
             problems.append(f"task {i} references unknown requirements: {', '.join(unknown)}")
         covered.update(task.requirement_refs)
-        if stack is not None and task.features.language.casefold() != stack.language.casefold():
-            problems.append(f"task {i} language {task.features.language!r} does not match stack language {stack.language!r}")
+        task_stack = stack
+        if args.components:
+            if task.component not in components:
+                problems.append(f"task {i} must name one of the components: {', '.join(components)}")
+                task_stack = None
+            else:
+                task_stack = component_stacks.get(task.component)
+        elif task.component is not None:
+            problems.append(f"task {i} names component {task.component!r}, but the plan has no components")
+        if task_stack is not None and task.features.language.casefold() != task_stack.language.casefold():
+            problems.append(f"task {i} language {task.features.language!r} does not match its stack's language {task_stack.language!r}")
+        for dependency in task.depends_on:
+            if dependency == i or dependency > len(args.tasks):
+                problems.append(f"task {i} cannot depend on task {dependency}")
+    cycle = _dependency_cycle({i: t.depends_on for i, t in enumerate(args.tasks, start=1)})
+    if cycle:
+        problems.append(f"task dependencies form a cycle: {' -> '.join(map(str, cycle))}")
+    unused = sorted(set(components) - {t.component for t in args.tasks})
+    if unused:
+        problems.append(f"components without any task: {', '.join(unused)}")
     uncovered = sorted(known - covered)
     if uncovered:
         problems.append(f"requirements not covered by any task: {', '.join(uncovered)}")
@@ -158,9 +212,12 @@ def submit_plan(ctx: ToolContext, args: SubmitPlanArgs) -> dict[str, object]:
                 capability=task.capability,
                 features_json=task.features.model_dump_json(),
                 requirement_refs_json=json.dumps(task.requirement_refs),
+                component=task.component,
+                depends_on_json=json.dumps(sorted(set(task.depends_on))),
             )
         )
-    ctx.run.plan_json = json.dumps({"stack": stack.id, "stack_rationale": args.stack_rationale, "summary": args.summary})
+    ctx.run.plan_json = json.dumps({"stack": stack.id, "stack_rationale": args.stack_rationale, "summary": args.summary,
+                                    "components": [c.model_dump() for c in args.components or []]})  # fmt: skip
     ctx.project.stack = stack.id
     ctx.events.record(
         ctx.session,
@@ -186,6 +243,9 @@ def submit_criteria(ctx: ToolContext, args: SubmitCriteriaArgs) -> dict[str, obj
     if stack is None:
         problems.append("the project has no valid stack; the plan must be accepted first")
     allowed_methods = set(stack.test_methods) if stack else set()
+    for component in json.loads(ctx.run.plan_json or "{}").get("components") or []:  # each component's stack brings its own methods
+        component_stack = ctx.catalog.get(component["stack"])
+        allowed_methods |= set(component_stack.test_methods) if component_stack else set()
 
     codes = [c.code for c in args.criteria]
     expected = [f"AC-{i:03d}" for i in range(1, len(codes) + 1)]
@@ -201,7 +261,7 @@ def submit_criteria(ctx: ToolContext, args: SubmitCriteriaArgs) -> dict[str, obj
             problems.append(f"{c.code} is MUST but uses the manual method; MUST criteria need an automated method")
         if c.method != "manual" and stack is not None and c.method not in allowed_methods:
             problems.append(
-                f"{c.code} uses method {c.method!r}, which stack {stack.id} does not support "
+                f"{c.code} uses method {c.method!r}, which the plan's stack {stack.id} does not support "
                 f"(allowed: {', '.join(sorted(allowed_methods))}, manual)"
             )
     missing = sorted(known - referenced)
@@ -285,6 +345,30 @@ def register_phase2_tools(registry: ToolRegistry) -> None:
 
 def _requirement_codes(ctx: ToolContext) -> list[str]:
     return list(ctx.session.scalars(select(Requirement.code).where(Requirement.run_id == ctx.run.id)))
+
+
+def _dependency_cycle(depends_on: dict[int, list[int]]) -> list[int]:
+    """One cycle among the task dependencies, as a path, or [] when there is none."""
+    state: dict[int, int] = {}  # 1: being visited, 2: done
+
+    def visit(task: int, path: list[int]) -> list[int]:
+        state[task] = 1
+        for dependency in depends_on.get(task, []):
+            if state.get(dependency) == 1:
+                return [*path[path.index(dependency):], dependency] if dependency in path else [task, dependency]
+            if dependency in depends_on and state.get(dependency) is None:
+                found = visit(dependency, [*path, dependency])
+                if found:
+                    return found
+        state[task] = 2
+        return []
+
+    for task in sorted(depends_on):
+        if state.get(task) is None:
+            found = visit(task, [task])
+            if found:
+                return found
+    return []
 
 
 def _reject_if(problems: list[str], tool: str) -> None:

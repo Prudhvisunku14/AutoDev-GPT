@@ -147,6 +147,14 @@ class Settings(BaseSettings):
     # OPENCODE_TIMEOUT_SECONDS, so no attempt is given longer until this is raised on purpose.
     recovery_max_attempt_timeout_seconds: float | None = Field(default=None, gt=0, le=3600)
 
+    # --- Public repository reuse (app/repos/) ------------------------------
+    # Every search and import also needs a person's approval and the egress allowlist's `github` entries.
+    repository_source: Literal["off", "github"] = "off"  # github: the GitHub client, public data only, no token
+    repository_search_limit: int = Field(default=8, ge=1, le=20)
+    repository_reuse_threshold: float = Field(default=0.55, ge=0, le=1)  # the least score a repository needs to be started from
+    repository_max_archive_mb: float = Field(default=20.0, gt=0, le=200)
+    repository_max_files: int = Field(default=2_000, ge=1, le=20_000)
+
     # --- Credentials used by later phases ---------------------------------
     # Declared here only so the redactor knows their values. Phase 1 never uses them.
     openai_api_key: SecretStr | None = None

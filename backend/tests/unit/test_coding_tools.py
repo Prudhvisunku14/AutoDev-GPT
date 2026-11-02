@@ -274,9 +274,10 @@ def test_finish_exists_only_after_verification(tmp_path: Path) -> None:
 def test_a_stack_nothing_can_verify_is_refused_before_any_code(tmp_path: Path) -> None:
     plan = {**mvp._CALCULATOR_PLAN, "stack": "python-fastapi"}
     rig = Rig(tmp_path, call("submit_analysis", mvp._CALCULATOR_ANALYSIS), call("submit_plan", plan), call("submit_criteria", mvp._CALCULATOR_CRITERIA), generate(1), coding=[GOOD])
-    rig.advance()
+    run = rig.advance()
     output = rig.output("generate_code")
-    assert output["error"]["class"] == "POLICY_REFUSED" and "cannot be verified" in output["error"]["summary"] and rig.attempts() == []
+    assert output["error"]["class"] == "POLICY_REFUSED" and "verification is blocked, so no code is written" in output["error"]["summary"] and rig.attempts() == []
+    assert run.state is RunState.STOPPED_BY_POLICY and run.outcome == "verification_unavailable"  # a precise end, not a run left waiting
 
 
 def test_a_project_that_could_configure_the_engine_is_refused(tmp_path: Path) -> None:

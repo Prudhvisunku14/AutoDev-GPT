@@ -27,11 +27,13 @@ from app.orchestrator.llm_client import LLMClient, OpenAIResponsesClient, llm_co
 from app.orchestrator.loop import Orchestrator
 from app.orchestrator.run_manager import RunManager
 from app.orchestrator.state_machine import FULL_RUN_STATES, ORCHESTRATED_STATES
+from app.repos.source import RepositorySource
 from app.sandbox.docker_cli import SandboxError
 from app.sandbox.runner import SandboxRunner
 from app.selection.selector import Selector
 from app.stacks.catalog import StackCatalog
 from app.tools.adapters.coding import CodingRuntime, recover_attempts, register_coding_tools
+from app.tools.adapters.repositories import RepositoryRuntime, register_repository_tools
 from app.tools.adapters.sandbox import register_sandbox_tools
 from app.tools.adapters.workspace_fs import WorkspaceFS
 from app.tools.executor import ToolExecutor
@@ -51,12 +53,14 @@ def create_app(
     llm: LLMClient | None = None,
     sandbox: SandboxRunner | None = None,
     coding: Selector | None = None,
+    repositories: RepositorySource | None = None,
 ) -> FastAPI:
     """Build the app. `llm` replaces the OpenAI client (tests and the offline demo use FakeLLM).
 
     `sandbox` enables the Docker sandbox tool. Without it no container is ever started, so
     tests never touch Docker. `coding`, which needs a sandbox, chooses who writes the code and lets
-    GPT drive a run to the end. Without it a run pauses at IMPLEMENTING.
+    GPT drive a run to the end. Without it a run pauses at IMPLEMENTING. `repositories` enables the
+    approval-gated search and import of public code in PLANNING (fixtures offline; GitHub once approved).
     """
     settings = settings or get_settings()
     redactor = Redactor(settings.secret_values())
@@ -88,6 +92,8 @@ def create_app(
         candidates = WorkspaceFS(settings.coding_work_dir, max_file_bytes=settings.workspace_max_file_bytes, max_files=settings.workspace_max_files)
         runtime = CodingRuntime(selector=coding, store=SqlAttemptStore(session_factory, redactor), candidates=CandidateWorkspaces(candidates), sandbox=sandbox, gpt_label=gpt_label)
         register_coding_tools(registry, runtime)
+    if repositories is not None:
+        register_repository_tools(registry, RepositoryRuntime(repositories))
     executor = ToolExecutor(registry, PolicyEngine(), redactor, max_output_chars=settings.tool_output_max_chars)
     llm_provider, llm_problem = _llm_wiring(settings, egress, llm)
     orchestrator = Orchestrator(
