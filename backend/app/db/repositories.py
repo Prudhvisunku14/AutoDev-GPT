@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -9,10 +11,10 @@ from app.db.models import TERMINAL_RUN_STATES, Project, Run, RunState, utcnow
 
 
 def create_project(
-    session: Session, *, project_id: str, name: str, requirement_text: str, workspace_path: str
+    session: Session, *, project_id: str, name: str, requirement_text: str, workspace_path: str, acceptance_json: str | None = None
 ) -> Project:
     project = Project(
-        id=project_id, name=name, requirement_text=requirement_text, workspace_path=workspace_path
+        id=project_id, name=name, requirement_text=requirement_text, workspace_path=workspace_path, acceptance_json=acceptance_json
     )
     session.add(project)
     session.flush()
@@ -43,7 +45,11 @@ def list_runs(session: Session, project_id: str) -> list[Run]:
 
 
 def create_run(session: Session, project: Project) -> Run:
+    """The project's acceptance suite is copied with its hash: what this run is judged by is fixed from here."""
     run = Run(project_id=project.id, state=RunState.CREATED)
+    if project.acceptance_json is not None:
+        run.acceptance_suite_json = project.acceptance_json
+        run.acceptance_sha256 = hashlib.sha256(project.acceptance_json.encode("utf-8")).hexdigest()
     session.add(run)
     session.flush()
     return run

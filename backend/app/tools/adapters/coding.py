@@ -51,10 +51,11 @@ from app.sandbox.spec import ExecResult, ExecSpec, ExecStatus
 from app.selection.history import attempt_seconds, evidence_of, failed_in_run, failed_tools, last_attempt, load_history, record_attempt, repair_record, settle_verification
 from app.selection.model import BUILD, REPAIR, SelectionContext, task_category
 from app.selection.selector import NoProvider, Selector
-from app.tools.adapters.workspace_fs import WorkspaceError
+from app.tools.adapters.workspace_fs import WorkspaceError, WorkspaceFS
 from app.tools.base import ErrorClass, ExternalStep, RecoveryInfo, RiskLevel, ToolArgs, ToolContext, ToolError, ToolSpec
 from app.tools.gates import MAX_TASKS
 from app.tools.registry import ToolRegistry
+from app.verification import acceptance
 from app.verification.report import build_report
 from app.verification.results import Criterion, Verdict, VerificationResult, failure_kind, judge
 
@@ -445,11 +446,25 @@ def _no_tool_left(runtime: CodingRuntime, ctx: ToolContext, task_order: int, ref
 
 
 @dataclass(frozen=True)
+class _AcceptancePlan:
+    spec: ExecSpec
+    suite: acceptance.AcceptanceSuite
+    sha256: str
+
+
+@dataclass(frozen=True)
 class _VerifyPlan:
     sandbox: SandboxRunner
     spec: ExecSpec
     criteria: tuple[Criterion, ...]
     digest: str
+    independent: _AcceptancePlan | None = None  # the evaluator's frozen suite, when the project has one
+
+
+@dataclass(frozen=True)
+class _Verified:
+    tests: ExecResult  # the project's own tests, written by the coding provider
+    independent: ExecResult | None  # the frozen acceptance suite; None when it did not run
 
 
 def _begin_submit(runtime: CodingRuntime, ctx: ToolContext, args: SubmitImplementationArgs) -> _VerifyPlan:
@@ -468,23 +483,60 @@ def _begin_submit(runtime: CodingRuntime, ctx: ToolContext, args: SubmitImplemen
     except SandboxPolicyError as exc:
         raise ToolError(ErrorClass.TOOL_ERROR, str(exc)) from exc
     criteria = tuple(Criterion(c.code, c.priority) for c in ctx.session.scalars(select(AcceptanceCriterion).where(AcceptanceCriterion.run_id == run.id).order_by(AcceptanceCriterion.code)))
+    independent = _plan_acceptance(runtime, ctx, stack.test_command)
     if run.state is not RunState.VERIFYING:
         _change_state(ctx, RunState.VERIFYING, "submit_implementation accepted")
-    _record(ctx, "verification.started", {"command": spec.command, "image": spec.image, "container": spec.container_name, "repairs_so_far": run.repairs, "summary": args.summary})
-    return _VerifyPlan(runtime.sandbox, spec, criteria, runtime.candidates.digest(run.id))
+    _record(ctx, "verification.started", {"command": spec.command, "image": spec.image, "container": spec.container_name, "repairs_so_far": run.repairs, "summary": args.summary,
+                                          "independent_acceptance": independent is not None})  # fmt: skip
+    return _VerifyPlan(runtime.sandbox, spec, criteria, runtime.candidates.digest(run.id), independent)
 
 
-def _run_verification(plan: _VerifyPlan, cancel: threading.Event | None, progress: Progress) -> ExecResult:
+def _acceptance_fs(settings: Settings) -> WorkspaceFS:
+    return WorkspaceFS(settings.coding_work_dir / "acceptance", max_file_bytes=settings.workspace_max_file_bytes, max_files=settings.workspace_max_files)
+
+
+def _plan_acceptance(runtime: CodingRuntime, ctx: ToolContext, command: str) -> _AcceptancePlan | None:
+    """The frozen suite, staged with the candidate's files but not its tests. A changed copy ends the run."""
+    run = ctx.run
+    if run.acceptance_suite_json is None or run.acceptance_sha256 is None:
+        return None
     try:
-        return plan.sandbox.run(plan.spec, cancel=cancel)
+        suite = acceptance.thaw(run.acceptance_suite_json, run.acceptance_sha256)
+    except acceptance.SuiteError as exc:
+        why = str(exc)
+        raise ToolError(ErrorClass.POLICY_REFUSED, why, after_rollback=partial(_end_failed, runtime, ctx, outcome="acceptance_suite_changed", detail=why, keep_copy=True)) from exc
+    fs = _acceptance_fs(ctx.settings)
+    try:
+        acceptance.stage(fs, run.id, acceptance.evaluation_files(acceptance.read_tree(runtime.candidates.path(run.id)), suite))
+        spec = build_spec(command, None, workspace=fs, project_id=run.id, settings=ctx.settings)
+    except (WorkspaceError, SandboxPolicyError) as exc:
+        acceptance.discard(fs, run.id)
+        raise ToolError(ErrorClass.TOOL_ERROR, f"the acceptance run could not be prepared: {exc}") from exc
+    return _AcceptancePlan(spec, suite, run.acceptance_sha256)
+
+
+def _run_verification(plan: _VerifyPlan, cancel: threading.Event | None, progress: Progress) -> _Verified:
+    tests = _in_sandbox(plan.sandbox, plan.spec, cancel)
+    independent = None
+    if plan.independent is not None and tests.status is ExecStatus.SUCCEEDED:  # the evaluator's tests judge only code whose own tests passed
+        independent = _in_sandbox(plan.sandbox, plan.independent.spec, cancel)
+    return _Verified(tests, independent)
+
+
+def _in_sandbox(sandbox: SandboxRunner, spec: ExecSpec, cancel: threading.Event | None) -> ExecResult:
+    try:
+        return sandbox.run(spec, cancel=cancel)
     except SandboxUnavailable as exc:
-        return ExecResult.unavailable(plan.spec, str(exc))
+        return ExecResult.unavailable(spec, str(exc))
     except SandboxError as exc:
         raise ToolError(ErrorClass.TOOL_ERROR, str(exc)) from exc
 
 
-def _finish_submit(runtime: CodingRuntime, ctx: ToolContext, plan: _VerifyPlan, result: ExecResult) -> dict[str, object]:
+def _finish_submit(runtime: CodingRuntime, ctx: ToolContext, plan: _VerifyPlan, verified: _Verified) -> dict[str, object]:
     run = ctx.run
+    result = verified.tests
+    if plan.independent is not None:
+        acceptance.discard(_acceptance_fs(ctx.settings), run.id)
     verification = replace(judge(result, plan.criteria), fingerprint=plan.digest)
     run.verification_json = json.dumps(verification.to_dict())
     for row in ctx.session.scalars(select(AcceptanceCriterion).where(AcceptanceCriterion.run_id == run.id)):
@@ -499,6 +551,8 @@ def _finish_submit(runtime: CodingRuntime, ctx: ToolContext, plan: _VerifyPlan, 
     if result.status is ExecStatus.CANCELLED:  # the backend stopped: the run stays in VERIFYING and can test again
         data["next_state"] = RunState.VERIFYING.value
         return data
+    if verification.verdict is Verdict.PASSED and plan.independent is not None:
+        verification = _judge_independent(ctx, plan, verified, verification, data)
     if verification.verdict is Verdict.PASSED:
         _learn(ctx, passed=True)
         _change_state(ctx, RunState.DOCUMENTING, "verification passed")
@@ -518,6 +572,23 @@ def _finish_submit(runtime: CodingRuntime, ctx: ToolContext, plan: _VerifyPlan, 
     else:
         _end_failed(runtime, ctx, outcome="verification_failed", detail=f"{verification.reason}; {decision.reason}", keep_copy=decision.category == FailureCategory.AMBIGUOUS_STATE)
     return data
+
+
+def _judge_independent(ctx: ToolContext, plan: _VerifyPlan, verified: _Verified, verification: VerificationResult, data: dict[str, object]) -> VerificationResult:
+    """The provider's tests passed; now the evaluator's. If they fail, recovery and GPT see the unmet criteria only."""
+    independent = plan.independent
+    assert independent is not None
+    outcome = verified.independent or ExecResult.unavailable(independent.spec, "the acceptance suite did not run")
+    judged = acceptance.judge_acceptance(outcome, independent.suite, independent.sha256)
+    ctx.run.acceptance_json = json.dumps(judged.to_dict())
+    _record(ctx, "acceptance.finished", {k: v for k, v in judged.to_dict().items() if k != "output_tail"})
+    data["acceptance"] = judged.for_gpt()
+    if judged.verdict == acceptance.PASSED:
+        return verification
+    failed = acceptance.for_recovery(judged, plan.digest)
+    ctx.run.verification_json = json.dumps(failed.to_dict())
+    data.update(verdict=failed.verdict.value, reason=failed.reason, output_tail="")
+    return failed
 
 
 def _learn(ctx: ToolContext, *, passed: bool, failure: str | None = None) -> None:

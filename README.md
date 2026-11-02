@@ -135,11 +135,25 @@ Live smoke test, which asks one question: can GPT submit a structured analysis? 
 
 Docker and WSL2 setup for Phase 3: [docs/SETUP_WINDOWS.md](docs/SETUP_WINDOWS.md).
 
+### Competition demonstration (offline, free)
+
+Six scenarios through the real API, selection, verification, independent acceptance and recovery. GPT, the coding providers and test execution are simulated and labelled as such; no model, key, Docker or network is used. Test results in it are replayed recordings of exact files, not Docker runs.
+
+What is offline-tested, what is scripted or replayed, what was verified on real Docker before Stages 2 to 4, what still awaits Docker or a real model, and what is not built: [docs/COMPETITION.md](docs/COMPETITION.md). Planned integrations (GitHub-assisted development, Google Drive-to-RAG): the product backlog in [docs/PROGRESS.md](docs/PROGRESS.md).
+
+```powershell
+cd backend
+& $env:DEVPILOT_PYTHON -m app.demo.competition            # reports in data\competition-demo
+& $env:DEVPILOT_PYTHON -m app.demo.competition --serve    # then a local read-only dashboard at /ui
+```
+
 ## Documentation
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): system design, orchestration protocol, algorithms, data model and APIs
 - [docs/SECURITY.md](docs/SECURITY.md): threat model, sandboxing and approval policy
 - [docs/PROGRESS.md](docs/PROGRESS.md): phase tracker, acceptance criteria and phase log
+- [docs/COMPETITION.md](docs/COMPETITION.md): the offline demonstration, what is real and what is simulated, and feature status
+- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): the four ways to run DevPilot and the proposed cloud architecture (not deployed)
 - [CLAUDE.md](CLAUDE.md): rules for the AI development assistant used to build this project
 
 ## Acknowledgements

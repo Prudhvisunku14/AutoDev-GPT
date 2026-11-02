@@ -1,0 +1,54 @@
+{
+  "how": "The approved python-unittest command, run with the host's Python over repository fixtures. Not a Docker run.",
+  "python": "3.12.9",
+  "recordings": [
+    {
+      "name": "calculator: the provider's tests",
+      "key": "771c336423b00be5a89c9b91a69bfb7fb7da0405bafcd1da3ac16c12c8338db5",
+      "status": "SUCCEEDED",
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "test_ac_001_addition (test_calculator.CalculatorTests.test_ac_001_addition) ... ok\ntest_ac_002_subtraction (test_calculator.CalculatorTests.test_ac_002_subtraction) ... ok\ntest_ac_003_multiplication (test_calculator.CalculatorTests.test_ac_003_multiplication) ... ok\ntest_ac_004_division (test_calculator.CalculatorTests.test_ac_004_division) ... ok\ntest_ac_005_division_by_zero (test_calculator.CalculatorTests.test_ac_005_division_by_zero) ... ok\n\n----------------------------------------------------------------------\nRan 5 tests in 0.000s\n\nOK\n"
+    },
+    {
+      "name": "calculator: the evaluator's acceptance suite",
+      "key": "5d36197919104ebe81ad54e046c29714efdb09d6af07355aa0999d470ba695d0",
+      "status": "SUCCEEDED",
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "test_at_001_adds_two_numbers (test_acceptance.CalculatorAcceptance.test_at_001_adds_two_numbers) ... ok\ntest_at_002_subtracts_the_second_from_the_first (test_acceptance.CalculatorAcceptance.test_at_002_subtracts_the_second_from_the_first) ... ok\ntest_at_003_multiplies_two_numbers (test_acceptance.CalculatorAcceptance.test_at_003_multiplies_two_numbers) ... ok\ntest_at_004_divides_two_numbers (test_acceptance.CalculatorAcceptance.test_at_004_divides_two_numbers) ... ok\ntest_at_005_division_by_zero_is_an_error (test_acceptance.CalculatorAcceptance.test_at_005_division_by_zero_is_an_error) ... ok\n\n----------------------------------------------------------------------\nRan 5 tests in 0.000s\n\nOK\n"
+    },
+    {
+      "name": "subtract bug: the provider's tests",
+      "key": "7f8a95b16b059fff7debd7ea201b6a345613e33f9c05b11322d93afda57588cf",
+      "status": "FAILED",
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "test_ac_001_addition (test_calculator.CalculatorTests.test_ac_001_addition) ... ok\ntest_ac_002_subtraction (test_calculator.CalculatorTests.test_ac_002_subtraction) ... FAIL\ntest_ac_003_multiplication (test_calculator.CalculatorTests.test_ac_003_multiplication) ... ok\ntest_ac_004_division (test_calculator.CalculatorTests.test_ac_004_division) ... ok\ntest_ac_005_division_by_zero (test_calculator.CalculatorTests.test_ac_005_division_by_zero) ... ok\n\n======================================================================\nFAIL: test_ac_002_subtraction (test_calculator.CalculatorTests.test_ac_002_subtraction)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/workspace/test_calculator.py\", line 11, in test_ac_002_subtraction\n    self.assertEqual(subtract(5, 2), 3)\nAssertionError: -3 != 3\n\n----------------------------------------------------------------------\nRan 5 tests in 0.001s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "name": "lenient division: the provider's tests",
+      "key": "9ece2e4d305166802f5d59b4222c79eefaa11da880710ea5b84006bf5ccb88d6",
+      "status": "SUCCEEDED",
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": "test_ac_001_addition (test_calculator.CalculatorTests.test_ac_001_addition) ... ok\ntest_ac_002_subtraction (test_calculator.CalculatorTests.test_ac_002_subtraction) ... ok\ntest_ac_003_multiplication (test_calculator.CalculatorTests.test_ac_003_multiplication) ... ok\ntest_ac_004_division (test_calculator.CalculatorTests.test_ac_004_division) ... ok\ntest_ac_005_division_by_zero (test_calculator.CalculatorTests.test_ac_005_division_by_zero) ... ok\n\n----------------------------------------------------------------------\nRan 5 tests in 0.000s\n\nOK\n"
+    },
+    {
+      "name": "lenient division: the evaluator's acceptance suite",
+      "key": "c3309ec07b3e25e0faaede2ad2dab2c9db6cb8e701f45fbbb9e7b8bbf81211af",
+      "status": "FAILED",
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "test_at_001_adds_two_numbers (test_acceptance.CalculatorAcceptance.test_at_001_adds_two_numbers) ... ok\ntest_at_002_subtracts_the_second_from_the_first (test_acceptance.CalculatorAcceptance.test_at_002_subtracts_the_second_from_the_first) ... ok\ntest_at_003_multiplies_two_numbers (test_acceptance.CalculatorAcceptance.test_at_003_multiplies_two_numbers) ... ok\ntest_at_004_divides_two_numbers (test_acceptance.CalculatorAcceptance.test_at_004_divides_two_numbers) ... ok\ntest_at_005_division_by_zero_is_an_error (test_acceptance.CalculatorAcceptance.test_at_005_division_by_zero_is_an_error) ... FAIL\n\n======================================================================\nFAIL: test_at_005_division_by_zero_is_an_error (test_acceptance.CalculatorAcceptance.test_at_005_division_by_zero_is_an_error)\n----------------------------------------------------------------------\nTraceback (most recent call last):\n  File \"/workspace/test_acceptance.py\", line 22, in test_at_005_division_by_zero_is_an_error\n    with self.assertRaises(ZeroDivisionError):\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: ZeroDivisionError not raised\n\n----------------------------------------------------------------------\nRan 5 tests in 0.001s\n\nFAILED (failures=1)\n"
+    },
+    {
+      "name": "syntax error: the provider's tests",
+      "key": "66587147d4636bf071051aecb895231e1e686d80bc7a4125233c4945766172fd",
+      "status": "FAILED",
+      "exit_code": 1,
+      "stdout": "",
+      "stderr": "test_calculator (unittest.loader._FailedTest.test_calculator) ... ERROR\n\n======================================================================\nERROR: test_calculator (unittest.loader._FailedTest.test_calculator)\n----------------------------------------------------------------------\nImportError: Failed to import test module: test_calculator\nTraceback (most recent call last):\n  File \"D:\\Lib\\unittest\\loader.py\", line 396, in _find_test_path\n    module = self._get_module_from_name(name)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"D:\\Lib\\unittest\\loader.py\", line 339, in _get_module_from_name\n    __import__(name)\n  File \"/workspace/test_calculator.py\", line 3, in <module>\n    from calculator import add, divide, multiply, subtract\n  File \"/workspace/calculator.py\", line 8\n    def subtract(a, b)\n                      ^\nSyntaxError: expected ':'\n\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nFAILED (errors=1)\n"
+    }
+  ]
+}

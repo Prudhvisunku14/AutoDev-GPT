@@ -1407,3 +1407,93 @@ Whole offline suite: 3,206 passed, 17 skipped (16 opt-in Docker, 1 live), 0 fail
 - A real-container pass of `generate_code` through RETRY, where a confirmed stop is real.
 - A real unconfirmed stop and a real test container that cannot be removed, ending in AMBIGUOUS_STATE.
 - The classifier on real sandbox output, and real `recovers_from` rows, which need a real model.
+
+# Stage 4: final integration and competition demonstration (2026-11-02)
+
+**A working offline demonstration of the whole workflow. Not validated with a real model or on real Docker in this stage.** No Docker ran, no model was called, no key was loaded and the real `.env` was not read.
+
+## Integration audit
+
+The path REST API > orchestrator > selector > coding provider > verification > recovery > history > delivery > report was read in the code and exercised end to end. No defect was found in it. Production builds its selector through `build_selector`, so `SELECTION_POLICY` and `RECOVERY_POLICY` reach every run. Four parts were missing, and were added: independent acceptance, an offline sandbox, a dashboard and an end-to-end evaluation. The old `app.demo.mvp` still uses the Stage 1 selector and needs Docker; the new demonstration uses `build_selector`.
+
+## Independent acceptance
+
+`app/verification/acceptance.py`. Tests written by the coding provider can only show that the code does what that provider meant.
+
+- **Defined first.** The evaluator gives the suite with the project (`POST /projects`, field `acceptance`): criteria AT-001, ... and unittest files whose test names carry the codes. It is checked by parsing, never executed by the API, and cannot be changed later.
+- **Frozen.** Each run gets a copy and its SHA-256 when it is created. A copy that no longer matches stops the run with `acceptance_suite_changed`, keeping the copy for review.
+- **Hidden.** It is not in any workspace, brief or tool result. GPT learns which criteria failed and what they say, never the tests or their output. Tests check this on the briefs, the files the provider could see, and every tool output.
+- **Separate.** It runs in the sandbox after the provider's tests pass, in its own folder: the candidate without its `test*.py` files, then the evaluator's files on top.
+- **Evidence.** Per criterion: PASSED, FAILED or UNVERIFIED, the tests, and the runner's own words for a failure. PASSED needs every MUST criterion. Partial completion is reported (for example 4 of 5).
+- **Consequences.** A failure blocks delivery and goes to recovery as a TEST_FAILURE whose fingerprint is the unmet criteria. The selector's history learns from the independent verdict.
+
+## Offline execution
+
+`app/sandbox/replay.py`. `ReplaySandbox` starts no process. It answers only when the command and every file byte match a recording, so a verdict belongs to the files really produced. Anything else, including anything a real model writes, gets "needs the Docker sandbox". The six recordings (`app/demo/recordings.json`) come from `python -m app.demo.record`, which runs the sandbox's unittest command on repository fixtures only, and a unit test re-derives each one on every run. Reports name it: "test execution (replayed from recorded runs, not Docker)".
+
+## Competition demonstration
+
+`python -m app.demo.competition` runs six scenarios through the real REST API in about 10 seconds, with structured reports. See [COMPETITION.md](COMPETITION.md).
+
+## Evaluation of three configurations (simulated)
+
+`python -m app.demo.evaluation`. Each episode is a real backend run: REST API, orchestrator, database, the selector and recovery policy that the settings name, the audit, verification, the frozen acceptance suite and the history the selector learns from. **Simulated:** GPT is a stand-in that follows DevPilot's own decisions; the tools are hypothetical, with outcomes drawn from a fixed distribution; test execution is replayed.
+
+**Pre-registered** before the first run (SHA-256 `c8eebcd833e542e920bc0fe913211f0f56e75976330829c7c0df36ac6eb5fe8d`): ten situations, five where the fixed order is already right; a failure mix of test failures 45%, syntax errors 20%, transient failures 25% and unsafe changes 10%; two episodes per situation per seed; development seeds 0 to 4 and held-out seeds 100 to 104; the metrics and the rules for judging a decision. Settings are the deployed defaults: repeat limit 2, timeout escalation off, budgets unchanged. The development split ran first, then the held-out split, with no change to any policy or to the evaluation file in between (its SHA-256 is the same in both results). A success on a tool the policy forbids does not count as a completion.
+
+**Held-out seeds** (100 episodes per configuration):
+
+| Metric | A: fixed + bounded | B: adaptive + bounded | C: adaptive + intelligent (deployed) |
+|---|---|---|---|
+| Verified completion | 45.0% | 75.0% | 72.0% |
+| Seed range | 40.0% to 50.0% | 70.0% to 80.0% | 65.0% to 80.0% |
+| Recovery success | 69.6% of 23 | 83.3% of 24 | 70.8% of 24 |
+| Incorrect recovery decisions | 26 of 75 (34.7%) | 22 of 69 (31.9%) | 24 of 73 (32.9%) |
+| Attempts per episode | 1.60 | 1.44 | 1.35 |
+| Simulated time per episode | 124 s | 114 s | 107 s |
+| Simulated cost per episode | $0.550 | $0.144 | $0.135 |
+| Policy violations | 42 | 0 | 0 |
+| Safe termination | 60.0% | 100.0% | 100.0% |
+| Raw completion, forbidden tools included | 75.0% | 75.0% | 72.0% |
+
+**Development seeds**, for comparison: verified completion 43.0%, 76.0% and 74.0%; incorrect decisions 37.0%, 29.7% and 29.6%; violations 46, 0 and 0.
+
+Per situation, held-out (completion, and its range over seeds):
+
+| Situation | A | B | C |
+|---|---|---|---|
+| nothing can succeed | 0.0% (0.0% to 0.0%) | 0.0% (0.0% to 0.0%) | 0.0% (0.0% to 0.0%) |
+| preferred tool needs a missing credential | 0.0% (0.0% to 0.0%) | 90.0% (50.0% to 100.0%) | 90.0% (50.0% to 100.0%) |
+| preferred tool is weaker | 80.0% (0.0% to 100.0%) | 100.0% (100.0% to 100.0%) | 100.0% (100.0% to 100.0%) |
+| preference already best | 100.0% (100.0% to 100.0%) | 100.0% (100.0% to 100.0%) | 100.0% (100.0% to 100.0%) |
+| preferred tool over budget | 0.0% (0.0% to 0.0%) | 90.0% (50.0% to 100.0%) | 90.0% (50.0% to 100.0%) |
+| preferred tool would run on the host | 0.0% (0.0% to 0.0%) | 100.0% (100.0% to 100.0%) | 100.0% (100.0% to 100.0%) |
+| transient failures | 70.0% (50.0% to 100.0%) | 70.0% (50.0% to 100.0%) | 40.0% (0.0% to 100.0%) |
+| preferred tool unavailable | 100.0% (100.0% to 100.0%) | 100.0% (100.0% to 100.0%) | 100.0% (100.0% to 100.0%) |
+| one good tool | 100.0% (100.0% to 100.0%) | 100.0% (100.0% to 100.0%) | 100.0% (100.0% to 100.0%) |
+| nothing is eligible | 0.0% (0.0% to 0.0%) | 0.0% (0.0% to 0.0%) | 0.0% (0.0% to 0.0%) |
+
+How to read this:
+- **Adaptive selection is where the measured difference is.** Fixed selection runs tools the policy forbids (on the host, a missing credential, over budget). Those runs are violations, and their "successes" are not counted.
+- **The deployed configuration (C) is not the best one here.** Against B it completes 72.0% against 75.0% and recovers 70.8% against 83.3% on the held-out seeds. Most of the gap is in transient failures (40.0% against 70.0%), where the repeat limit stops after the same failure twice. C uses fewer attempts and costs slightly less. This agrees with Stage 3, whose benchmark stands as recorded: **bounded 66.3% against intelligent 55.7%** recovery with escalation off, as deployed. Nothing here replaces it, and no default was changed.
+- These figures describe a world written for this evaluation. They are no forecast of real use, and no real-world improvement is claimed.
+
+## Dashboard
+
+`backend/app/ui`, served at `/ui` by the API. Plain HTML, CSS and JavaScript with no package and nothing loaded from elsewhere (a Content-Security-Policy keeps it so). It reads the API with the user's token and never writes HTML from data. It shows the requirement, the plan, the tool chosen and why, coding progress, the provider's tests, the acceptance criteria with evidence, failure classes and recovery decisions, the final state, the delivered files and the report, with a banner naming what was simulated. Its controls are Refresh, the token form, the run list, the delivered files and "Show the full report"; none starts, changes or deletes anything. It was checked by automated tests and visually in the installed Chrome, headless, on loopback (2026-11-02), not by hand.
+
+## Deployment
+
+Proposed, not built: [DEPLOYMENT.md](DEPLOYMENT.md). The dashboard and the API can run on Vercel and Render; real test execution and real coding need a separate Docker worker.
+
+## Tests
+
+Whole offline suite: 3,288 passed, 17 skipped (16 opt-in Docker, 1 live), 0 failed, in 106 s, in one process with a 232 MB peak. The fence refused nothing, and no `.env` was opened outside pytest's temp folders. 82 tests are new in Stage 4: acceptance, the replay sandbox and its recordings, acceptance through the orchestrator, the API, the demonstration, the evaluation and the dashboard. The demonstration ran 6 of 6 scenarios as expected in 6 s, and the evaluation made 600 backend runs (300 per split) with nothing refused.
+
+## Limitations
+
+- No real model has written code, and test execution in this stage is replayed, not Docker.
+- **The acceptance suite is not an adversarial security boundary.** It runs in the same Python process as the candidate's code, so code written to subvert the test runner could fake a pass. It catches honest mistakes and self-graded passes; each criterion in its own process would be needed against deliberate cheating.
+- The GPT stand-in follows decisions perfectly; a real model may not.
+- The evaluation's tools and chances are hypothetical.
+- The dashboard was checked in headless Chrome by script, not by a person, and only on the demonstration's data.

@@ -16,9 +16,23 @@ class StrictInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class AcceptanceCriterionIn(StrictInput):
+    code: Annotated[str, StringConstraints(pattern=r"^AT-\d{3}$")]
+    description: Annotated[NonBlank, StringConstraints(max_length=500)]
+    priority: Literal["MUST", "SHOULD"] = "MUST"
+
+
+class AcceptanceSuiteIn(StrictInput):
+    """The evaluator's tests, given before any code exists. The coding provider never sees them."""
+
+    criteria: Annotated[list[AcceptanceCriterionIn], Field(min_length=1, max_length=30)]
+    files: Annotated[dict[str, Annotated[str, StringConstraints(max_length=64_000)]], Field(min_length=1, max_length=5)]
+
+
 class ProjectCreate(StrictInput):
     name: Annotated[NonBlank, StringConstraints(max_length=200)]
     requirement_text: Annotated[NonBlank, StringConstraints(max_length=20_000)]
+    acceptance: AcceptanceSuiteIn | None = None  # fixed at creation: there is no way to change it later
 
 
 class ProjectOut(BaseModel):
@@ -30,6 +44,7 @@ class ProjectOut(BaseModel):
     stack: str | None
     status: ProjectStatus
     created_at: datetime
+    has_acceptance_suite: bool = False
 
 
 class RunOut(BaseModel):
@@ -52,6 +67,7 @@ class RunOut(BaseModel):
     active_seconds: float
     pause_reason: str | None
     status_detail: str | None
+    acceptance_sha256: str | None = None  # the frozen acceptance suite this run is judged by
 
 
 class RequirementOut(BaseModel):

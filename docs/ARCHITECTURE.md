@@ -525,6 +525,10 @@ S(t,k) = w_s·Suit(t,k) + w_r·Rel(t,c) + w_l·(1 − L̂(t)) + w_c·(1 − Ĉ(t
 - The number of tampering attempts blocked.
 - The final V for each project.
 
+### 9.4 Independent acceptance (Stage 4)
+
+The evaluator's frozen test suite is given with the project and copied, with its SHA-256, into each run. The coding provider never sees it, and GPT learns only which criteria failed. It runs in the sandbox after the provider's tests pass, in a folder without the provider's test files, and a failure blocks delivery and goes to recovery. Offline, `ReplaySandbox` answers only for recorded files. The read-only dashboard is served at `/ui`. Details: ARCHITECTURE_OPTIMIZATION.md, "Stage 4".
+
 ## 10. Data model (SQLite, SQLAlchemy 2.0)
 
 | Table | Key columns |

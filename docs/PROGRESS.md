@@ -6,6 +6,8 @@
 
 **Stage 3 (2026-11-02):** intelligent failure recovery is implemented in Python and tested offline, but not validated on real failures. See "Stage 3: intelligent failure recovery" near the end of this file.
 
+**Stage 4 (2026-11-02):** an offline competition demonstration of the whole workflow, independent acceptance verification, a three-configuration evaluation and a dashboard. Not validated with a real model or on real Docker in this stage. See "Stage 4" near the end of this file.
+
 Phase 4 (OpenCode) in progress. The foundation, the contract checks, the verified binary and the precedence experiment are committed (2026-10-30).
 
 Phase 4D Round 1 (2026-10-31):
@@ -25,12 +27,12 @@ Phase 4D Round 3 (2026-10-31): the API filter and independent container terminat
 | 2 | GPT orchestrator | ✅ Done (2026-10-29), verified with FakeLLM; first live GPT call verified (analysis accepted, 1 call, 919 tokens) | OpenAI API key (user) for live use |
 | 3 | Docker sandbox | 🟡 Isolation controls verified in real containers (2026-10-30); install proxy and orphan-sweep test on a real container still open | Docker Desktop running, data on D:, `python:3.12-alpine` present |
 | 4 | OpenCode integration | 🟡 Foundation committed; binary verified; precedence verified; Phase 4D Stages 1–4 committed as `f4aa786` (2026-10-31). Stages 5 and 6 committed as `53070e8`: adapter, tool allowlist, read-only real-server check (28 PASS, 0 FAIL). Round 3 committed as `ab3f447`: API filter and independent termination, isolated filter run 42 PASS, 0 FAIL. MVP slice committed as `b7a0010`: gateway, launcher, disposable copy, `generate_code`, verification, recovery, delivery, report. Verified on real containers with a scripted model, and closed out on 2026-11-01. A real model, the published port and the route out have not run | Paid-call approval |
-| 5 | Verification-guided development | 🟡 MVP core only: tests in Docker judged against MUST criteria. No frozen tests or score | — |
+| 5 | Verification-guided development | 🟡 Tests in Docker judged against MUST criteria; Stage 4 adds a frozen, hidden evaluator suite with per-criterion evidence (offline-tested, replayed). No score | Docker for the acceptance run |
 | 6 | Failure classification and recovery | 🟡 Stage 3 implemented and tested offline (2026-11-02), not validated on real failures. Simulated recovery 59.8% against 66.3% for the bounded baseline (55.7% as deployed), at lower cost. Escalation off, repeat limit 2. No real-failure dataset | Docker for the deferred tests, then real failure data |
 | 7 | Adaptive tool selection | 🟡 Python-only Stage 2 built (2026-11-02): eligibility filter, utility ranking, verified history, fallback. One real provider, so no real comparison. Target not met in simulation, and the breaker is not built | Docker for the deferred tests |
 | 8 | GitHub, Google Drive and n8n integrations, with document retrieval | ⏳ Not started | Google OAuth client, GitHub PAT, n8n container (user) |
-| 9 | React frontend | ⏳ Not started | Node.js (installed) |
-| 10 | Evaluation and competition demonstration | ⏳ Not started | all of the above |
+| 9 | React frontend | 🟡 Stage 4: a read-only dashboard in plain HTML and JavaScript at `/ui`, no packages. No React app | — |
+| 10 | Evaluation and competition demonstration | 🟡 Stage 4: offline demonstration (six scenarios) and a pre-registered simulated evaluation. No real model, no Docker in this stage | Docker and model approval for a real demonstration |
 
 ## Acceptance criteria by phase
 
@@ -958,6 +960,46 @@ These figures describe a scenario mix in which the preferred tool is usually wro
 **Tests:** Whole offline suite: 3,206 passed, 17 skipped (16 opt-in Docker, 1 live), 0 failed, in 83 s, in one process with a 226 MB peak, and the fence refused nothing. 376 are Stage 3's own (220 classification, 90 decisions, 47 through the real flow, 19 benchmark), plus 3 on the configuration. A targeted check broke 25 safety rules one at a time in a throwaway copy, and the tests caught all 25. The three fixes made after review each have tests that fail without them.
 
 **Deferred, because they need Docker:** the 16 opt-in Docker tests under the intelligent policy, a real-container retry, and a real unconfirmed stop.
+
+### Stage 4: final integration and competition demonstration (2026-11-02)
+
+**A working offline demonstration, not validated with a real model or on real Docker in this stage.** No Docker, no model, no key, and the real `.env` was not read. Design and results: [ARCHITECTURE_OPTIMIZATION.md](ARCHITECTURE_OPTIMIZATION.md), "Stage 4". How to run it: [COMPETITION.md](COMPETITION.md). Deployment: [DEPLOYMENT.md](DEPLOYMENT.md).
+
+**Built:** independent acceptance (`verification/acceptance.py`: a frozen evaluator suite the provider never sees), `ReplaySandbox` (recorded runs of exact files, no process), the competition demonstration (`demo/competition.py`, six scenarios, structured reports), the three-configuration evaluation (`demo/evaluation.py`), and the dashboard (`app/ui`, served at `/ui`).
+
+**Integration audit:** no defect found in the existing path. The missing parts were added.
+
+**Evaluation, held-out seeds (simulated):** verified completion 45.0% (A: fixed + bounded), 75.0% (B: adaptive + bounded), 72.0% (C: adaptive + intelligent); violations 42, 0, 0; incorrect recovery decisions 34.7%, 31.9%, 32.9%. Adaptive selection is where the gain is; the deployed C completes slightly less than B, mostly on transient failures. Stage 3's benchmark stands: bounded 66.3% against intelligent 55.7%.
+
+**Tests:** Whole offline suite: 3,288 passed, 17 skipped (16 opt-in Docker, 1 live), 0 failed, in 106 s, in one process with a 232 MB peak. The fence refused nothing, and no `.env` was opened outside pytest's temp folders. 82 tests are new in Stage 4: acceptance, the replay sandbox and its recordings, acceptance through the orchestrator, the API, the demonstration, the evaluation and the dashboard. The demonstration ran 6 of 6 scenarios as expected in 6 s, and the evaluation made 600 backend runs (300 per split) with nothing refused.
+
+**Final review (2026-11-02):** three reporting defects were fixed. The Markdown report called replayed results "Tests in the sandbox", and left out failed acceptance runs and the evidence behind each recovery decision. The dashboard did not highlight the selected run, swallowed load errors, and did not show a decision's evidence. `--serve` held its link in a buffer when its output was piped. Same-process acceptance is documented as **not an adversarial security boundary**. The fixes were re-checked with the targeted Stage 4 tests (135 passed) and the demonstration (6 of 6), and the dashboard was checked visually in the installed Chrome, headless, on loopback. The whole-suite figure above (3,288 passed) was measured before these fixes.
+
+**Status by kind** (details in [COMPETITION.md](COMPETITION.md)):
+- Implemented and offline-tested: requirement intake, GPT's tool loop and gates (with FakeLLM), adaptive selection, recovery, independent acceptance, safe workspace management, reports, the dashboard, the demonstration and the evaluation.
+- Scripted or replayed: GPT's replies, every coding provider, test execution, the additional providers and the evaluation's tools.
+- Verified on real Docker before Stages 2 to 4 (historical): sandbox isolation (2026-10-30), the MVP on Docker tests (2026-10-31), OpenCode on real containers with a scripted model (2026-10-31 to 2026-11-01).
+- Awaiting Docker verification of the Stage 2 to 4 code: the 16 opt-in Docker tests, the acceptance suite in the real sandbox, recovery on real containers.
+- Real AI not yet tested beyond one live GPT call (2026-10-29): a full real-GPT run, model-written code, the classifier on real failures.
+- Not built: cloud deployment and a remote worker ([DEPLOYMENT.md](DEPLOYMENT.md)), and the integrations below.
+
+### Product backlog (requested 2026-11-02, not built)
+
+**A. GitHub-assisted development**
+- Search public repositories for projects relevant to a requirement.
+- Evaluate their relevance and their licences, and propose only projects whose licence fits the intended use.
+- Clone approved projects, after the user approves each one, into isolated workspaces under the same jail and disposable-copy rules as generated code.
+- Adapt and test the existing code in the sandbox, with the same verification and acceptance suite as generated code.
+- Needs: GitHub access through the approval queue (SECURITY.md §10), egress allowlist entries, and Docker for the tests.
+
+**B. Google Drive-to-RAG development**
+- User-authorised OAuth access (SECURITY.md §7).
+- Narrowly scoped permissions: only the folders or documents the user picks.
+- Ingestion of PDF, DOCX and Google Docs, parsed in the no-network document-parser container (SECURITY.md §8).
+- Embeddings and a vector index.
+- A chatbot whose answers cite their sources.
+- Document-access and privacy protections: no document content in logs or prompts beyond what the user selected, encrypted refresh tokens, and deletion on request.
+- Needs: a Google OAuth client, an embedding model and approval for its cost, and the parser container.
 
 ### First real demonstration (proposed, not authorized)
 

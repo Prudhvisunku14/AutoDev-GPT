@@ -7,9 +7,11 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app import __version__
 from app.api import approvals, health, projects, runs
@@ -38,6 +40,7 @@ from app.tools.policy import PolicyEngine
 from app.tools.registry import ToolRegistry
 
 API_PREFIX = "/api/v1"
+UI_DIR = Path(__file__).resolve().parent / "ui"  # the read-only dashboard: static files that call the API with the user's token
 
 logger = logging.getLogger("devpilot.http")
 
@@ -171,6 +174,8 @@ def create_app(
     app.include_router(projects.router, prefix=API_PREFIX)
     app.include_router(runs.router, prefix=API_PREFIX)
     app.include_router(approvals.router, prefix=API_PREFIX)
+    if UI_DIR.is_dir():
+        app.mount("/ui", StaticFiles(directory=UI_DIR, html=True), name="ui")
     return app
 
 

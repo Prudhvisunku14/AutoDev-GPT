@@ -17,6 +17,7 @@ from app.tools.adapters.workspace_fs import (
     WorkspaceLimitExceeded,
     WorkspaceNotFound,
 )
+from app.verification.acceptance import AcceptanceSuite, SuiteCriterion, SuiteError, freeze, validate
 
 router = APIRouter(prefix="/projects", tags=["projects"], dependencies=[Depends(require_api_token)])
 
@@ -26,6 +27,14 @@ def create_project(
     body: ProjectCreate, session: SessionDep, workspace: WorkspaceDep, events: EventsDep, redactor: RedactorDep
 ) -> ProjectOut:
     project_id = new_id()
+    frozen = None
+    if body.acceptance is not None:  # parsed and checked here, never executed
+        suite = AcceptanceSuite(tuple(SuiteCriterion(c.code, c.description, c.priority) for c in body.acceptance.criteria), dict(body.acceptance.files))
+        try:
+            validate(suite)
+        except SuiteError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"acceptance suite: {exc}") from exc
+        frozen, _ = freeze(suite)
     # A requirement may contain a pasted credential; secrets never reach the DB (SECURITY T6).
     project = repositories.create_project(
         session,
@@ -33,9 +42,10 @@ def create_project(
         name=redactor.redact_text(body.name),
         requirement_text=redactor.redact_text(body.requirement_text),
         workspace_path=str(workspace.root / project_id),
+        acceptance_json=redactor.redact_text(frozen) if frozen is not None else None,
     )
     workspace.create_project(project_id)
-    events.record(session, project_id=project.id, type="project.created", payload={"name": project.name})
+    events.record(session, project_id=project.id, type="project.created", payload={"name": project.name, "acceptance_criteria": len(body.acceptance.criteria) if body.acceptance else 0})
     return ProjectOut.model_validate(project)
 
 

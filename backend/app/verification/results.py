@@ -131,9 +131,10 @@ def parse_unittest(output: str, *, truncated: bool = False) -> TestCounts:
 
 
 def criterion_pattern(code: str) -> re.Pattern[str]:
-    """AC-002 is proved by a test whose name holds `ac_002` or `ac002`, as a whole word: never `ac_0021`."""
-    number = code.rsplit("-", 1)[-1]
-    return re.compile(rf"(?<![0-9a-z])ac_?{re.escape(number)}(?![0-9])", re.IGNORECASE)
+    """AC-002 is proved by a test whose name holds `ac_002` or `ac002`, as a whole word: never `ac_0021`.
+    The prefix is the code's own, so an independent acceptance criterion AT-002 needs `at_002`."""
+    prefix, _, number = code.rpartition("-")
+    return re.compile(rf"(?<![0-9a-z]){re.escape(prefix.lower() or 'ac')}_?{re.escape(number)}(?![0-9])", re.IGNORECASE)
 
 
 def judge_criteria(criteria: Iterable[Criterion], counts: TestCounts) -> tuple[CriterionResult, ...]:

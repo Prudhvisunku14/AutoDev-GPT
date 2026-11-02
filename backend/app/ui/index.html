@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
+  <title>DevPilot AI: runs</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">DevPilot AI <span class="muted">run dashboard</span></div>
+    <div class="top-actions">
+      <span id="status" class="muted" aria-live="polite"></span>
+      <button id="refresh" type="button">Refresh</button>
+    </div>
+  </header>
+
+  <section id="login" class="card login" hidden>
+    <h2>API token</h2>
+    <p class="muted">Paste the token the demonstration printed. It stays in this browser tab only.</p>
+    <form id="login-form">
+      <input id="token" type="password" autocomplete="off" aria-label="API token" required>
+      <button type="submit">Open</button>
+    </form>
+  </section>
+
+  <main id="app" class="layout" hidden>
+    <nav class="runs card" aria-label="Runs">
+      <h2>Runs</h2>
+      <ol id="run-list" class="run-list"></ol>
+    </nav>
+    <article id="detail" class="detail">
+      <p class="muted empty">Choose a run.</p>
+    </article>
+  </main>
+
+  <footer class="foot muted">Read-only view of the local DevPilot API. Nothing here starts, changes or deletes a run.</footer>
+  <script src="app.js"></script>
+</body>
+</html>

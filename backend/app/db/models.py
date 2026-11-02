@@ -7,6 +7,7 @@ so `init_db` can add them to an existing database (see db/session.py).
 Phase 4: `coding_attempts`.
 Phase 7: `tool_outcomes`.
 Phase 6: `recovery_json` on `runs`, and what each attempt was recovering from on `tool_outcomes`.
+Stage 4: the evaluator's frozen acceptance suite on `projects`, its copy and hash on `runs`, and its result.
 """
 
 from __future__ import annotations
@@ -135,8 +136,13 @@ class Project(Base):
         Enum(ProjectStatus, native_enum=False, length=16), default=ProjectStatus.ACTIVE
     )
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    acceptance_json: Mapped[str | None] = mapped_column(Text, default=None)  # the evaluator's suite, fixed at creation (app/verification/acceptance.py)
 
     runs: Mapped[list[Run]] = relationship(back_populates="project", order_by="Run.created_at")
+
+    @property
+    def has_acceptance_suite(self) -> bool:
+        return self.acceptance_json is not None
 
 
 class Run(Base):
@@ -181,6 +187,11 @@ class Run(Base):
     verification_json: Mapped[str | None] = mapped_column(Text, default=None)  # the last test run, judged
     report_json: Mapped[str | None] = mapped_column(Text, default=None)  # written when the run ends
     recovery_json: Mapped[str | None] = mapped_column(Text, default=None)  # the last recovery decision (app/recovery/policy.py)
+
+    # --- Stage 4: independent acceptance (app/verification/acceptance.py) -------------------
+    acceptance_suite_json: Mapped[str | None] = mapped_column(Text, default=None)  # the project's suite, copied when the run was created
+    acceptance_sha256: Mapped[str | None] = mapped_column(String(64), default=None)  # of that copy; a mismatch stops the run
+    acceptance_json: Mapped[str | None] = mapped_column(Text, default=None)  # the last acceptance result
 
     project: Mapped[Project] = relationship(back_populates="runs")
 
