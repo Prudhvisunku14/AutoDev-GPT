@@ -1,6 +1,6 @@
 # Real-World Milestone 1: GitHub-assisted development
 
-**Status (2026-11-02): public repository discovery, evaluation and safe import, multi-stack planning and framework verification recipes are implemented and tested offline. No live GitHub request, no real model, no Docker run, and no React or FastAPI test has ever been executed. The weather application was not generated.**
+**Status (2026-11-02): public repository discovery, evaluation and safe import, multi-stack planning and framework verification recipes are implemented and tested offline. No live GitHub request, no real model, no Docker run of this milestone's code, and no React or FastAPI test has ever been executed. The weather application was not generated.**
 
 | | Status |
 |---|---|
@@ -12,7 +12,9 @@
 | D. Real Docker execution | Verified before Stages 2 to 4 (historical). Pending for the Stage 2 to 4 and Milestone 1 code |
 | E. Independent acceptance | Implemented, offline-tested with replayed results. Pending in the real sandbox. The weather suite is checked by parsing only |
 
-## Full-stack coding interfaces (after the milestone commit `6ead6b3`; not committed)
+Docker and real-execution readiness for these stacks (status by stage, the environment checks, the five sandbox changes, the image specifications, the first health check, the ordered approval-gated procedure, the real-model plan): [DOCKER_READINESS.md](DOCKER_READINESS.md).
+
+## Full-stack coding interfaces (committed as `01ac42b`)
 
 | | Status |
 |---|---|
@@ -92,23 +94,24 @@ Nothing is installed when a recipe runs: a project declaring a package its runti
 **For building and verifying the weather application**
 1. Multi-stack plans: resolved offline.
 2. The `devpilot/verify-fastapi:1` and `devpilot/verify-react:1` images must be built from pinned packages, run once in the sandbox, and approved; only then do their recipes run. Building them downloads packages, so it needs approval.
-3. Running a recipe in the sandbox needs a working-directory-aware container run and a per-component verification step in `submit_implementation`; both wait for an approved runtime and Docker.
-4. No coding tool claims `python-fastapi` or `react-vite` yet; the simulated provider and OpenCode's profile cover `python-cli` only.
+3. The per-component verification step in `submit_implementation` is implemented and offline-tested (`01ac42b`). Running a recipe for real still needs the five sandbox changes in [DOCKER_READINESS.md](DOCKER_READINESS.md) §4: per-recipe limits, approved images, FastAPI imports, the React script and working folder, and front-end acceptance.
+4. OpenCode's profile claims only `python-cli`. The simulated provider declares all three stacks, which makes none of them runnable.
 5. Real code generation needs paid-call approval; Docker needs approval to start.
 
 ## Readiness (read-only checks, 2026-11-02)
 
 | Item | Found |
 |---|---|
-| Storage | C: 4.17 GB free; D: 128.66 GB free |
-| Docker | CLI 29.9.2 at `D:\DockerDesktop`; Docker Desktop not running; `com.docker.service` stopped (manual) |
-| WSL | WSL service running; `D:\WSL` and `D:\DockerData` exist |
+| Storage (22:03) | C: 4.41 GB free; D: 128.63 GB free |
+| Memory (22:03) | Commit 84% of the limit; not enough headroom to start Docker safely ([DOCKER_READINESS.md](DOCKER_READINESS.md) §2) |
+| Docker | Docker Desktop 4.97.0 and CLI 29.9.2 at `D:\DockerDesktop`; not running; `com.docker.service` stopped (manual) |
+| WSL | WSL service running, no VM running; `docker-desktop` distro and image disk under `D:\DockerData`; `D:\WSL` exists |
 | OpenCode | Verified 1.19.5 binary cached with its manifest |
 | Deferred tests | 16 opt-in Docker tests: `test_mvp_end_to_end.py` (7), `test_sandbox_docker.py` (9) |
 
 The offline rehearsal, any time: `& $env:DEVPILOT_PYTHON -m app.demo.fullstack` (from `backend`, reports in `data\fullstack-rehearsal`).
 
-Commands for the Docker verification, once approved (Docker Desktop started by the user first):
+Commands for the Docker verification, once approved, after the health check in [DOCKER_READINESS.md](DOCKER_READINESS.md) §7 (Docker Desktop started by the user first):
 
 ```powershell
 . .\scripts\dev-env.ps1; cd backend
@@ -124,7 +127,7 @@ Remove-Item Env:RUN_DOCKER_TESTS
 1. **GitHub network:** add `codeload.github.com` to the `github` egress component, and approve each `search_repositories` and `import_repository` call in the run.
 2. **GitHub rate limit:** approve a fine-grained, read-only token for public repositories (set by the user in `.env`), or accept a search limit of 4.
 3. **Docker:** start Docker Desktop and run the 16 opt-in tests with `RUN_DOCKER_TESTS=true`.
-4. **Sandbox images:** approve building or pulling a test image with FastAPI and httpx, and a Node image for the React tests.
+4. **Sandbox images:** approve building `devpilot/verify-fastapi:1` and `devpilot/verify-react:1` from the specifications in [DOCKER_READINESS.md](DOCKER_READINESS.md) §5.
 5. **Model:** approve paid calls with a budget, the OpenAI key set by the user, `CODING_LIVE_APPROVED`, and OpenCode enabled.
 6. **Weather provider:** choose it, and approve its key if it needs one, and its egress entry for the running application.
 
