@@ -20,6 +20,8 @@ class AcceptanceCriterionIn(StrictInput):
     code: Annotated[str, StringConstraints(pattern=r"^AT-\d{3}$")]
     description: Annotated[NonBlank, StringConstraints(max_length=500)]
     priority: Literal["MUST", "SHOULD"] = "MUST"
+    # A component of the plan, such as "frontend": the criterion is then proved only by that component's front-end files.
+    component: Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_-]{0,31}$")] | None = None
 
 
 class AcceptanceSuiteIn(StrictInput):

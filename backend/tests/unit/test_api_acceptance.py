@@ -47,3 +47,22 @@ def test_there_is_no_way_to_change_a_suite_after_creation(client: TestClient, au
     project = create(client, auth, acceptance=ACCEPTANCE_SUITE.to_dict()).json()
     for method in ("put", "patch"):
         assert getattr(client, method)(f"{API}/projects/{project['id']}", json={"acceptance": None}, headers=auth).status_code == 405
+
+
+def test_a_criterion_may_be_bound_to_a_component_and_is_frozen_with_it(client: TestClient, auth: dict[str, str]) -> None:
+    from tests.unit.test_acceptance import FRONT
+
+    project = create(client, auth, acceptance=FRONT.to_dict())
+    assert project.status_code == 201
+    with client.app.state.session_factory() as session:
+        stored = session.get(Project, project.json()["id"]).acceptance_json
+    assert '"component":"frontend"' in stored and stored.count('"component"') == 2
+
+
+def test_a_component_that_is_not_a_plan_folder_is_refused(client: TestClient, auth: dict[str, str]) -> None:
+    from tests.unit.test_acceptance import FRONT
+
+    for name in ("../frontend", "Frontend", "front end", ""):
+        suite = FRONT.to_dict()
+        suite["criteria"][5]["component"] = name
+        assert create(client, auth, acceptance=suite).status_code == 422

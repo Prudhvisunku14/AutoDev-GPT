@@ -94,7 +94,7 @@ Nothing is installed when a recipe runs: a project declaring a package its runti
 **For building and verifying the weather application**
 1. Multi-stack plans: resolved offline.
 2. The `devpilot/verify-fastapi:1` and `devpilot/verify-react:1` images must be built from pinned packages, run once in the sandbox, and approved; only then do their recipes run. Building them downloads packages, so it needs approval.
-3. The per-component verification step in `submit_implementation` is implemented and offline-tested (`01ac42b`). Running a recipe for real still needs the five sandbox changes in [DOCKER_READINESS.md](DOCKER_READINESS.md) §4: per-recipe limits, approved images, FastAPI imports, the React script and working folder, and front-end acceptance.
+3. The per-component verification step in `submit_implementation` is implemented and offline-tested (`01ac42b`). The five sandbox changes that running a recipe for real needs (per-recipe limits, image approval by ID, FastAPI imports, the React runner, front-end acceptance) are implemented and offline-tested, not committed and not Docker-tested ([DOCKER_READINESS.md](DOCKER_READINESS.md) §4).
 4. OpenCode's profile claims only `python-cli`. The simulated provider declares all three stacks, which makes none of them runnable.
 5. Real code generation needs paid-call approval; Docker needs approval to start.
 

@@ -24,7 +24,7 @@ class ExecStatus(StrEnum):
 
 @dataclass(frozen=True)
 class ExecSpec:
-    """One approved execution. Built only by `sandbox.policy.build_spec`."""
+    """One approved execution. Built only by `sandbox.policy.build_job`, through `build_spec` or a recipe."""
 
     command: str  # approved command name
     image: str  # image reference, exactly as approved
@@ -32,6 +32,10 @@ class ExecSpec:
     workspace_dir: Path  # host directory mounted at WORKSPACE_TARGET
     timeout_seconds: float
     container_name: str
+    # A job's own limits, already capped by the settings. None means the settings' value, as for every approved command.
+    memory: str | None = None
+    cpus: float | None = None
+    pids: int | None = None
 
 
 @dataclass(frozen=True)

@@ -29,7 +29,7 @@ def create_project(
     project_id = new_id()
     frozen = None
     if body.acceptance is not None:  # parsed and checked here, never executed
-        suite = AcceptanceSuite(tuple(SuiteCriterion(c.code, c.description, c.priority) for c in body.acceptance.criteria), dict(body.acceptance.files))
+        suite = AcceptanceSuite(tuple(SuiteCriterion(c.code, c.description, c.priority, c.component) for c in body.acceptance.criteria), dict(body.acceptance.files))
         try:
             validate(suite)
         except SuiteError as exc:

@@ -14,12 +14,12 @@ COPY package.json package-lock.json ./
 # Lifecycle scripts are never run; the cache is removed so the image holds only the installed tree.
 RUN npm ci --ignore-scripts --no-audit --no-fund && npm cache clean --force
 
-# The fixed entry the recipe calls: copy /workspace/<component> into /tmp/app (the workspace is read-only and holds no
-# node_modules), link /opt/verify/node_modules beside it, and run Vitest with the JSON reporter, offline, with Vite's
-# cache in /tmp (node_modules is read-only) and, as recommended, a fixed config from the image (docs/DOCKER_READINESS.md
-# §4.4). Native binaries stay under /opt/verify, because /tmp is noexec. To be written and tested on Docker; until then
-# the recipe is not approved.
-COPY run-vitest.mjs /opt/verify/run-vitest.mjs
+# The fixed entry the recipe calls (run-vitest.mjs): it copies the component's approved files from /workspace/<component>
+# into /tmp/app (the workspace is read-only and holds no node_modules), links /opt/verify/node_modules beside them, and
+# runs Vitest offline with DevPilot's own config (vitest.config.mjs), its cache in /tmp. Native binaries stay under
+# /opt/verify, because /tmp is noexec. Written and tested offline with the host's Node; never run on Docker, so the
+# recipe is not approved.
+COPY run-vitest.mjs vitest.config.mjs /opt/verify/
 
 USER 65534:65534
 WORKDIR /workspace

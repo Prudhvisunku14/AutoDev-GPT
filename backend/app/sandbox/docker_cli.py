@@ -76,6 +76,10 @@ def build_create_args(spec: ExecSpec, settings: Settings) -> list[str]:
     if any(ch in _UNSAFE_MOUNT_CHARS for ch in host):
         raise SandboxError("the workspace path contains characters that cannot be mounted safely")
     mount = f"type=bind,source={host},target={WORKSPACE_TARGET},readonly"
+    # A job's own limits are already capped by the settings (policy.build_job); without them, the settings apply.
+    memory = spec.memory or settings.sandbox_memory
+    cpus = settings.sandbox_cpus if spec.cpus is None else spec.cpus
+    pids = settings.sandbox_pids_limit if spec.pids is None else spec.pids
     return [
         "create",
         "--name", spec.container_name,
@@ -88,10 +92,10 @@ def build_create_args(spec: ExecSpec, settings: Settings) -> list[str]:
         "--read-only",
         "--tmpfs", SANDBOX_TMPFS,
         "--user", SANDBOX_USER,
-        "--memory", settings.sandbox_memory,
-        "--memory-swap", settings.sandbox_memory,
-        "--cpus", f"{settings.sandbox_cpus:g}",
-        "--pids-limit", str(settings.sandbox_pids_limit),
+        "--memory", memory,
+        "--memory-swap", memory,
+        "--cpus", f"{cpus:g}",
+        "--pids-limit", str(pids),
         "--ulimit", "nofile=256:256",
         "--init",
         "--workdir", WORKSPACE_TARGET,

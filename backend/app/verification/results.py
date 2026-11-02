@@ -130,6 +130,12 @@ def parse_unittest(output: str, *, truncated: bool = False) -> TestCounts:
     )
 
 
+def title_name(title: str) -> str:
+    """'AT-001 renders the city search' becomes 'at_001_renders_the_city_search', so a Vitest title maps to criteria
+    as a Python test name does."""
+    return re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_")
+
+
 def criterion_pattern(code: str) -> re.Pattern[str]:
     """AC-002 is proved by a test whose name holds `ac_002` or `ac002`, as a whole word: never `ac_0021`.
     The prefix is the code's own, so an independent acceptance criterion AT-002 needs `at_002`."""

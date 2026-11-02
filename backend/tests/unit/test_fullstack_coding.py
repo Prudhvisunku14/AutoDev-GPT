@@ -12,15 +12,17 @@ from typing import Any
 
 import pytest
 
-from app.coding.simulated import ScriptedAttempt, SimulatedLauncher
+from app.coding.simulated import ScriptedAttempt
 from app.db.models import Run, RunState
 from app.demo import weather
 from app.orchestrator.fake_llm import call
 from app.repos.fixtures import OWNER, FixtureSource
+from app.sandbox import policy
 from app.sandbox.fake import FakeSandbox
 from app.sandbox.spec import ExecResult, ExecSpec, ExecStatus
 from app.tools.adapters.repositories import RepositoryRuntime, register_repository_tools
 from app.verification import acceptance, recipes
+from tests.unit.test_acceptance_flow import Seeing, gpt_saw
 from tests.unit.test_coding_tools import Rig, finish, generate, pause, submit
 from tests.unit.test_repository_tools import answer
 from tests.unit.test_selection_feedback import adaptive
@@ -40,25 +42,46 @@ FRONTEND_FILES = {"frontend/package.json": json.dumps({"dependencies": {"react":
 
 @pytest.fixture
 def approve_runtimes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Simulated approval of runtimes that do not exist. Only these tests see it."""
+    """Simulated approval of runtimes that do not exist: the recipe's flag and the image on the sandbox's approved list,
+    as a reviewed approval would set both. Only these tests see it."""
     for stack in ("python-fastapi", "react-vite"):
         recipe = recipes.RECIPES[stack]
         monkeypatch.setitem(recipes.RECIPES, stack, replace(recipe, runtime=replace(recipe.runtime, approved=True)))
+        monkeypatch.setitem(policy.APPROVED_IMAGES, f"simulated-{stack}", policy.ApprovedImage(f"simulated-{stack}", recipe.runtime.image))
+
+
+FRONT_FILE = "frontend/__acceptance__/dashboard.test.jsx"
+FRONT_SUITE = replace(
+    weather.ACCEPTANCE_SUITE,
+    criteria=(*weather.ACCEPTANCE_SUITE.criteria, acceptance.SuiteCriterion("AT-008", "the dashboard shows the current reading", "MUST", "frontend")),
+    files={**weather.ACCEPTANCE_SUITE.files, FRONT_FILE: "test('AT-008 shows the current reading', () => {});\n"},
+)  # fmt: skip
+
+
+def _vitest(title: str, status: str) -> str:
+    failed = int(status == "failed")
+    return json.dumps({"numTotalTests": 1, "numPassedTests": 1 - failed, "numFailedTests": failed, "testResults": [{"assertionResults": [{"fullName": title, "status": status}]}]})
 
 
 class Sandbox:
-    """Fixture answers by recipe. The back end's tests fail once, then pass."""
+    """Fixture answers by recipe. The back end's tests fail `backend_failures` times, then pass. The front end's frozen
+    acceptance file passes or fails as `front` says."""
 
-    def __init__(self) -> None:
+    def __init__(self, backend_failures: int = 1, front: str = "passed") -> None:
         self.backend_runs = 0
+        self.backend_failures = backend_failures
+        self.front = front
 
     def __call__(self, spec: ExecSpec) -> ExecResult:
         if spec.command == "fastapi-pytest":
             self.backend_runs += 1
-            output, status = (PYTEST_FAIL, ExecStatus.FAILED) if self.backend_runs == 1 else (PYTEST_PASS, ExecStatus.SUCCEEDED)
+            output, status = (PYTEST_FAIL, ExecStatus.FAILED) if self.backend_runs <= self.backend_failures else (PYTEST_PASS, ExecStatus.SUCCEEDED)
             return ExecResult(status, spec.command, spec.container_name, exit_code=0 if status is ExecStatus.SUCCEEDED else 1, stdout=output, cleanup="removed")
         if spec.command == "react-vitest":
             return ExecResult(ExecStatus.SUCCEEDED, spec.command, spec.container_name, exit_code=0, stdout=VITEST_PASS, cleanup="removed")
+        if spec.command == "react-acceptance":
+            status = ExecStatus.SUCCEEDED if self.front == "passed" else ExecStatus.FAILED
+            return ExecResult(status, spec.command, spec.container_name, exit_code=int(status is ExecStatus.FAILED), stdout=_vitest("Dashboard AT-008 shows the current reading", self.front), cleanup="removed")
         return ExecResult(ExecStatus.SUCCEEDED, spec.command, spec.container_name, exit_code=0, stderr=ACCEPTANCE_PASS, cleanup="removed")
 
 
@@ -68,11 +91,11 @@ def opening() -> list[Any]:
             call("submit_plan", weather.FULLSTACK_PLAN), call("submit_criteria", weather.FULL_CRITERIA)]  # fmt: skip
 
 
-def rig(tmp_path: Path, steps: list[Any], script: list[ScriptedAttempt], sandbox: Any) -> Rig:
-    launcher = SimulatedLauncher(script)
+def rig(tmp_path: Path, steps: list[Any], script: list[ScriptedAttempt], sandbox: Any, suite: acceptance.AcceptanceSuite = weather.ACCEPTANCE_SUITE) -> Rig:
+    launcher = Seeing(script)
     r = Rig(tmp_path, *steps, launcher=launcher, selector=adaptive(launcher), sandbox=FakeSandbox(sandbox))
     register_repository_tools(r.h.registry, RepositoryRuntime(FixtureSource()))
-    text, sha = acceptance.freeze(weather.ACCEPTANCE_SUITE)
+    text, sha = acceptance.freeze(suite)
     with r.h.sessions.begin() as s:
         run = s.get(Run, r.run_id)
         run.acceptance_suite_json, run.acceptance_sha256 = text, sha
@@ -126,3 +149,60 @@ def test_without_approved_runtimes_nothing_is_coded(tmp_path: Path) -> None:
     r = rig(tmp_path, [*opening(), generate(1), pause()], [ScriptedAttempt(BACKEND_FILES)], Sandbox())
     run = r.h.run(r.run_id)
     assert run.state is RunState.STOPPED_BY_POLICY and run.outcome == "verification_unavailable" and r.attempts() == []
+
+
+# --- The front end's own frozen acceptance file (simulated runtimes; never run on Docker) ---------------------------
+
+FULL_SCRIPT = [ScriptedAttempt(BACKEND_FILES), ScriptedAttempt({"backend/tests/test_api.py": "def test_ac_004_contract():\n    pass\n"}), ScriptedAttempt(FRONTEND_FILES),
+               ScriptedAttempt({"frontend/src/App.test.jsx": "test('AC-001 dashboard', () => {});\n"})]  # fmt: skip
+CODED = [*opening(), generate(1), generate(2), generate(3), generate(4)]
+
+
+def test_front_end_acceptance_runs_in_its_own_runtime_hidden_from_the_provider_and_is_reported_separately(tmp_path: Path, approve_runtimes: None) -> None:
+    r = rig(tmp_path, [*CODED, submit(), finish()], FULL_SCRIPT, Sandbox(backend_failures=0), FRONT_SUITE)
+    assert r.h.run(r.run_id).state is RunState.COMPLETED
+    independent = r.report()["acceptance"]
+    assert independent["verdict"] == "PASSED" and independent["passed"] == 8
+    assert [(p["component"], p["verdict"], p["criteria"]) for p in independent["parts"]] == [("project", "PASSED", [f"AT-00{n}" for n in range(1, 8)]), ("frontend", "PASSED", ["AT-008"])]
+    front = next(s for s in r.sandbox.specs if s.command == "react-acceptance")
+    assert front.image == "devpilot/verify-react:1" and front.argv == ("node", "/opt/verify/run-vitest.mjs", "/workspace/frontend", "--acceptance")
+    assert "acceptance" in front.workspace_dir.parts and (front.memory, front.cpus, front.pids) == ("1g", 1.0, 256)  # React asked for more; the settings cap it
+    seen = " ".join(r.launcher.briefs) + gpt_saw(r)
+    assert all(FRONT_FILE not in files for files in r.launcher.visible) and "shows the current reading', ()" not in seen
+
+
+def test_a_failing_front_end_criterion_blocks_delivery_and_gpt_hears_only_the_criterion(tmp_path: Path, approve_runtimes: None) -> None:
+    r = rig(tmp_path, [*CODED, submit(), pause()], FULL_SCRIPT, Sandbox(backend_failures=0, front="failed"), FRONT_SUITE)
+    run = r.h.run(r.run_id)
+    assert run.state is RunState.REPAIRING and r.h.events_of(r.run_id, "delivery.finished") == []  # paused for the repair; nothing delivered
+    independent = json.loads(run.acceptance_json)
+    assert independent["verdict"] == "FAILED" and [(p["component"], p["verdict"]) for p in independent["parts"]] == [("project", "PASSED"), ("frontend", "FAILED")]
+    told = r.output("submit_implementation", 0)["data"]
+    assert told["acceptance"]["unmet"] == [{"code": "AT-008", "description": "the dashboard shows the current reading", "component": "frontend"}] and "Dashboard" not in json.dumps(told)
+
+
+def test_a_criterion_bound_to_a_component_the_plan_lacks_blocks_verification(tmp_path: Path, approve_runtimes: None) -> None:
+    stray = replace(FRONT_SUITE, criteria=tuple(replace(c, component="mobile") if c.component else c for c in FRONT_SUITE.criteria),
+                    files={**weather.ACCEPTANCE_SUITE.files, "mobile/__acceptance__/app.test.jsx": "test('AT-008 shows the current reading', () => {});\n"})  # fmt: skip
+    acceptance.validate(stray)
+    r = rig(tmp_path, [*CODED, submit(), pause()], FULL_SCRIPT, Sandbox(backend_failures=0), stray)
+    run = r.h.run(r.run_id)
+    assert run.state is RunState.STOPPED_BY_POLICY and run.outcome == "verification_unavailable" and "mobile (acceptance suite): the acceptance suite binds AT-008 to mobile" in run.status_detail
+    assert r.sandbox.specs == [] and run.acceptance_json is None
+
+
+def test_without_approved_runtimes_front_end_acceptance_never_runs(tmp_path: Path) -> None:
+    r = rig(tmp_path, [*opening(), generate(1), pause()], [ScriptedAttempt(BACKEND_FILES)], Sandbox(), FRONT_SUITE)
+    run = r.h.run(r.run_id)
+    assert run.state is RunState.STOPPED_BY_POLICY and run.outcome == "verification_unavailable" and r.attempts() == []
+    assert r.sandbox.specs == [] and run.acceptance_json is None
+
+
+def test_an_approved_recipe_whose_image_is_not_on_the_approved_list_still_blocks_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for stack in ("python-fastapi", "react-vite"):  # the recipe's flag alone, without the image
+        recipe = recipes.RECIPES[stack]
+        monkeypatch.setitem(recipes.RECIPES, stack, replace(recipe, runtime=replace(recipe.runtime, approved=True)))
+    r = rig(tmp_path, [*opening(), generate(1), pause()], [ScriptedAttempt(BACKEND_FILES)], Sandbox())
+    run = r.h.run(r.run_id)
+    assert run.state is RunState.STOPPED_BY_POLICY and run.outcome == "verification_unavailable" and r.attempts() == [] and r.sandbox.specs == []
+    assert "devpilot/verify-fastapi:1 is not on the sandbox's approved image list" in run.status_detail

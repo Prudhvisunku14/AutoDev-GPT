@@ -136,3 +136,14 @@ def test_the_evaluators_tests_are_never_settled_as_the_providers_work(tmp_path: 
         rows = s.query(ToolOutcome).filter(ToolOutcome.run_id == r.run_id).all()
     assert len(rows) == 2 and all(row.status == "VERIFIED" for row in rows)
     assert json.loads(r.h.run(r.run_id).acceptance_json)["criteria"][4]["code"] == "AT-005"
+
+
+def test_a_one_stack_plan_with_a_front_end_criterion_is_blocked_before_anything_runs(tmp_path: Path) -> None:
+    """The criterion's run could never happen; it is blocked with the reason, not retried and never passed."""
+    from tests.unit.test_acceptance import FRONT
+
+    r = rig(tmp_path, *opening(), generate(1), generate(2), submit(), coding=[GOOD, TESTS], suite=FRONT)
+    run = r.advance()
+    assert run.state is RunState.STOPPED_BY_POLICY and run.outcome == "verification_unavailable"
+    assert "frontend (acceptance suite): the acceptance suite binds AT-006, AT-007 to frontend, which a one-stack plan does not have" in run.status_detail
+    assert r.sandbox.specs == [] and r.untouched() and run.acceptance_json is None

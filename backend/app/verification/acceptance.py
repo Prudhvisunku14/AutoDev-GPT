@@ -11,6 +11,11 @@ comes from someone else, and is fixed before any code exists:
   which criteria failed and what they say, never the tests or their output, so neither can write to the test.
 - It runs in the sandbox, in a folder of its own: the candidate's files without the provider's test files,
   then the evaluator's files on top, so nothing the provider wrote can replace or join them.
+- A criterion may be bound to one component of a multi-stack plan. It is then proved only by that component's front-end
+  files (`<component>/__acceptance__/<name>.test.tsx`, checked by pattern, never run here), which run in that
+  component's own runtime and are reported as a separate part. A criterion whose run did not happen is never PASSED,
+  and a criterion the plan cannot run blocks verification instead of being skipped. **The React runtime does not exist,
+  so front-end acceptance has never run on Docker.**
 
 **Not an adversarial security boundary.** The evaluator's tests import the candidate's code into the same Python
 process. Code written to subvert the test runner (patching `unittest`, say) could fake a pass. The suite catches
@@ -30,16 +35,23 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from app.sandbox.spec import ExecResult
+from app.sandbox.spec import ExecResult, ExecStatus
 from app.tools.adapters.workspace_fs import WorkspaceFS
-from app.verification.results import Criterion, CriterionStatus, TestCounts, Verdict, VerificationResult, criterion_pattern, judge
+from app.verification.recipes import FOLDER, judge_recipe
+from app.verification.results import Criterion, CriterionStatus, TestCounts, Verdict, VerificationResult, criterion_pattern, judge, judge_criteria, title_name
 
 CODE = re.compile(r"^AT-\d{3}$")
 FILE_NAME = re.compile(r"^test_[A-Za-z0-9_]{1,60}\.py$")
+FRONTEND_FILE = re.compile(r"^(?P<component>[a-z][a-z0-9_-]{0,31})/__acceptance__/[A-Za-z0-9_]{1,60}\.test\.(?:js|jsx|ts|tsx)$")
+# A plain test("...") or it("...") call. A skipped, focused or computed title proves nothing, so it is not counted.
+_TEST_TITLE = re.compile(r"""(?<![\w.$])(?:it|test)\(\s*(["'`])(?P<title>[^"'`\\\n]{1,200})\1""")
 MAX_CRITERIA, MAX_FILES, MAX_FILE_CHARS = 30, 5, 64_000
-_DEVELOPER_TEST = re.compile(r"(^|/)test[^/]*\.py$")  # what `unittest discover -p test*.py` would find
+# What `unittest discover -p test*.py` would find, every front-end test file, and anything in an __acceptance__ folder:
+# none of the provider's tests may join or replace the evaluator's.
+_DEVELOPER_TEST = re.compile(r"(^|/)test[^/]*\.py$|(^|/)[^/]+\.(?:test|spec)\.[cm]?[jt]sx?$|(^|/)__acceptance__/")
 _EVIDENCE_CHARS = 600
 PASSED, FAILED, NOT_RUN = "PASSED", "FAILED", "NOT_RUN"
+PROJECT = "project"  # the part that runs the Python files
 
 
 class SuiteError(ValueError):
@@ -51,6 +63,12 @@ class SuiteCriterion:
     code: str
     description: str
     priority: str = "MUST"
+    component: str | None = None  # None: proved by the Python files; else only by that component's front-end files
+
+
+def _without_absent_component(item: Mapping[str, Any]) -> dict[str, Any]:
+    """A criterion with no component is written as before, so an existing suite freezes to the same text and hash."""
+    return {k: v for k, v in item.items() if k != "component" or v is not None}
 
 
 @dataclass(frozen=True)
@@ -59,11 +77,19 @@ class AcceptanceSuite:
     files: Mapping[str, str]
 
     def to_dict(self) -> dict[str, Any]:
-        return {"criteria": [c.__dict__ for c in self.criteria], "files": dict(sorted(self.files.items()))}
+        return {"criteria": [_without_absent_component(c.__dict__) for c in self.criteria], "files": dict(sorted(self.files.items()))}
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> AcceptanceSuite:
-        return cls(tuple(SuiteCriterion(c["code"], c["description"], c.get("priority", "MUST")) for c in data["criteria"]), dict(data["files"]))
+        return cls(tuple(SuiteCriterion(c["code"], c["description"], c.get("priority", "MUST"), c.get("component")) for c in data["criteria"]), dict(data["files"]))
+
+    @property
+    def has_python(self) -> bool:
+        return any(c.component is None for c in self.criteria)
+
+    def components(self) -> tuple[str, ...]:
+        """The components whose own front-end files prove criteria."""
+        return tuple(sorted({c.component for c in self.criteria if c.component is not None}))
 
 
 def validate(suite: AcceptanceSuite) -> None:
@@ -75,22 +101,29 @@ def validate(suite: AcceptanceSuite) -> None:
         raise SuiteError("criterion codes must be unique and look like AT-001")
     if any(c.priority not in ("MUST", "SHOULD") for c in suite.criteria):
         raise SuiteError("a criterion's priority is MUST or SHOULD")
+    if any(c.component is not None and not (isinstance(c.component, str) and FOLDER.fullmatch(c.component)) for c in suite.criteria):
+        raise SuiteError("a criterion's component is named like the plan's folders, such as 'frontend'")
     if not 1 <= len(suite.files) <= MAX_FILES:
         raise SuiteError(f"a suite has 1 to {MAX_FILES} test files")
     tests: list[str] = []
+    titles: dict[str, list[str]] = {}
     for name, source in suite.files.items():
-        if not FILE_NAME.fullmatch(name):
-            raise SuiteError(f"{name!r}: a suite file is named test_<name>.py, with no folder")
+        frontend = FRONTEND_FILE.fullmatch(name)
+        if not frontend and not FILE_NAME.fullmatch(name):
+            raise SuiteError(f"{name!r}: a suite file is named test_<name>.py, with no folder, or <component>/__acceptance__/<name>.test.ts (or .tsx, .js, .jsx)")
         if len(source) > MAX_FILE_CHARS:
             raise SuiteError(f"{name}: over {MAX_FILE_CHARS} characters")
+        if frontend:  # read by pattern, never run
+            titles.setdefault(frontend["component"], []).extend(title_name(m["title"]) for m in _TEST_TITLE.finditer(source))
+            continue
         try:
             tree = ast.parse(source, filename=name)
         except SyntaxError as exc:
             raise SuiteError(f"{name}: not valid Python (line {exc.lineno})") from None
         tests += [node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name.startswith("test")]
-    unproved = [code for code in codes if not any(criterion_pattern(code).search(test) for test in tests)]
+    unproved = [c.code for c in suite.criteria if not any(criterion_pattern(c.code).search(t) for t in (tests if c.component is None else titles.get(c.component, [])))]
     if unproved:
-        raise SuiteError(f"no test names {', '.join(unproved)}: a test proves AT-001 by holding at_001 in its name")
+        raise SuiteError(f"no test names {', '.join(unproved)}: a test proves AT-001 by holding at_001 in its name, in a file of the criterion's own component")
 
 
 def freeze(suite: AcceptanceSuite) -> tuple[str, str]:
@@ -138,6 +171,7 @@ class CriterionVerdict:
     status: str
     tests: tuple[str, ...] = ()
     evidence: str = ""  # the runner's own words about a failing test: for the user, never for GPT
+    component: str | None = None
 
 
 @dataclass(frozen=True)
@@ -153,6 +187,7 @@ class AcceptanceResult:
     cleanup: str
     output_tail: str = ""
     notes: list[str] = field(default_factory=list)
+    parts: tuple[dict[str, Any], ...] = ()  # one per run when front-end components have their own: reported separately
 
     @property
     def passed(self) -> int:
@@ -163,35 +198,65 @@ class AcceptanceResult:
         return [c for c in self.criteria if c.priority == "MUST" and c.status != CriterionStatus.PASSED.value]
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "configured": True, "verdict": self.verdict, "reason": self.reason, "suite_sha256": self.suite_sha256, "passed": self.passed, "total": len(self.criteria),
-            "partial": self.verdict == FAILED and self.passed > 0, "criteria": [c.__dict__ | {"tests": list(c.tests)} for c in self.criteria],
+            "partial": self.verdict == FAILED and self.passed > 0, "criteria": [_without_absent_component(c.__dict__ | {"tests": list(c.tests)}) for c in self.criteria],
             "exec_status": self.exec_status, "exit_code": self.exit_code, "container": self.container, "duration_ms": self.duration_ms, "cleanup": self.cleanup,
             "output_tail": self.output_tail,
         }  # fmt: skip
+        return data | {"parts": [dict(p) for p in self.parts]} if self.parts else data
 
     def for_gpt(self) -> dict[str, Any]:
         """Which criteria failed and what they say. No test name, no test code and no output."""
         return {
             "verdict": self.verdict, "passed": self.passed, "total": len(self.criteria),
-            "unmet": [{"code": c.code, "description": c.description} for c in self.unmet], "note": "The acceptance tests are kept from the coding provider; only the criteria are shown.",
+            "unmet": [_without_absent_component({"code": c.code, "description": c.description, "component": c.component}) for c in self.unmet],
+            "note": "The acceptance tests are kept from the coding provider; only the criteria are shown.",
         }  # fmt: skip
 
 
-def judge_acceptance(result: ExecResult, suite: AcceptanceSuite, suite_sha256: str) -> AcceptanceResult:
-    """PASSED needs every MUST criterion proved by a passing evaluator test. A SHOULD criterion is reported."""
-    judged = judge(result, [Criterion(c.code, c.priority) for c in suite.criteria])
-    by_code = {c.code: c for c in judged.criteria}
-    output = result.stderr or result.stdout
-    criteria = tuple(
-        CriterionVerdict(c.code, c.description, c.priority, by_code[c.code].status.value if c.code in by_code else CriterionStatus.UNVERIFIED.value,
-                         by_code[c.code].tests if c.code in by_code else (), _evidence(output, by_code[c.code].tests) if c.code in by_code and by_code[c.code].status is CriterionStatus.FAILED else "")
-        for c in suite.criteria
-    )  # fmt: skip
-    base = {"suite_sha256": suite_sha256, "criteria": criteria, "exec_status": judged.exec_status, "exit_code": judged.exit_code, "container": judged.container,
-            "duration_ms": judged.duration_ms, "cleanup": judged.cleanup, "output_tail": judged.output_tail}  # fmt: skip
-    if judged.verdict is Verdict.NOT_RUN:
-        return AcceptanceResult(NOT_RUN, judged.reason, **base)
+def _part(name: str, v: VerificationResult, codes: list[str]) -> dict[str, Any]:
+    return {"component": name, "verdict": v.verdict.value, "reason": v.reason, "criteria": codes, "exec_status": v.exec_status, "exit_code": v.exit_code,
+            "container": v.container, "duration_ms": v.duration_ms, "cleanup": v.cleanup}  # fmt: skip
+
+
+def judge_acceptance(result: ExecResult | None, suite: AcceptanceSuite, suite_sha256: str, components: Mapping[str, tuple[Any, ExecResult]] | None = None) -> AcceptanceResult:
+    """PASSED needs every MUST criterion proved by a passing evaluator test, in the run of its own component. A SHOULD
+    criterion is reported. `result` is the Python files' run; `components` maps each front-end component to its recipe
+    and its run. A criterion whose run did not happen is NOT_RUN, never PASSED: its files existing proves nothing."""
+    verdicts: dict[str, CriterionVerdict] = {}
+    parts: list[tuple[str, VerificationResult, list[str]]] = []
+    project = [c for c in suite.criteria if c.component is None]
+    if project or result is not None:
+        ran = result or ExecResult(ExecStatus.UNAVAILABLE, "python-unittest", "", detail="the acceptance suite did not run")
+        judged = judge(ran, [Criterion(c.code, c.priority) for c in project])
+        by_code = {c.code: c for c in judged.criteria}
+        output = ran.stderr or ran.stdout
+        for c in project:
+            found = by_code.get(c.code)
+            verdicts[c.code] = CriterionVerdict(c.code, c.description, c.priority, found.status.value if found else CriterionStatus.UNVERIFIED.value, found.tests if found else (),
+                                                _evidence(output, found.tests) if found and found.status is CriterionStatus.FAILED else "")  # fmt: skip
+        parts.append((PROJECT, judged, [c.code for c in project]))
+    for name in suite.components():
+        own = [c for c in suite.criteria if c.component == name]
+        recipe, ran = (components or {}).get(name, (None, None))
+        if recipe is None or ran is None:
+            judged = VerificationResult(Verdict.NOT_RUN, "its acceptance run did not happen", ExecStatus.UNAVAILABLE.value, None, TestCounts(readable=False), (), "", "", 0, "not_needed")
+        else:
+            judged = judge_recipe(recipe, ran)
+        by_code = {j.code: j for j in judge_criteria([Criterion(c.code, c.priority) for c in own], judged.counts)} if judged.verdict is not Verdict.NOT_RUN else {}
+        for c in own:
+            found = by_code.get(c.code)
+            verdicts[c.code] = CriterionVerdict(c.code, c.description, c.priority, found.status.value if found else CriterionStatus.UNVERIFIED.value, found.tests if found else (), "", name)
+        parts.append((name, judged, [c.code for c in own]))
+    criteria = tuple(verdicts[c.code] for c in suite.criteria)
+    lead = parts[0][1]
+    base = {"suite_sha256": suite_sha256, "criteria": criteria, "exec_status": lead.exec_status, "exit_code": lead.exit_code, "container": lead.container,
+            "duration_ms": sum(v.duration_ms for _, v, _ in parts), "cleanup": lead.cleanup, "output_tail": lead.output_tail,
+            "parts": tuple(_part(name, v, codes) for name, v, codes in parts) if suite.components() else ()}  # fmt: skip
+    silent = next(((v.reason if name == PROJECT else f"{name}: {v.reason}") for name, v, _ in parts if v.verdict is Verdict.NOT_RUN), None)
+    if silent is not None:
+        return AcceptanceResult(NOT_RUN, silent, **base)
     unmet = [c for c in criteria if c.priority == "MUST" and c.status != CriterionStatus.PASSED.value]
     if not unmet:
         return AcceptanceResult(PASSED, f"all {len(criteria)} acceptance criteria passed" if all(c.status == CriterionStatus.PASSED.value for c in criteria) else "every MUST acceptance criterion passed", **base)

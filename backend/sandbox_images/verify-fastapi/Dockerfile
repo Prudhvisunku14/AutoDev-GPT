@@ -12,6 +12,8 @@ COPY requirements.txt /opt/verify/requirements.txt
 # Hashes (--require-hashes) are added when the wheels are first resolved.
 RUN python -m pip install --no-deps --only-binary=:all: --no-compile -r /opt/verify/requirements.txt \
  && python -m pip check
+# DevPilot's own pytest configuration: the recipe passes it with --config-file, so a project's pytest settings are never read.
+COPY pytest.ini /opt/verify/pytest.ini
 
 # The sandbox runs every container as 65534:65534 with no network, a read-only root, all capabilities dropped and
 # no new privileges; the image itself needs no root at test time.

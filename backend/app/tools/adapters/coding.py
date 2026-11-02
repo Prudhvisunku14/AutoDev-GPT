@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import logging
-import secrets
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -58,7 +57,7 @@ from app.tools.base import ErrorClass, ExternalStep, RecoveryInfo, RiskLevel, To
 from app.tools.gates import MAX_TASKS
 from app.tools.registry import ToolRegistry
 from app.verification import acceptance
-from app.verification.recipes import command_for, dependency_problems, judge_recipe, readiness, recipe_for
+from app.verification.recipes import VITEST_JSON, RecipeError, acceptance_spec, dependency_problems, judge_recipe, readiness, recipe_for, recipe_spec
 from app.verification.report import build_report
 from app.verification.results import Criterion, CriterionStatus, TestCounts, Verdict, VerificationResult, failure_kind, judge, judge_criteria
 
@@ -437,19 +436,23 @@ def _begin_components_submit(runtime: CodingRuntime, ctx: ToolContext, args: Sub
     for c in components:
         recipe = recipe_for(c["stack"])
         blocked += [{"component": c["name"], "stack": c["stack"], "reason": why} for why in (dependency_problems(recipe, files, c["path"]) if recipe else [])]
+    suite = _frozen_suite(runtime, ctx)
+    if suite is not None:
+        blocked += _acceptance_blocked(suite, components)
     if blocked:
         why = "; ".join(f"{b['component']} ({b['stack']}): {b['reason']}" for b in blocked)
         raise ToolError(ErrorClass.POLICY_REFUSED, f"verification is blocked: {why}", [b["reason"] for b in blocked], after_rollback=partial(_stop_blocked, runtime, ctx, blocked))
     root = runtime.candidates.path(run.id)
     parts = []
-    for c in components:
-        recipe = recipe_for(c["stack"])
-        assert recipe is not None
-        spec = ExecSpec(recipe.name, recipe.runtime.image, command_for(recipe, c["path"]), root, recipe.runtime.timeout_seconds, f"devpilot-sbx-{secrets.token_hex(8)}")
-        parts.append((c["name"], recipe, spec))
+    try:
+        for c in components:  # each job made by the one builder: approved image, fixed command, limits capped by the settings
+            recipe = recipe_for(c["stack"])
+            assert recipe is not None
+            parts.append((c["name"], recipe, recipe_spec(recipe, c["path"], root, ctx.settings)))
+    except (SandboxPolicyError, RecipeError) as exc:
+        raise ToolError(ErrorClass.TOOL_ERROR, f"the verification job could not be made: {exc}") from exc
     criteria = tuple(Criterion(c.code, c.priority) for c in ctx.session.scalars(select(AcceptanceCriterion).where(AcceptanceCriterion.run_id == run.id).order_by(AcceptanceCriterion.code)))
-    python_image = next((r.runtime.image for _n, r, _s in parts if r.argv[0] == "python"), None)
-    independent = _plan_acceptance(runtime, ctx, "python-unittest", python_image) if python_image else None
+    independent = _plan_component_acceptance(runtime, ctx, suite, components, parts) if suite is not None else None
     if run.state is not RunState.VERIFYING:
         _change_state(ctx, RunState.VERIFYING, "submit_implementation accepted")
     _record(ctx, "verification.started", {"components": [{"component": n, "recipe": r.name, "image": r.runtime.image, "argv": list(s.argv)} for n, r, s in parts],
@@ -560,9 +563,10 @@ def _no_tool_left(runtime: CodingRuntime, ctx: ToolContext, task_order: int, ref
 
 @dataclass(frozen=True)
 class _AcceptancePlan:
-    spec: ExecSpec
+    spec: ExecSpec | None  # the Python files' run; None when every criterion belongs to a front-end component
     suite: acceptance.AcceptanceSuite
     sha256: str
+    components: tuple[tuple[str, Any, ExecSpec], ...] = ()  # (component, recipe, spec): each front-end component's own files
 
 
 @dataclass(frozen=True)
@@ -580,6 +584,7 @@ class _Verified:
     tests: ExecResult  # the project's own tests, written by the coding provider
     independent: ExecResult | None  # the frozen acceptance suite; None when it did not run
     components: dict[str, ExecResult] = field(default_factory=dict)  # per component of a multi-stack plan
+    independent_components: dict[str, ExecResult] = field(default_factory=dict)  # each front-end component's frozen files
 
 
 def _begin_submit(runtime: CodingRuntime, ctx: ToolContext, args: SubmitImplementationArgs) -> _VerifyPlan:
@@ -612,36 +617,93 @@ def _acceptance_fs(settings: Settings) -> WorkspaceFS:
     return WorkspaceFS(settings.coding_work_dir / "acceptance", max_file_bytes=settings.workspace_max_file_bytes, max_files=settings.workspace_max_files)
 
 
-def _plan_acceptance(runtime: CodingRuntime, ctx: ToolContext, command: str, image: str | None = None) -> _AcceptancePlan | None:
-    """The frozen suite, staged with the candidate's files but not its tests. A changed copy ends the run."""
+def _frozen_suite(runtime: CodingRuntime, ctx: ToolContext) -> acceptance.AcceptanceSuite | None:
+    """The run's frozen copy of the suite, or None. A copy that no longer matches its hash ends the run."""
     run = ctx.run
     if run.acceptance_suite_json is None or run.acceptance_sha256 is None:
         return None
     try:
-        suite = acceptance.thaw(run.acceptance_suite_json, run.acceptance_sha256)
+        return acceptance.thaw(run.acceptance_suite_json, run.acceptance_sha256)
     except acceptance.SuiteError as exc:
         why = str(exc)
         raise ToolError(ErrorClass.POLICY_REFUSED, why, after_rollback=partial(_end_failed, runtime, ctx, outcome="acceptance_suite_changed", detail=why, keep_copy=True)) from exc
+
+
+def _plan_acceptance(runtime: CodingRuntime, ctx: ToolContext, command: str) -> _AcceptancePlan | None:
+    """The frozen suite, staged with the candidate's files but not its tests. A one-stack plan has no front-end component,
+    so a criterion bound to one blocks verification now, instead of waiting for a run that cannot happen."""
+    run = ctx.run
+    suite = _frozen_suite(runtime, ctx)
+    if suite is None:
+        return None
+    if suite.components():
+        blocked = [{"component": name, "stack": "acceptance suite", "reason": f"the acceptance suite binds {', '.join(c.code for c in suite.criteria if c.component == name)} to {name}, which a one-stack plan does not have"}
+                   for name in suite.components()]  # fmt: skip
+        raise ToolError(ErrorClass.POLICY_REFUSED, "verification is blocked: " + "; ".join(b["reason"] for b in blocked), [b["reason"] for b in blocked],
+                        after_rollback=partial(_stop_blocked, runtime, ctx, blocked))  # fmt: skip
     fs = _acceptance_fs(ctx.settings)
     try:
         acceptance.stage(fs, run.id, acceptance.evaluation_files(acceptance.read_tree(runtime.candidates.path(run.id)), suite))
         spec = build_spec(command, None, workspace=fs, project_id=run.id, settings=ctx.settings)
-        spec = replace(spec, image=image) if image else spec  # a multi-stack project's suite runs in its Python component's runtime
     except (WorkspaceError, SandboxPolicyError) as exc:
         acceptance.discard(fs, run.id)
         raise ToolError(ErrorClass.TOOL_ERROR, f"the acceptance run could not be prepared: {exc}") from exc
+    assert run.acceptance_sha256 is not None
     return _AcceptancePlan(spec, suite, run.acceptance_sha256)
+
+
+def _python_recipe(stacks: list[str | None]) -> Any:
+    """The recipe whose runtime runs the suite's Python files: the plan's first Python component."""
+    return next((r for r in (recipe_for(s or "") for s in stacks) if r is not None and r.acceptance_job is not None and r.acceptance_job[0] == "python-unittest"), None)
+
+
+def _acceptance_blocked(suite: acceptance.AcceptanceSuite, components: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Criteria this plan cannot run are blocked, never skipped: a suite that does not run proves nothing."""
+    stacks = {c["name"]: c["stack"] for c in components}
+    blocked = []
+    if suite.has_python and _python_recipe(list(stacks.values())) is None:
+        blocked.append({"component": "the project", "stack": "acceptance suite", "reason": "its Python files need a Python component, and the plan has none"})
+    for name in suite.components():
+        codes = ", ".join(c.code for c in suite.criteria if c.component == name)
+        recipe = recipe_for(stacks.get(name) or "")
+        if name not in stacks:
+            blocked.append({"component": name, "stack": "acceptance suite", "reason": f"the acceptance suite binds {codes} to {name}, which the plan does not have"})
+        elif recipe is None or recipe.acceptance_job is None or recipe.result_format != VITEST_JSON:
+            blocked.append({"component": name, "stack": stacks[name], "reason": f"the acceptance suite binds {codes} to {name}, whose runtime cannot run front-end acceptance files"})
+    return blocked
+
+
+def _plan_component_acceptance(runtime: CodingRuntime, ctx: ToolContext, suite: acceptance.AcceptanceSuite, components: list[dict[str, Any]], parts: list[tuple[str, Any, ExecSpec]]) -> _AcceptancePlan:
+    """A multi-stack plan's suite, staged once: its Python files run in the Python component's runtime, and each front-end
+    component's files in that component's own runtime. `_acceptance_blocked` has already refused what cannot run."""
+    run = ctx.run
+    paths = {c["name"]: c["path"] for c in components}
+    recipes_by_name = {name: recipe for name, recipe, _spec in parts}
+    fs = _acceptance_fs(ctx.settings)
+    try:
+        root = acceptance.stage(fs, run.id, acceptance.evaluation_files(acceptance.read_tree(runtime.candidates.path(run.id)), suite))
+        python = _python_recipe([c["stack"] for c in components])
+        spec = acceptance_spec(python, None, root, ctx.settings) if suite.has_python else None
+        fronts = tuple((name, recipes_by_name[name], acceptance_spec(recipes_by_name[name], paths[name], root, ctx.settings)) for name in suite.components())
+    except (WorkspaceError, SandboxPolicyError, RecipeError) as exc:
+        acceptance.discard(fs, run.id)
+        raise ToolError(ErrorClass.TOOL_ERROR, f"the acceptance run could not be prepared: {exc}") from exc
+    assert run.acceptance_sha256 is not None
+    return _AcceptancePlan(spec, suite, run.acceptance_sha256, fronts)
 
 
 def _run_verification(plan: _VerifyPlan, cancel: threading.Event | None, progress: Progress) -> _Verified:
     if plan.components:  # each component in its own recipe's runtime
         results = {name: _in_sandbox(plan.sandbox, spec, cancel) for name, _recipe, spec in plan.components}
-        all_ran = all(r.status is ExecStatus.SUCCEEDED for r in results.values())
-        independent = _in_sandbox(plan.sandbox, plan.independent.spec, cancel) if plan.independent is not None and all_ran else None
-        return _Verified(next(iter(results.values())), independent, results)
+        independent, fronts = None, {}
+        if plan.independent is not None and all(r.status is ExecStatus.SUCCEEDED for r in results.values()):
+            suite = plan.independent
+            independent = _in_sandbox(plan.sandbox, suite.spec, cancel) if suite.spec is not None else None
+            fronts = {name: _in_sandbox(plan.sandbox, spec, cancel) for name, _recipe, spec in suite.components}
+        return _Verified(next(iter(results.values())), independent, results, fronts)
     tests = _in_sandbox(plan.sandbox, plan.spec, cancel)
     independent = None
-    if plan.independent is not None and tests.status is ExecStatus.SUCCEEDED:  # the evaluator's tests judge only code whose own tests passed
+    if plan.independent is not None and plan.independent.spec is not None and tests.status is ExecStatus.SUCCEEDED:  # the evaluator's tests judge only code whose own tests passed
         independent = _in_sandbox(plan.sandbox, plan.independent.spec, cancel)
     return _Verified(tests, independent)
 
@@ -701,8 +763,9 @@ def _judge_independent(ctx: ToolContext, plan: _VerifyPlan, verified: _Verified,
     """The provider's tests passed; now the evaluator's. If they fail, recovery and GPT see the unmet criteria only."""
     independent = plan.independent
     assert independent is not None
-    outcome = verified.independent or ExecResult.unavailable(independent.spec, "the acceptance suite did not run")
-    judged = acceptance.judge_acceptance(outcome, independent.suite, independent.sha256)
+    outcome = verified.independent or (ExecResult.unavailable(independent.spec, "the acceptance suite did not run") if independent.spec is not None else None)
+    fronts = {name: (recipe, verified.independent_components.get(name) or ExecResult.unavailable(spec, "the acceptance suite did not run")) for name, recipe, spec in independent.components}
+    judged = acceptance.judge_acceptance(outcome, independent.suite, independent.sha256, fronts or None)
     ctx.run.acceptance_json = json.dumps(judged.to_dict())
     _record(ctx, "acceptance.finished", {k: v for k, v in judged.to_dict().items() if k != "output_tail"})
     data["acceptance"] = judged.for_gpt()

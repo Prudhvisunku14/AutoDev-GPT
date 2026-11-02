@@ -1,32 +1,31 @@
 # Docker and real-execution readiness for full-stack projects
 
-**Status (2026-11-02, rechecked at 22:03): a plan, not a run.** No Docker command, image build, download, model call or GitHub request was made for this document. Committed so far: GitHub milestone `6ead6b3`, full-stack support `01ac42b`. Offline suite on `01ac42b`: 3,389 passed, 17 skipped, 0 failed.
+**Status (2026-11-02): the five sandbox changes are implemented and offline-tested, not committed and not Docker-tested.** No Docker command, image build, download, model call or GitHub request was made. Committed: GitHub milestone `6ead6b3`, full-stack support `01ac42b`, this document's first version `f2ec196`.
 
 ## 1. Where each part stands
 
-The furthest state each part has reached:
-- **Designed:** written down only.
 - **Implemented:** the code exists.
-- **Offline-tested:** tests pass with fakes, fixtures or replayed results.
-- **Docker-tested:** it ran in real containers.
+- **Offline-tested:** tests pass with fakes, fixtures, replayed results, or the host's own pytest and Node over trusted fixtures.
+- **Pending Docker verification:** it must still run in real containers.
+- **Pending package download:** it needs packages or images from the internet first.
+- **Pending approval:** a person must allow it to run for real.
 
-**Approved** means a person has allowed it to run for real.
-
-| Part | Furthest state | Approved | Evidence |
-|---|---|---|---|
-| Sandbox isolation with `python:3.12-alpine` (the flags in §3) | Docker-tested | Yes (`python-cli`) | 9 real-container tests passed on 2026-10-30. Not re-run since Stages 2 to 4 |
-| The MVP workflow on Docker | Docker-tested | Yes (`python-cli`) | 7 real-container tests passed on 2026-10-31. Not re-run on the current code |
-| OpenCode in real containers, scripted model, no key | Docker-tested | Not for a real model | 2026-10-31 to 2026-11-01 |
-| Multi-stack plans, component tasks, the folder audit, per-component verification, the dependency gate | Offline-tested | Not for FastAPI or React | `01ac42b`: `test_fullstack_coding.py` and the recipe tests |
-| Recipes `fastapi-pytest` and `react-vitest` | Offline-tested: commands, folders, and parsers on fixture output | Not yet approved | Their runtimes do not exist |
-| Independent acceptance in the sandbox | Offline-tested with replayed results | Python suites only | Never run in a real container |
-| Image `devpilot/verify-fastapi:1` | Designed: a Dockerfile and 24 exact pins, with the dependency closure checked offline | Not yet approved | Never built |
-| Image `devpilot/verify-react:1` | Designed, incomplete: no versions, no lockfile, no entry script | Not yet approved | Never built |
-| The five sandbox changes (§4) | Designed | Not yet approved | None made |
-| Front-end acceptance (a frozen Vitest file) | Designed | Not yet approved | None made |
-| OpenCode on FastAPI and React with a real model | Designed (§9) | Not yet approved: paid calls | |
-| Live GitHub search and import | Offline-tested with GitHub-shaped answers served in process | Not yet approved: network | |
-| Live App Preview, Google Drive-to-RAG | Not designed | | Roadmap |
+| Part | Implemented | Offline-tested | Pending Docker verification | Pending package download | Pending approval |
+|---|---|---|---|---|---|
+| Sandbox isolation with `python:3.12-alpine` (§3) | Yes | Yes | A re-run only: 9 real-container tests passed on 2026-10-30 | No | No: approved for `python-cli` |
+| The MVP workflow on Docker | Yes | Yes | A re-run only: 7 real-container tests passed on 2026-10-31 | No | No |
+| Multi-stack plans, component tasks, the folder audit, per-component verification, the dependency gate | Yes (`01ac42b`) | Yes | Yes | No | Yes, per runtime |
+| 4.1 One job builder; recipe limits capped by the settings | Yes, uncommitted | Yes | Yes | No | No |
+| 4.2 Image approval by exact reference or full image ID | Yes, uncommitted | Yes, with a fake Docker CLI | Yes | No | Yes: the two images, by ID |
+| 4.3 FastAPI pytest options and DevPilot's pytest config | Yes, uncommitted | Yes: the host's pytest 9.2.0 with the image's config file | Yes | Yes: the wheels | Yes |
+| 4.4 React runner and DevPilot's Vitest config | Written, uncommitted | The copy and its checks only, with the host's Node 24; **Vitest has never run** | Yes | Yes: the Node image, npm packages, lockfile | Yes |
+| 4.5 Front-end acceptance bound to its component | Yes, uncommitted | Yes, with simulated runtimes | Yes | Yes: needs the React image | Yes |
+| Image `devpilot/verify-fastapi:1` | A specification | The pin closure only | Yes | Yes: wheels, hashes | Yes |
+| Image `devpilot/verify-react:1` | A specification; versions pending | The runner only | Yes | Yes: everything | Yes |
+| OpenCode in real containers, scripted model, no key | Yes | Yes | A re-run only: ran 2026-10-31 to 2026-11-01 | No | A real model: paid calls |
+| OpenCode on FastAPI and React with a real model | No: designed (§9) | No | Yes | Yes: the images | Yes: paid calls |
+| Live GitHub search and import | Yes | Yes, with GitHub-shaped answers in process | No | No | Yes: network |
+| Live App Preview, Google Drive-to-RAG | No | No | | | Roadmap |
 
 ## 2. Environment (read-only checks, 2026-11-02 22:03)
 
@@ -70,165 +69,137 @@ Moving the page file to D: does not work on this machine. A D: page file set up 
 
 ## 3. The sandbox today (read from the code)
 
-`build_create_args` (`backend/app/sandbox/docker_cli.py:73-102`) creates every job with these settings:
+`build_create_args` (`backend/app/sandbox/docker_cli.py:73-106`) creates every job with these settings:
 - **Images:** `--pull never`.
 - **Network and privileges:** `--network none`, `--cap-drop ALL`, `--security-opt no-new-privileges`.
 - **Filesystem:** `--read-only`, with `--tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m`.
 - **Process:** `--user 65534:65534`, `--ulimit nofile=256:256`, `--init`, `--workdir /workspace`.
 - **Environment:** `HOME=/tmp` is the only variable.
 - **Mounts:** the workspace, bind-mounted read-only, is the only mount.
-- **Resources:** memory (with no swap beyond it), CPU and process limits come from the settings. The defaults are 1g, 1 CPU, 256 processes and 300 s.
+- **Resources:** memory (with no swap beyond it), CPU and process limits come from the settings, or from the job's own limits, which can only be lower (§4.1). The defaults are 1g, 1 CPU, 256 processes and 300 s.
 - **Never present:** a Docker socket, privileged mode or a host namespace.
 
-`DockerSandbox._check_spec` (`runner.py:91-99`) refuses two things before Docker is called: any image not in `APPROVED_IMAGES`, and any folder outside the workspace roots.
+`DockerSandbox._check_spec` (`runner.py:90-104`) refuses, before Docker is called: any image not exactly in `APPROVED_IMAGES`, any job asking for more than the settings allow, and any folder outside the workspace roots.
 
 The only approved sandbox image is `python:3.12-alpine`, approved by tag. `--pull never` stops a silent change, but an explicit `docker pull` would re-point the tag, so pinning it by ID is a follow-up.
 
 None of this changes.
 
-## 4. The five sandbox changes: implementation checklist
+## 4. The five sandbox changes: implemented offline
 
-None of these changes has been made. Each lands with its tests: offline first, then on Docker (§8, steps 6 to 9), before any recipe is approved. Tests that guard a boundary today must stay green and unchanged, except where noted.
+All five are in the working tree, not committed, and none has run on Docker. Every test that guarded a boundary before still passes unchanged, and none was loosened:
+- one test helper changed on purpose: the full-stack tests' simulated approval now also puts the images on the approved list, because a runtime now needs both;
+- the FastAPI recipe uses pytest's long options, so the existing ban on `-c` in any recipe still holds.
 
-### 4.1 Per-recipe resource limits
+### 4.1 Per-recipe resource limits: implemented, offline-tested
 
-**Today**
-- `ExecSpec` (`spec.py:26-34`) carries no limits, and `build_create_args` uses the settings (`docker_cli.py:91-94`).
-- Component jobs are built directly at `coding.py:448`, and their timeout is the recipe's, uncapped. The one-stack path caps it (`policy.py:113-115`).
-- That bypasses the rule in `spec.py:27` that only `build_spec` builds an `ExecSpec`.
+**Now**
+- `sandbox/policy.py` adds three pieces:
+  - `Limits`, which refuses an invalid value: memory not like `512m` or `1g`, CPUs or timeout not positive and finite, processes outside 16 to 4096;
+  - `capped`, which takes the smaller of the job's value and the settings', comparing memory in bytes;
+  - `build_job`, the one place a container job is made: an approved image, a fixed non-empty argument list, and capped limits.
+- `build_spec` goes through `build_job`, and every approved command keeps the settings' memory, CPU and process limits, so a Python-only project gets exactly what it got before.
+- Component jobs come from `recipes.recipe_spec`, and acceptance jobs from `recipes.acceptance_spec`. `coding.py` no longer builds an `ExecSpec` itself, or swaps an image afterwards.
+- `ExecSpec` carries optional `memory`, `cpus` and `pids`, and `build_create_args` uses them, or the settings when they are absent.
+- `DockerSandbox` refuses any job above the settings, however it was made.
 
-**Change**
-1. Add `build_recipe_spec(recipe, folder, root, settings)` to `sandbox/policy.py`. Use it at `coding.py:448`, and for the acceptance job instead of `replace(spec, image=...)` at `coding.py:629`.
-2. Give `ExecSpec` optional `memory`, `cpus` and `pids` fields. Each takes the smaller of the recipe's value and the settings' value, with memory compared in bytes. The timeout works the same way.
-3. In `build_create_args`, use the spec's values when set and the settings otherwise. Keep `--memory-swap` equal to `--memory`.
+**React (decision pending):** the recipe asks for 2g, 2 CPUs and 512 processes, so it gets the defaults: 1g, 1 CPU and 256. Nothing was raised. Decide after measuring on Docker.
 
-**Decision needed:** React's recipe asks for 2g, 2 CPUs and 512 processes, above the defaults of 1g, 1 CPU and 256. It gets the defaults unless the settings are raised. Measure on Docker before deciding.
+**Offline tests**
+- `test_sandbox_job_builder.py`: capping, the exact limits approved commands keep, the container flags, invalid limits, runtimes that cannot be defined, and the runner's refusal.
+- `test_verification_recipes.py`: every recipe's capped limits, under the default settings and tighter ones.
+- `test_fullstack_coding.py`: the React acceptance job is capped.
 
-**Guards today**
-- `test_sandbox_docker_args.py`: `test_resource_limits_come_from_settings`.
-- `test_sandbox_policy.py`: `test_a_command_can_only_lower_the_timeout`.
-- `test_verification_recipes.py`: `test_every_recipe_declares_its_whole_contract`.
-- On Docker, in `test_sandbox_docker.py`: `test_the_memory_limit_is_enforced` and `test_the_time_limit_kills_and_removes_the_container`.
+**Pending Docker:** `docker inspect` shows a recipe job's `Memory`, `NanoCpus` and `PidsLimit`, and an OOM kill under a recipe limit is reported as `MEMORY_LIMIT`.
 
-**New tests**
-- A recipe asking more than the settings gets the settings; one asking less gets its own values.
-- The component timeout is capped.
-- Memory units compare correctly.
-- A spec without limits produces exactly today's arguments.
+### 4.2 Image approval: implemented, offline-tested
 
-**On Docker**
-- `docker inspect` shows a component container's `Memory`, `NanoCpus` and `PidsLimit`.
-- An OOM kill is reported as `MEMORY_LIMIT`.
+**Now**
+- `valid_reference` accepts `name:tag` (never `latest`, with an optional `@sha256:` digest) or a full image ID: `sha256:` followed by 64 lower-case hex characters. Anything else shaped like a digest is refused: a short ID, upper case, `sha512:…`.
+- `approved_image` returns the entry for exactly that reference, or refuses. `build_job` and `DockerSandbox` both use it.
+- A runtime is ready only when its recipe is approved **and** its image is in `APPROVED_IMAGES`.
+- `python-runner` (`python:3.12-alpine`) is unchanged and is the only entry. The FastAPI and React images are not approved.
 
-### 4.2 Approved image registration
+**Offline tests:** `test_sandbox_job_builder.py`:
+- valid and refused references;
+- only an exact match runs, and the table is unchanged;
+- an ID-pinned job is created with that ID and `--pull never`;
+- an approved image missing from the disk is never pulled and is judged `NOT_RUN`.
 
-**Today**
-- `APPROVED_IMAGES` (`policy.py:52-58`) holds only `python-runner`.
-- `Runtime.approved` (`recipes.py:36`) gates readiness.
-- `_check_spec` would refuse the verify images even if a recipe were approved.
-- The OpenCode runtime is already pinned by image ID (`opencode_container.py:42`).
+Readiness with the flag alone is tested in `test_verification_recipes.py`, and as a full run in `test_fullstack_coding.py`.
 
-**Change**
-1. After §8 passes, add `verify-fastapi` and `verify-react` to `APPROVED_IMAGES`. Pin them by full image ID (`sha256:` followed by 64 hex characters), as `APPROVED_RUNTIME_IMAGES` does, because a locally built image has no registry digest.
-2. Accept that form explicitly in `_REFERENCE` (`policy.py:21`). Today it would pass only by accident, read as an image named `sha256`.
-3. Set each `Runtime.image` to the same ID, with `approved=True`, in one reviewed commit.
-4. Add a consistency test: every approved recipe's image is in `APPROVED_IMAGES`.
+**Pending:** the built images' IDs, then approval in one reviewed commit (§8).
 
-**Guards today**
-- `test_sandbox_policy.py`: `test_images_must_name_a_version` and `test_unpinned_or_unusual_image_references_are_refused`.
-- `test_sandbox_docker_args.py`: `test_an_unapproved_image_is_refused_before_docker_is_called` and `test_images_are_never_pulled_implicitly`.
-- `test_verification_recipes.py`: `test_gpt_cannot_reach_a_recipe_command_through_the_sandbox_tool`.
-- `test_fullstack_coding.py`: `test_without_approved_runtimes_nothing_is_coded`.
-- `test_verification_recipes.py`: `test_each_stack_has_its_recipe_and_only_the_built_runtime_is_approved`. This test changes on purpose, in the approval commit.
+### 4.3 FastAPI test execution: implemented, offline-tested
 
-**On Docker**
-- `docker image inspect --format '{{.Id}}'` equals the pinned ID.
-- A job that names an absent ID fails without a pull.
+**Now:** the recipe runs:
 
-### 4.3 FastAPI import handling
+`python -I -B -m pytest --config-file=/opt/verify/pytest.ini -p no:cacheprovider -v --color=no --rootdir=/workspace/<folder> --confcutdir=/workspace/<folder> --override-ini=pythonpath=/workspace/<folder> /workspace/<folder>`
 
-**Today:** `recipes.py:66` runs `python -I -B -m pytest -v -p no:cacheprovider --color=no /workspace/<folder>` from `/workspace`. That fails for a normal project layout:
-- Under `-I`, neither the working directory nor `PYTHONPATH` is on `sys.path`.
-- pytest's default import mode adds only the test file's own folder, such as `/workspace/backend/tests`.
-- So `from app.main import app` fails.
+- The config is the image's own (`backend/sandbox_images/verify-fastapi/pytest.ini`), so a project's `pytest.ini`, `pyproject.toml`, `tox.ini` or `setup.cfg` is never read.
+- Every folder argument is the one checked folder.
+- The acceptance suite still runs on its own, with `python -m unittest` in the same image.
 
-**Change:** `command_for` adds three fixed arguments, built from the folder it has already checked:
-- `--rootdir=/workspace/<folder>`;
-- `-o pythonpath=/workspace/<folder>`;
-- `-o addopts=`, so the project's own `addopts` cannot change the output the parser reads.
+**Offline tests:** `test_fastapi_recipe_options.py` runs the recipe's exact arguments with the host's pytest 9.2.0 and the image's config file. The fixture has a hostile `pytest.ini`, a hostile `pyproject.toml`, and a `conftest.py` outside the component.
+- The component imports, and its one test passes.
+- Nothing outside the component loads, and nothing is written.
+- With the old arguments, the same fixture cannot be judged.
 
-No variable is added, and the working directory stays the same.
+**Limit:** the candidate's own `conftest.py` inside the folder still runs. That run is evidence only for its own tests (§6).
 
-**Limit:** the candidate's `conftest.py` still runs, and it can change pytest's reporting. So this run is evidence only for the candidate's own tests. The frozen acceptance suite is the independent check, with its same-process limit (`acceptance.py:15-18`).
+**Pending:** the wheels and the image, then the same check inside the container.
 
-**Guards today**, all in `test_verification_recipes.py`:
-- `test_commands_are_fixed_lists_with_a_checked_folder_and_no_shell`;
-- `test_a_folder_that_is_not_one_plain_level_is_refused`;
-- `test_pytest_output_is_parsed_and_mapped_to_criteria`;
-- `test_output_that_cannot_be_read_is_never_a_pass`.
+### 4.4 React test execution: written, partly offline-tested, not Docker-tested
 
-**On Docker**
-- A fixture whose `backend/tests` imports `app.main` passes.
-- A `pytest.ini` with `addopts = -q` does not change the parsed result.
-- Nothing is written to `/workspace`.
+**Now:** the recipe is `node /opt/verify/run-vitest.mjs /workspace/<folder>`. The runner, `backend/sandbox_images/verify-react/run-vitest.mjs`:
+1. checks the folder is one level under `/workspace`;
+2. copies only approved file types into `/tmp/app`, leaving out dot files, `node_modules`, `dist`, `build` and `coverage`;
+3. refuses links (symlinks and junctions), hard-linked files, special files, paths that resolve elsewhere, and trees over 2,000 files, 16 MB, 1 MB a file or 12 levels;
+4. links the image's `node_modules`;
+5. runs Vitest with DevPilot's config, `vitest.config.mjs`, and a fixed environment. The config sets jsdom, puts the cache in `/tmp/vite-cache`, and fails the run on `.only` or on no tests;
+6. prints only the JSON report.
 
-### 4.4 React verification script and working directory
+It never starts npm, and it imports no network module.
 
-**Today**
-- `recipes.py:71` calls Vitest directly, with `--root /workspace/<folder>`.
-- Modules would be looked up in `/workspace/<folder>/node_modules`, which does not exist.
-- Vite writes its cache under `node_modules/.vite`, which is read-only.
-- `run-vitest.mjs`, `package.json` and `package-lock.json` do not exist yet.
+**Offline tests:** `test_react_runner.py`, with the host's Node 24.14.1, covers the copy, every refusal, Vitest's arguments and environment, the runner's imports and its single process, and bad arguments. **Vitest itself has never run, and the config is unchecked against a pinned Vitest.**
 
-**Change:** the recipe becomes `node /opt/verify/run-vitest.mjs <folder>`. The script:
-1. checks the folder name again;
-2. copies the component, without any `node_modules`, into `/tmp/app`, with a size cap below the 64 MB tmpfs;
-3. links `/tmp/app/node_modules` to `/opt/verify/node_modules`;
-4. runs `vitest run --reporter=json`, with Vite's cache in `/tmp`;
-5. prints only the JSON on stdout and its logs on stderr, and exits with Vitest's exit code.
+**Pending:**
+- the Node image, npm packages and lockfile;
+- then the runner inside the image: passing and failing fixtures, a tree over the limits, and no write to `/workspace`.
 
-`/tmp` is `noexec`, so native binaries (esbuild, rollup) stay under `/opt/verify`, where they can run; Node only reads the copied files. The script needs no new environment variable.
+### 4.5 Front-end acceptance: implemented, offline-tested with simulated runtimes
 
-**Decision needed:** use a fixed Vitest config from the image, or the project's own.
-- **Fixed config (recommended):** deterministic, and a project's config cannot redirect reporters or includes. A project that needs more fails with readable output, never a pass.
-- **The project's config:** needed for features such as import aliases.
+**Now**
+- **Binding:** a criterion may carry `component`, in the API and in the frozen suite. It is then proved only by files named `<component>/__acceptance__/<name>.test.{js,jsx,ts,tsx}`, whose plain `test("AT-…")` and `it("AT-…")` titles are read by pattern, never run.
+- **Backward compatibility:** a suite without components freezes to exactly the same text and hash as before.
+- **Staging:** the candidate's `*.test.*`, `*.spec.*` and `__acceptance__` files are stripped.
+- **Running:** each front-end component's files run in that component's runtime, as `react-acceptance` (the same runner with `--acceptance`), after every component's own tests pass. Each run is reported as a separate part.
+- **Never passed by existing:** a criterion whose run did not happen is `NOT_RUN`, never `PASSED`.
+- **Blocking:** a criterion bound to a component the plan lacks (any one-stack plan included), or whose runtime cannot run front-end files, blocks verification with `verification_unavailable` before any test runs.
+- **Who sees what:** GPT and recovery see the unmet criterion and its component, never the tests.
 
-**Lockfile:** generate it inside the chosen Node Alpine image, so npm records the linux-musl native packages. A lockfile made on Windows may miss them.
+**Offline tests**
+- `test_acceptance.py`: binding, refusals, freezing, tamper evidence, staging, judging, and separate parts.
+- `test_api_acceptance.py`.
+- `test_fullstack_coding.py`:
+  - a full run hidden from the provider;
+  - a failing front-end criterion blocks delivery;
+  - a missing component blocks verification;
+  - nothing runs without approved runtimes.
 
-**Guards today**
-- `test_verification_recipes.py`: the fixed-list and folder tests, `test_vitest_json_is_parsed_and_its_names_map_to_criteria` and `test_output_that_cannot_be_read_is_never_a_pass`.
-- `test_sandbox_docker_args.py`: `test_temporary_space_is_a_non_executable_tmpfs`, `test_only_one_environment_variable_is_passed` and `test_the_only_mount_is_the_workspace_and_it_is_read_only`.
+**Pending:** the React image, then a front-end acceptance run on Docker.
 
-**On Docker**
-- Passing and failing fixtures give the right counts.
-- A component over the size cap fails cleanly.
-- Nothing is written to `/workspace`, and nothing tries the network.
+### What only Docker can show
 
-### 4.5 Frozen front-end acceptance
-
-**Today:** a suite can only be Python unittest files:
-- `FILE_NAME` accepts only `test_<name>.py`, parsed with `ast` (`acceptance.py:38`, `81-93`).
-- `_DEVELOPER_TEST` strips only Python tests (`:40`).
-- Files are staged at the top level (`:108-111`).
-- `_begin_components_submit` plans only a `python-unittest` run (`coding.py:451-452`).
-- `judge_acceptance` reads unittest output (`:181`).
-
-**Change**
-1. Allow front-end suite files tagged with their component, such as `frontend/__acceptance__/at_007.test.tsx`. They are validated without being run: a strict pattern requires titles like `test("AT-007 …")` or `it("AT-007 …")`, within the size limits.
-2. Strip the candidate's own `*.test.*` and `*.spec.*` files from that component, and stage the evaluator's files inside it.
-3. Run them with the same script in the React image, including only `__acceptance__`, and judge them with `parse_vitest_json`.
-4. Deliver only when both the Python and the front-end suites pass.
-
-Freezing and hashing (`freeze` and `thaw`, `:96-105`) do not change. The same-process limit applies in Node too.
-
-**Guards today**
-- `test_acceptance.py`: `test_a_frozen_suite_comes_back_unchanged_and_a_changed_copy_is_refused`, `test_checking_a_suite_never_runs_it` and `test_a_suite_that_cannot_prove_its_criteria_is_refused`.
-- `test_acceptance_flow.py`: `test_the_coding_provider_and_gpt_never_see_the_suite`, `test_code_that_fails_acceptance_is_never_delivered`, `test_a_changed_copy_of_the_suite_stops_the_run_and_keeps_the_evidence` and `test_an_acceptance_run_with_no_answer_delivers_nothing`.
-- `test_api_acceptance.py`: `test_there_is_no_way_to_change_a_suite_after_creation`.
-
-**New tests:** the same five properties for front-end files, plus the stripping of the candidate's front-end tests.
-
-The component boundary itself stays guarded by two tests in `test_fullstack_coding.py`: `test_a_component_task_cannot_change_another_components_files` and `test_a_dependency_the_runtime_does_not_provide_blocks_verification`.
+1. The container flags with a recipe's own limits, and an OOM kill under them.
+2. An image pinned by ID, created with `--pull never`, in the real engine.
+3. pytest inside `devpilot/verify-fastapi:1`, from the read-only workspace, with its config at `/opt/verify/pytest.ini`.
+4. The React runner and Vitest inside `devpilot/verify-react:1`:
+   - the copy under the 64 MB `noexec` tmpfs, and the `node_modules` link;
+   - Vite's cache in `/tmp`, and the JSON report;
+   - the config against the pinned Vitest version.
+5. Front-end acceptance, end to end, including a hostile component. A `vitest.workspace.*`, `vitest.config.*` or `vite.config.*` file in it must not change which files run. With `--config` given, Vitest should look for a workspace file only beside DevPilot's config, but that depends on the pinned version. Until it is shown, the React runtime stays unapproved.
+6. Opt-in Docker tests for steps 6 to 9 of §8 do not exist yet; they are written with the images.
 
 ## 5. Image specifications (not built)
 
@@ -242,8 +213,8 @@ The component boundary itself stays guarded by two tests in `test_fullstack_codi
 | Filesystem | Read-only root and workspace; `/tmp` is 64 MB and `noexec` | Same. Vite's cache must be in `/tmp` (§4.4) |
 | Network at test time | None (`--network none`). The build needs the network, with approval | Same |
 | Docker socket | Never mounted; a test asserts this | Same |
-| Resource limits | The settings today. After §4.1, the recipe's 1g, 1 CPU, 256 processes and 180 s | The settings today. The recipe asks for 2g, 2 CPUs, 512 processes and 300 s (the decision in §4.1) |
-| Scripts | No entry point; the recipe gives the argument list. No install or build step at test time | Only the fixed `run-vitest.mjs`, **not yet written**. Lifecycle scripts never run |
+| Resource limits | The recipe's 1g, 1 CPU, 256 processes and 180 s, capped by the settings (§4.1) | The recipe asks for 2g, 2 CPUs, 512 processes and 300 s, and gets the settings' 1g, 1 CPU and 256 (§4.1: decision pending) |
+| Scripts | No entry point; the recipe gives the argument list, with DevPilot's `pytest.ini`. No install or build step at test time | Only the fixed `run-vitest.mjs` and `vitest.config.mjs`: written, tested offline with the host's Node, never in the image. Lifecycle scripts never run |
 
 A project's declared dependencies must all be among the image's packages. Otherwise verification stops before running and names the missing ones. Nothing is installed when tests run.
 
@@ -289,7 +260,7 @@ Each step needs your go-ahead. Stop at any failed check, and run nothing else in
    docker ps -aq --filter label=devpilot.sandbox=true                          # expect nothing
    ```
    Compare the results with §2. Report a missing image; never pull it.
-5. **Confirm that nothing was pulled.** `docker events --since 15m --until 1s --filter type=image` should print nothing. Every sandbox job is created with `--pull never` and `--network none` (`docker_cli.py:82-85`), and step 2 of §8 needs only `python:3.12-alpine`.
+5. **Confirm that nothing was pulled.** `docker events --since 15m --until 1s --filter type=image` should print nothing. Every sandbox job is created with `--pull never` and `--network none` (`docker_cli.py:86-89`), and step 2 of §8 needs only `python:3.12-alpine`.
 6. **Stop Docker cleanly.** Quit Docker Desktop from its tray icon, or run `docker desktop stop`. Then confirm:
    ```powershell
    Get-Process | Where-Object { $_.Name -match 'docker|vmmem' }   # expect nothing
@@ -310,8 +281,8 @@ Each step is a separate approval. Stop on any failure and report it.
 | 1 | The health check (§7) | none | Docker's VM: 2 to 4 GB of memory (estimate) |
 | 2 | The 16 opt-in tests, with `RUN_DOCKER_TESTS=true` | none (`python:3.12-alpine` is recorded as present) | about a minute (7 + 9 tests when they last ran, 2026-10-30 and 2026-10-31) |
 | 3 | Resolve the wheel hashes and build `devpilot/verify-fastapi:1` | about 15 to 30 MB of wheels (estimate) | about 100 MB of image, on D: |
-| 4 | Choose the Node image, generate the lockfile inside it, write `run-vitest.mjs`, and build `devpilot/verify-react:1` | the Node image (about 50 MB compressed) and npm packages (about 150 to 250 MB unpacked); both estimates | about 300 to 400 MB of image, on D: |
-| 5 | Implement §4.1 to §4.5 offline, with their tests. Record the images' IDs, but leave `approved` false; the opt-in Docker tests approve them inside the test only, as `approve_runtimes` does | none | |
+| 4 | Choose the Node image, generate the lockfile inside it, and build `devpilot/verify-react:1` with the runner and config | the Node image (about 50 MB compressed) and npm packages (about 150 to 250 MB unpacked); both estimates | about 300 to 400 MB of image, on D: |
+| 5 | §4.1 to §4.5: **done offline, not committed**. Still to do: record the images' IDs, leave `approved` false, and write the opt-in Docker tests for steps 6 to 9; they approve the images inside the test only, as `approve_runtimes` does | none | |
 | 6 | Run each recipe on a fixture project with passing and failing tests, and confirm the parsers | none | seconds each |
 | 7 | One component-level run of the weather plan, with scripted code | none | under a minute |
 | 8 | Independent acceptance on that run, Python and front end | none | seconds |
@@ -346,7 +317,7 @@ Only a success in a real run may add the stack to OpenCode's profile.
 2. Run the 16 opt-in tests (`RUN_DOCKER_TESTS=true`).
 3. Download the FastAPI wheels and build `devpilot/verify-fastapi:1`.
 4. Choose the Node LTS image, download it and the npm packages, generate the lockfile, and build `devpilot/verify-react:1`.
-5. Implement the five sandbox changes (§4); that is code work, reviewed.
+5. Review and commit the five sandbox changes (§4), now implemented offline.
 6. Run the recipe checks, the component-level run, and the acceptance and recovery checks (§8, steps 6 to 9).
 7. Separately, and later: paid model calls ($1.50 cap), the key set by you in `.env`, live coding approval, and OpenCode enabled.
 8. Separately: GitHub network access, which needs `codeload.github.com` in the egress allowlist and either a read-only token or a search limit of 4.

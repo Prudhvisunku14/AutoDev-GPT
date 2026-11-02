@@ -4,6 +4,7 @@ the FastAPI and React outputs below are fixture text, and their runtimes have ne
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -11,8 +12,10 @@ import pytest
 from app.db.models import RunState
 from app.demo import weather
 from app.repos.fixtures import FixtureSource
+from app.sandbox import policy
 from app.sandbox.policy import APPROVED_COMMANDS
 from app.verification import recipes
+from tests.helpers import make_settings
 from app.verification.results import Criterion, CriterionStatus, judge_criteria
 from tests.unit.test_coding_tools import Rig, generate, pause
 from app.orchestrator.fake_llm import call
@@ -105,3 +108,49 @@ def test_a_stack_without_an_approved_runtime_stops_the_run_with_a_precise_status
     assert run.state is RunState.STOPPED_BY_POLICY and run.outcome == "verification_unavailable" and r.attempts() == [] and r.sandbox.specs == []
     blocked = r.report()["verification_blocked"]["components"]
     assert blocked == [{"component": "the project", "stack": "python-fastapi", "reason": recipes.readiness("python-fastapi")[1]}]
+
+
+# --- Fixed commands for the framework runtimes (built offline; never run on Docker) ---------------------------------
+
+
+def test_fastapi_runs_with_devpilots_own_config_inside_the_checked_folder_only() -> None:
+    argv = recipes.command_for(recipes.RECIPES["python-fastapi"], "backend")
+    assert argv[:5] == ("python", "-I", "-B", "-m", "pytest") and "--config-file=/opt/verify/pytest.ini" in argv and argv[-1] == "/workspace/backend"
+    assert {"--rootdir=/workspace/backend", "--confcutdir=/workspace/backend", "--override-ini=pythonpath=/workspace/backend"} <= set(argv)
+    assert all(a.split("=")[-1] == "/workspace/backend" for a in argv if "/workspace" in a)  # nothing outside the component
+
+
+def test_react_runs_only_the_images_fixed_runner_and_installs_nothing() -> None:
+    react = recipes.RECIPES["react-vite"]
+    assert recipes.command_for(react, "frontend") == ("node", "/opt/verify/run-vitest.mjs", "/workspace/frontend")
+    assert react.acceptance_job == ("react-acceptance", ("node", "/opt/verify/run-vitest.mjs", "{folder}", "--acceptance"))
+    every = [a for r in recipes.RECIPES.values() for a in (*r.argv, *r.folder_args, *(r.acceptance_job[1] if r.acceptance_job else ()))]
+    assert not {"npm", "npx", "yarn", "pnpm", "pip", "install", "sh", "bash"} & set(every)
+
+
+def test_a_recipe_job_is_capped_by_the_settings_and_never_raises_them(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for stack in ("python-fastapi", "react-vite"):  # simulated approval of images that do not exist, inside this test only
+        image = recipes.RECIPES[stack].runtime.image
+        monkeypatch.setitem(policy.APPROVED_IMAGES, stack, policy.ApprovedImage(stack, image))
+    settings = make_settings(tmp_path)
+    jobs = {s: recipes.recipe_spec(r, None if not r.takes_folder else "web", tmp_path, settings) for s, r in recipes.RECIPES.items()}
+    limits = {s: (j.memory, j.cpus, j.pids, j.timeout_seconds) for s, j in jobs.items()}
+    assert limits == {"python-cli": ("512m", 1.0, 128, 120.0), "python-fastapi": ("1g", 1.0, 256, 180.0), "react-vite": ("1g", 1.0, 256, 300.0)}  # React asked for 2g, 2 CPUs, 512
+    tight = make_settings(tmp_path, sandbox_memory="256m", sandbox_cpus=0.5, sandbox_pids_limit=64, sandbox_timeout_seconds=60)
+    assert {(j.memory, j.cpus, j.pids, j.timeout_seconds) for j in (recipes.recipe_spec(r, None if not r.takes_folder else "web", tmp_path, tight) for r in recipes.RECIPES.values())} == {("256m", 0.5, 64, 60)}
+
+
+def test_a_recipe_job_needs_an_approved_image(tmp_path: Path) -> None:
+    for stack in ("python-fastapi", "react-vite"):
+        with pytest.raises(policy.SandboxPolicyError, match="approved list"):
+            recipes.recipe_spec(recipes.RECIPES[stack], "web", tmp_path, make_settings(tmp_path))
+
+
+def test_a_runtime_is_ready_only_when_its_recipe_and_its_image_are_both_approved(monkeypatch: pytest.MonkeyPatch) -> None:
+    for stack in ("python-fastapi", "react-vite"):
+        recipe = recipes.RECIPES[stack]
+        monkeypatch.setitem(recipes.RECIPES, stack, replace(recipe, runtime=replace(recipe.runtime, approved=True)))  # the flag alone
+        ok, why = recipes.readiness(stack)
+        assert not ok and why == f"the {recipe.name} recipe's runtime {recipe.runtime.image} is not on the sandbox's approved image list"
+        monkeypatch.setitem(policy.APPROVED_IMAGES, stack, policy.ApprovedImage(stack, recipe.runtime.image))
+        assert recipes.readiness(stack)[0]

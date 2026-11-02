@@ -17,7 +17,7 @@ from typing import Protocol
 
 from app.config import Settings
 from app.sandbox.docker_cli import ContainerState, DockerCli, SandboxError, build_create_args
-from app.sandbox.policy import APPROVED_IMAGES
+from app.sandbox.policy import SandboxPolicyError, approved_image, limits_problem
 from app.sandbox.process import ProcessResult, SubprocessRunner
 from app.sandbox.spec import ExecResult, ExecSpec, ExecStatus
 
@@ -36,7 +36,6 @@ class DockerSandbox:
         self._settings = settings
         # A run's disposable copy is tested here too, read-only, so nothing unverified reaches the real workspace.
         self._roots = (settings.workspaces_dir.resolve(), settings.coding_work_dir.resolve())
-        self._approved_references = {img.reference for img in APPROVED_IMAGES.values()}
 
     @classmethod
     def from_settings(cls, settings: Settings) -> DockerSandbox:
@@ -89,8 +88,13 @@ class DockerSandbox:
         return removed
 
     def _check_spec(self, spec: ExecSpec) -> None:
-        if spec.image not in self._approved_references:
-            raise SandboxError("the image is not on the approved list")
+        try:
+            approved_image(spec.image)
+        except SandboxPolicyError as exc:
+            raise SandboxError(str(exc)) from exc
+        problem = limits_problem(spec, self._settings)  # a job made any other way still cannot exceed the settings
+        if problem is not None:
+            raise SandboxError(f"the job asks for more than the sandbox allows: {problem}")
         host = Path(spec.workspace_dir)
         if host.is_symlink() or host.is_junction():
             raise SandboxError("the workspace must not be a symlink or junction")
