@@ -9,7 +9,8 @@ from app.config import get_settings
 from app.core.egress import EgressPolicy
 from app.main import create_app
 from app.sandbox.runner import DockerSandbox
-from app.selection.selector import ProviderOption, ProviderSelector
+from app.selection.catalog import CODING_CAPABILITIES, build_selector, opencode_profile
+from app.selection.selector import ProviderOption
 
 
 def main() -> None:
@@ -18,8 +19,9 @@ def main() -> None:
     # Off by default. Once enabled, the launcher itself refuses to start until a run is approved.
     coding = None
     if settings.opencode_enabled:
-        launcher = OpenCodeLauncher(settings, sandbox.cli, EgressPolicy.from_file(settings.egress_allowlist_file))
-        coding = ProviderSelector([ProviderOption(launcher.name, launcher, frozenset({"code_generation", "test_generation", "documentation"}))])
+        egress = EgressPolicy.from_file(settings.egress_allowlist_file)
+        launcher = OpenCodeLauncher(settings, sandbox.cli, egress)
+        coding = build_selector(settings, egress, [ProviderOption(launcher.name, launcher, CODING_CAPABILITIES, profile=opencode_profile(settings))])
     # log_config=None keeps the redacting JSON handler installed by create_app.
     # access_log=False: uvicorn's access line includes the query string; the app's own
     # request log records the path only.

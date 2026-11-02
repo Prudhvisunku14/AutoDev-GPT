@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
@@ -40,12 +41,14 @@ from app.db.models import TERMINAL_RUN_STATES, AcceptanceCriterion, CodingAttemp
 from app.orchestrator.budget import turn_cost_usd
 from app.orchestrator.llm_client import Usage
 from app.orchestrator.run_control import change_state, complete_run, end_run
-from app.recovery.engine import Action, Decision, decide_coding, decide_verification
+from app.recovery.engine import REPAIRABLE, Action, Decision, decide_coding, decide_verification
 from app.sandbox.docker_cli import SandboxError, SandboxUnavailable
 from app.sandbox.policy import SandboxPolicyError, build_spec
 from app.sandbox.runner import SandboxRunner
 from app.sandbox.spec import ExecResult, ExecSpec, ExecStatus
-from app.selection.selector import NoProvider, ProviderSelector
+from app.selection.history import evidence_of, failed_tools, load_history, record_attempt, settle_verification
+from app.selection.model import BUILD, REPAIR, SelectionContext, task_category
+from app.selection.selector import NoProvider, Selector
 from app.tools.adapters.workspace_fs import WorkspaceError
 from app.tools.base import ErrorClass, ExternalStep, RecoveryInfo, RiskLevel, ToolArgs, ToolContext, ToolError, ToolSpec
 from app.tools.gates import MAX_TASKS
@@ -65,7 +68,7 @@ _RESTORABLE_ERRORS = (RestoreForbidden, OSError, ValueError)
 class CodingRuntime:
     """What the coding tools need beyond the per-call context."""
 
-    selector: ProviderSelector
+    selector: Selector
     store: AttemptStore
     candidates: CandidateWorkspaces
     sandbox: SandboxRunner
@@ -107,6 +110,9 @@ class _CodingPlan:
     simulated: bool
     settings: Settings
     usd_budget: float | None = None
+    category: str = ""  # which attempts this one is comparable with
+    evidence: str = ""  # whether this attempt may inform a real tool's history
+    selection: dict[str, Any] = field(default_factory=dict)  # what GPT is told about the choice
 
 
 @dataclass
@@ -120,6 +126,7 @@ class _CodingResult:
     restored: bool = False
     detail: str = ""
     ledger: dict[str, Any] = field(default_factory=dict)  # what the gateway really counted
+    seconds: float | None = None
 
 
 def _begin_generate_code(runtime: CodingRuntime, ctx: ToolContext, args: GenerateCodeArgs) -> _CodingPlan:
@@ -132,8 +139,10 @@ def _begin_generate_code(runtime: CodingRuntime, ctx: ToolContext, args: Generat
         raise ToolError(ErrorClass.POLICY_REFUSED, f"stack {project.stack} cannot be verified yet, so no code is written for it; python-cli can")
     if ctx.workspace is None or ctx.call_id is None:
         raise ToolError(ErrorClass.TOOL_ERROR, "the workspace is not configured for this backend")
+    left = max(ctx.settings.run_budget_usd - run.cost_usd, 0.0) if run.cost_known else None  # attempts together stay inside the run's budget
+    context = _selection_context(ctx, task, stack.id, left)
     try:
-        selection = runtime.selector.choose(task.capability)
+        selection = runtime.selector.choose(task.capability, context)
     except NoProvider as exc:
         raise ToolError(ErrorClass.POLICY_REFUSED, str(exc)) from exc
     try:
@@ -149,7 +158,7 @@ def _begin_generate_code(runtime: CodingRuntime, ctx: ToolContext, args: Generat
         .execution_options(synchronize_session=False)
     )
     _record(ctx, "selection.chosen", {"task": task.order, "capability": task.capability, "provider": selection.provider,
-                                      "simulated": selection.simulated, "excluded": selection.excluded})  # fmt: skip
+                                      "simulated": selection.simulated, "excluded": selection.excluded, **selection.details()})  # fmt: skip
     brief = build_brief(_brief_input(ctx, task, args, stack_id=stack.id, language=stack.language, files=sorted(before.files)))
     spent = run.tokens_in + run.tokens_out
     coding_task = CodingTask(
@@ -158,8 +167,20 @@ def _begin_generate_code(runtime: CodingRuntime, ctx: ToolContext, args: Generat
         timeout_seconds=ctx.settings.opencode_timeout_seconds, workspace=root,
     )  # fmt: skip
     _record(ctx, "coding.started", {"task": task.order, "title": task.title, "provider": selection.provider, "files_before": len(before.files)})
-    left = max(ctx.settings.run_budget_usd - run.cost_usd, 0.0) if run.cost_known else None  # attempts together stay inside the run's budget
-    return _CodingPlan(project.id, run.id, ctx.call_id, task.order, coding_task, root, checkpoint, before, selection.launcher, selection.provider, selection.simulated, ctx.settings, left)
+    return _CodingPlan(
+        project.id, run.id, ctx.call_id, task.order, coding_task, root, checkpoint, before, selection.launcher, selection.provider, selection.simulated, ctx.settings, left,
+        category=task_category(task.capability, stack.id, context.kind), evidence=evidence_of(simulated=selection.simulated, sandbox=runtime.sandbox), selection=selection.summary(),
+    )  # fmt: skip
+
+
+def _selection_context(ctx: ToolContext, task: PlanTask, stack_id: str, left: float | None) -> SelectionContext:
+    """What this choice depends on. GPT asked for the capability: everything else here comes from the run's records."""
+    run = ctx.run
+    kind = REPAIR if run.state is RunState.REPAIRING else BUILD
+    return SelectionContext(
+        stack=stack_id, kind=kind, remaining_usd=left, remaining_tokens=max(ctx.settings.run_max_tokens - run.tokens_in - run.tokens_out, 0),
+        history=load_history(ctx.session, task_category(task.capability, stack_id, kind)), failed_here=failed_tools(ctx.session, f"{run.id}:{task.order}"),
+    )  # fmt: skip
 
 
 def _brief_input(ctx: ToolContext, task: PlanTask, args: GenerateCodeArgs, *, stack_id: str, language: str, files: list[str]) -> BriefInput:
@@ -199,6 +220,13 @@ class _LateWriter:
 
 
 def _run_generate_code(runtime: CodingRuntime, plan: _CodingPlan, cancel: threading.Event | None, progress: Progress) -> _CodingResult:
+    began = time.monotonic()
+    result = _attempt(runtime, plan, cancel, progress)
+    result.seconds = time.monotonic() - began
+    return result
+
+
+def _attempt(runtime: CodingRuntime, plan: _CodingPlan, cancel: threading.Event | None, progress: Progress) -> _CodingResult:
     """With no transaction open: start the engine, stop it, audit, and keep or undo. Never leaves a writer."""
     writer = _LateWriter()
     try:
@@ -288,17 +316,23 @@ def _finish_generate_code(runtime: CodingRuntime, ctx: ToolContext, plan: _Codin
     # The gateway's ledger is what was really spent. The engine's own figures are the fallback.
     unreported = max(result.ledger.get("charged_tokens", 0) - outcome.tokens_in - outcome.tokens_out, 0)
     run.tokens_in += unreported
+    spent: float | None = None
     if run.cost_known:
         spent = attempt_cost(result.ledger, plan.usd_budget)
         if spent is None:
             spent = outcome.cost_usd if outcome.cost_usd is not None else turn_cost_usd(Usage(input_tokens=outcome.tokens_in + unreported, output_tokens=outcome.tokens_out), ctx.settings)
         run.cost_usd += spent or 0.0
+    record_attempt(
+        ctx.session, run_id=run.id, call_id=plan.call_id, task_key=plan.task.key, tool_id=plan.provider, category=plan.category, evidence=plan.evidence,
+        status=outcome.status, kept=result.kept, seconds=result.seconds, cost_usd=spent,
+    )  # fmt: skip
     data: dict[str, object] = {
         "task_order": task.order, "title": task.title, "status": outcome.status.value, "kept": result.kept, "provider": plan.provider,
         "simulated": plan.simulated, "changes": result.changes, "violations": result.violations, "phase": result.phase,
         "tokens": outcome.tokens_in + outcome.tokens_out, "detail": outcome.detail,
     }  # fmt: skip
     _record(ctx, "coding.finished", {**data, "restored": result.restored, "quarantined": result.quarantined, "stop": result.detail})
+    data["selection"] = plan.selection
     if result.kept:
         task.status = _FINISHED_TASK
         data["all_tasks_done"] = not _unfinished_tasks(ctx)
@@ -373,10 +407,14 @@ def _finish_submit(runtime: CodingRuntime, ctx: ToolContext, plan: _VerifyPlan, 
         data["next_state"] = RunState.VERIFYING.value
         return data
     if verification.verdict is Verdict.PASSED:
+        _learn(ctx, passed=True)
         _change_state(ctx, RunState.DOCUMENTING, "verification passed")
         data["next_state"] = RunState.DOCUMENTING.value
         return data
-    decision = decide_verification(failure_kind(verification), repairs_used=run.repairs, max_repairs=ctx.settings.max_repair_attempts)
+    kind = failure_kind(verification)
+    if kind in REPAIRABLE:  # the tests judged the code. Otherwise the sandbox gave no answer, and there is nothing to learn
+        _learn(ctx, passed=False, failure=kind)
+    decision = decide_verification(kind, repairs_used=run.repairs, max_repairs=ctx.settings.max_repair_attempts)
     data["recovery"] = _decided(ctx, decision)
     if decision.action is Action.REPAIR:
         run.repairs += 1
@@ -385,6 +423,13 @@ def _finish_submit(runtime: CodingRuntime, ctx: ToolContext, plan: _VerifyPlan, 
     else:
         _end_failed(runtime, ctx, outcome="verification_failed", detail=f"{verification.reason}; {decision.reason}", keep_copy=False)
     return data
+
+
+def _learn(ctx: ToolContext, *, passed: bool, failure: str | None = None) -> None:
+    """Verification is what the selector learns from: a finished attempt alone proves nothing."""
+    settled = settle_verification(ctx.session, ctx.run.id, passed=passed, failure=failure)
+    if settled:
+        _record(ctx, "selection.learned", {"attempts": settled, "verified": passed, "failure": failure})
 
 
 def _verification_event(v: VerificationResult) -> dict[str, object]:

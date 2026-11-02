@@ -54,10 +54,10 @@ def failed(spec: ExecSpec) -> ExecResult:
 
 
 class Rig:
-    def __init__(self, tmp_path: Path, *steps: Step, coding: list[ScriptedAttempt] | None = None, sandbox: FakeSandbox | None = None, launcher: Any = None, **overrides: Any) -> None:
+    def __init__(self, tmp_path: Path, *steps: Step, coding: list[ScriptedAttempt] | None = None, sandbox: FakeSandbox | None = None, launcher: Any = None, selector: Any = None, **overrides: Any) -> None:
         self.sandbox = sandbox or FakeSandbox(passed)
         self.launcher = launcher or SimulatedLauncher(coding or [])
-        self.selector = ProviderSelector([ProviderOption(PROVIDER_NAME, self.launcher, CAPABILITIES, simulated=True)])
+        self.selector = selector or ProviderSelector([ProviderOption(PROVIDER_NAME, self.launcher, CAPABILITIES, simulated=True)])
         self.llm = FakeLLM(*steps)
         self.h = Harness(tmp_path, self.llm, sandbox=self.sandbox, candidates=None, orchestrated_states=FULL_RUN_STATES, **overrides)
         self.fs = WorkspaceFS(self.h.settings.coding_work_dir, max_file_bytes=100_000, max_files=100)

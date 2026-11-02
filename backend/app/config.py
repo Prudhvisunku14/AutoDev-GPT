@@ -116,6 +116,24 @@ class Settings(BaseSettings):
     gateway_max_output_tokens: int = Field(default=8_000, gt=0)
     gateway_max_usd_per_task: float | None = Field(default=None, gt=0)
 
+    # --- Adaptive tool selection (app/selection/) ------------------------------
+    # `fixed` keeps the first available provider in preference order, for comparison or as a way back.
+    selection_policy: Literal["adaptive", "fixed"] = "adaptive"
+    # Initial weights, not tuned. They must add up to 1.
+    selection_weight_capability: float = Field(default=0.30, ge=0, le=1)
+    selection_weight_reliability: float = Field(default=0.25, ge=0, le=1)
+    selection_weight_quality: float = Field(default=0.15, ge=0, le=1)
+    selection_weight_latency: float = Field(default=0.10, ge=0, le=1)
+    selection_weight_cost: float = Field(default=0.10, ge=0, le=1)
+    selection_weight_resource: float = Field(default=0.10, ge=0, le=1)
+    # Prior for (successes + alpha) / (attempts + alpha + beta): as if four attempts had split evenly.
+    selection_reliability_alpha: float = Field(default=2.0, gt=0)
+    selection_reliability_beta: float = Field(default=2.0, gt=0)
+    # A value equal to its reference scores 0.5.
+    selection_latency_reference_seconds: float = Field(default=120.0, gt=0)
+    selection_cost_reference_usd: float = Field(default=0.25, gt=0)
+    selection_memory_reference_mb: float = Field(default=2_048.0, gt=0)
+
     # --- Credentials used by later phases ---------------------------------
     # Declared here only so the redactor knows their values. Phase 1 never uses them.
     openai_api_key: SecretStr | None = None
@@ -201,6 +219,16 @@ class Settings(BaseSettings):
         self.egress_allowlist_file = _from_repo_root(self.egress_allowlist_file)
         self.coding_checkpoints_dir = _from_repo_root(self.coding_checkpoints_dir)
         self.coding_work_dir = _from_repo_root(self.coding_work_dir)
+        return self
+
+    @model_validator(mode="after")
+    def _selection_weights_add_up(self) -> Settings:
+        total = (
+            self.selection_weight_capability + self.selection_weight_reliability + self.selection_weight_quality
+            + self.selection_weight_latency + self.selection_weight_cost + self.selection_weight_resource
+        )  # fmt: skip
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(f"the SELECTION_WEIGHT_* values must add up to 1, not {total:.6f}")
         return self
 
     @property

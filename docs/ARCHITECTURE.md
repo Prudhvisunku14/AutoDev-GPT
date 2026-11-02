@@ -421,6 +421,8 @@ Default deny. Each component reaches only the destinations below. The list lives
 
 ### 9.1 Adaptive tool selection (`selection/`)
 
+> **Status (2026-11-02):** built in Python as eligibility, then a six-term utility, with verified history. [ARCHITECTURE_OPTIMIZATION.md](ARCHITECTURE_OPTIMIZATION.md), "Stage 2", has the formula as built. The design below is the original: its UCB exploration and circuit breaker are not built, and its other providers do not exist.
+
 **Candidates** are the providers registered for a capability:
 - `code_generation` → `opencode_server`, `opencode_via_n8n`, `gpt_writer`
 - `test_execution` → `pytest_sandbox`, `playwright_sandbox`

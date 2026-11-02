@@ -27,7 +27,7 @@ from app.orchestrator.run_manager import RunManager
 from app.orchestrator.state_machine import FULL_RUN_STATES, ORCHESTRATED_STATES
 from app.sandbox.docker_cli import SandboxError
 from app.sandbox.runner import SandboxRunner
-from app.selection.selector import ProviderSelector
+from app.selection.selector import Selector
 from app.stacks.catalog import StackCatalog
 from app.tools.adapters.coding import CodingRuntime, recover_attempts, register_coding_tools
 from app.tools.adapters.sandbox import register_sandbox_tools
@@ -47,7 +47,7 @@ def create_app(
     *,
     llm: LLMClient | None = None,
     sandbox: SandboxRunner | None = None,
-    coding: ProviderSelector | None = None,
+    coding: Selector | None = None,
 ) -> FastAPI:
     """Build the app. `llm` replaces the OpenAI client (tests and the offline demo use FakeLLM).
 

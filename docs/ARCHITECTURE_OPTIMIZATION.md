@@ -1158,3 +1158,142 @@ Allowed traffic went through the adapter's real client, with the gate, contract,
 5. **Decide ripgrep,** with the download it needs.
 
 Keep `generate_code` and the first live prompt for the round after that, once isolation is proven. Round 4 needs approval for: Docker networks, starting the filter and OpenCode containers together, and the ripgrep download or image.
+
+# Stage 2: adaptive tool selection (2026-11-02)
+
+Python only. No Docker ran, no model was called, no key was loaded and the real `.env` was not read.
+
+## The old mechanism
+
+`ProviderSelector` took the first provider, in a fixed order, that declared the capability and said it was available. It read no history, stack or budget, and a tool that had just failed was chosen again. It stays, unchanged, behind `SELECTION_POLICY=fixed`.
+
+## What really exists
+
+There is **one real coding provider**, so no real comparison between providers has happened or can happen yet.
+
+| Group | Tools |
+|---|---|
+| Implemented and verified on real containers, scripted model | The gates, `run_sandbox_command`, `submit_implementation`, `finish`, and the simulated provider |
+| Implemented, not fully verified | `opencode_server`, through `generate_code`: real containers and a scripted model, never a real model. Its quality, duration and cost are unknown, so they are recorded as unknown |
+| Planned, cannot run | `opencode_via_n8n`, `gpt_writer`. They appear as refused, and have no launcher |
+
+Selection applies to `generate_code`, the one tool with a choice of provider. Only `python-cli` has an approved test command, so no tool claims `python-fastapi`, `react-vite` or `static-html`.
+
+## The adaptive algorithm
+
+GPT stays the only orchestrator: it asks for a capability, and it cannot name a provider (`GenerateCodeArgs` refuses the field). `selection/adaptive.py` is deterministic code that decides which authorized tool does the work.
+
+**Stage A, eligibility.** A tool that fails any check is out, with every reason recorded. No score can bring it back:
+
+| Refusal | Check |
+|---|---|
+| `CAPABILITY`, `STACK`, `TASK_KIND` | It cannot do this task |
+| `NOT_IMPLEMENTED` | It is planned only |
+| `UNAVAILABLE` | Its launcher says it cannot run now |
+| `CREDENTIALS` | A credential it needs is not configured. Checked for presence, by name |
+| `NETWORK` | It needs a destination the egress policy and `CODING_LIVE_APPROVED` do not allow |
+| `SECURITY` | It would run on the host, or could write outside the disposable copy |
+| `ENVIRONMENT` | Its execution environment is not approved |
+| `BUDGET` | The run cannot pay for its cheapest useful attempt or its expected cost, or has too few tokens. A cost that is unknown under a spending limit is refused |
+| `RESOURCES` | The machine cannot commit the memory it needs |
+| `SIMULATED` | A real tool is eligible, so a simulation never replaces it. A deployment can forbid simulations outright |
+
+**Stage B, utility.** The rest are ranked by:
+
+```
+U = 0.30·C + 0.25·R + 0.15·Q + 0.10·L + 0.10·K + 0.10·M
+```
+
+| Term | Meaning | Value |
+|---|---|---|
+| C | Capability match | Mean of the declared suitability for the capability, the task kind and the stack |
+| R | Reliability | `(s + α) / (n + α + β)`, from verified outcomes on comparable tasks |
+| Q | Expected quality | Declared, in [0, 1] |
+| L | Latency efficiency | `120 / (120 + seconds)` |
+| K | Cost efficiency | `0.25 / (0.25 + usd)` |
+| M | Resource efficiency | `2048 / (2048 + MB)` |
+
+These weights are the initial configuration, not tuned, and are set by `SELECTION_WEIGHT_*`. They must add up to 1. Every term is in [0, 1].
+
+- **Prior.** α = β = 2, as if four attempts had split evenly. An untested tool scores 0.5, never 1. One result moves R by 0.1, so U by 0.025. Twenty successes in twenty give 0.917.
+- **Fixed references** rather than min-max scaling, so adding an unrelated tool cannot change another tool's score, and a lone candidate cannot divide by zero.
+- **Unknown numbers** score 0.25, the value of three times the reference, so an unmeasured tool cannot look efficient. The report lists which metrics were unknown.
+- **Estimates** blend the declared value with what was measured: `(2·prior + Σx) / (2 + n)`, so one sample cannot replace it.
+- **Determinism.** Ties compare scores to 9 digits, then the configured order, then the name. Nothing is random.
+
+Each choice returns the tool, the ranking with its breakdown, every rejection, and an explanation. `confidence` is `n / (n + α + β)`. `compared` and `real_candidates` keep a lone tool, or a comparison of simulations, from reading as a real comparison. The full record goes in the `selection.chosen` event, and GPT gets a short summary in `generate_code`'s result.
+
+## Historical feedback
+
+`tool_outcomes` holds one row per attempt, unique on `(run_id, call_id)`, with tool, task category, evidence, status, failure category, duration and cost. Statistics are computed from the rows, never kept as running totals, so an attempt cannot count twice.
+
+- A kept attempt is only `PENDING`: a file existing proves nothing. Passing tests make it `VERIFIED`, and failing tests make it `FAILED` with the failure's class.
+- An attempt that failed is settled at once as `CODING_<status>`.
+- `CANCELLED` and `BUSY` are not recorded, and a sandbox that gave no answer leaves attempts `PENDING`: neither says anything about the tool.
+- Categories are `capability:stack:kind`, so building, repairing and writing tests are never mixed.
+- Evidence is `real` only when a real provider's work was judged by the real `DockerSandbox`. A real tool reads only `real` rows.
+
+## Fallback
+
+A retry remains the decision of `decide_coding`. Selection only says where it goes: a tool that failed this task is ranked behind the others, so another eligible tool is tried first. With no alternative the same tool may retry, inside the existing attempt limit. Each attempt has its own guard and call ID, so A1 and A2 are unchanged: a stop must still be confirmed, and a quarantine or policy breach still ends the run on every tool.
+
+## Benchmark
+
+`python -m app.demo.selection_benchmark`. **Everything here is simulated:** hypothetical tools in a seeded world, 20 seeds of 60 tasks per scenario. The selectors are the real code. Outcomes are never written to `tool_outcomes`.
+
+- "Correct" comes from an oracle that ignores the scoring: the allowed tool with the highest true chance of success, or a refusal if none is allowed.
+- Both policies meet identical random outcomes.
+- The weights are untuned. Every tool states its true cost, time and memory, and none states a quality.
+- Three scenarios have no real execution path, so they report the decision only.
+
+| Scenario | Right answer | Correct: fixed | Correct: adaptive | Violations: fixed | Violations: adaptive | Success within policy: fixed | Success within policy: adaptive | Cost: fixed | Cost: adaptive |
+|---|---|---|---|---|---|---|---|---|---|
+| python application (fixed preference already best) | best_first | 100.0% | 14.5% | 0 | 0 | 91.7% | 72.0% | $0.200 | $0.114 |
+| backend API, decision only | api_specialist | 0.0% | 70.3% | 0 | 0 | n/a | n/a | $0.200 | $0.200 |
+| frontend application, decision only | ui_engine | 0.0% | 100.0% | 0 | 0 | n/a | n/a | $0.200 | $0.200 |
+| debugging failing tests | debugger | 0.0% | 61.5% | 0 | 0 | 49.3% | 68.0% | $0.200 | $0.200 |
+| repository modification, decision only | repo_engine | 0.0% | 100.0% | 0 | 0 | n/a | n/a | $0.200 | $0.200 |
+| preferred tool unavailable | up | 100.0% | 100.0% | 0 | 0 | 68.3% | 68.3% | $0.200 | $0.200 |
+| budget too small for the preferred tool | cheap | 0.0% | 100.0% | 1200 | 0 | 0.0% | 70.8% | $0.600 | $0.100 |
+| safe fallback after a failure | backup | 0.0% | 75.2% | 0 | 0 | 74.2% | 78.9% | $0.300 | $0.281 |
+| poor history on the preferred tool | untried | 0.0% | 100.0% | 0 | 0 | 20.2% | 80.4% | $0.200 | $0.200 |
+| missing history, worst tool preferred | best | 0.0% | 79.2% | 0 | 0 | 31.1% | 79.2% | $0.200 | $0.200 |
+| unsafe tool preferred | sandboxed | 0.0% | 100.0% | 1200 | 0 | 0.0% | 71.0% | $0.200 | $0.200 |
+| unapproved credential or network preferred | allowed | 0.0% | 100.0% | 1200 | 0 | 0.0% | 57.0% | $0.200 | $0.200 |
+| refusal is the right answer | refuse | 0.0% | 100.0% | 1200 | 0 | 0.0% | 0.0% | $0.200 | $0.000 |
+
+| Each scenario counted equally | Fixed | Adaptive |
+|---|---|---|
+| Correct selection | 15.4% | 84.7% |
+| Simulated success within policy | 33.5% | 64.6% |
+| Simulated success counting forbidden tools | 70.9% | 64.6% |
+| Policy violations | 4800 | 0 |
+| Cost per task | $0.238 | $0.177 |
+| Switched tool after a failure | 0 of 598 | 488 of 488 |
+| Median time per choice | 1.7 µs | 47.8 µs |
+
+How to read this:
+- **The overall figures describe this scenario mix and predict nothing.** In 11 of the 13 scenarios the preferred tool is wrong or forbidden, so fixed preference is set up to lose.
+- **Fixed preference wins the control:** 100.0% correct against 14.5%, and 91.7% success against 72.0%. The adaptive policy settles on the cheaper tool and never tries the better one.
+- **A first version of this table counted a forbidden tool's success as a success,** which gave fixed preference 70.9%. Success within policy leaves those out, and the raw figure is kept above.
+- **A violation by the fixed policy is at selector level.** On the real path a later layer, such as the launcher or the gateway, would stop some of them.
+- **Most of the cost saving is not efficiency.** It comes from the budget and refusal scenarios, where the fixed policy spends money it was not allowed to.
+- **The time per choice covers the decision only.** The benchmark uses a stub launcher and no memory probe, so it leaves out the history query and the availability check a real choice also makes. Neither was measured.
+- **The Phase 7 target is not met:** the p = 0.9 tool was chosen in 85.0% of selections after 50 trials, against 90%, and 17 of 20 seeds met it.
+
+## Limitations
+
+- **No exploration.** The ranking only exploits what it knows, so a better untested tool can be missed for good. That is the cause of both results above: with evidence on both tools, the more reliable one wins even at a higher cost (`test_with_evidence_on_both_the_more_reliable_tool_wins_though_it_costs_more`). §9.1's UCB term would address this, but it was not built: it is not in the agreed formula, and on a paid path exploring costs money.
+- **With one real provider, adaptive selection adds refusals and explanations, not a better choice.** The only real effect today is refusing an attempt the budget or memory cannot support.
+- **Quality is declared, not measured.** No signal beyond verification exists yet.
+- **The simulated benchmark is biased toward adaptive selection,** because 11 of its 13 scenarios make the fixed preference wrong or forbidden.
+- **The simulated 90% target was missed,** at 85%. The weights were not tuned to close the gap.
+- **Verification judges the whole project,** so every waiting attempt in a run shares its verdict.
+- **The memory check reads the host's commit headroom,** which is only an approximation for work inside Docker.
+- **The dollar check needs prices.** With `OPENAI_PRICE_INPUT_PER_MTOK` or `OPENAI_PRICE_OUTPUT_PER_MTOK` unset, a run's cost is unknown, so selection can apply only the token check. The existing run and gateway guards are unchanged.
+- **§9.1's circuit breaker is not built.** Its `SELECTION_*` lines were dropped from `.env.example`, which no code read.
+- **`recover_attempts` still uses the first launcher.** A second real provider would need the provider recorded with each attempt.
+
+**Deferred, because they need Docker:** `tests/integration/test_mvp_end_to_end.py` (7), `tests/integration/test_sandbox_docker.py` (9), and a real-container pass of `generate_code` under the adaptive policy. Real `tool_outcomes` rows cannot exist until a real model runs.
+
+**Tests:** The full offline suite passed on this code: 2,827 passed, 17 skipped and 0 failed, in 102 s, peak 217 MB, one process. The 17 skipped are the opt-in tests: 16 need Docker and 1 calls OpenAI. The real `.env` was never opened, and nothing reached Docker or an external host. 39 deliberate breaks of the selection logic were tried on throwaway copies with no `.env`, and the final tests catch all 39. The first 20, on eligibility and learning, were all caught. The next 19, on tie-breaking, the budget arithmetic, what reaches the selector and how authorization is built, found 5 that no test caught: floating-point ties, remaining tokens reaching the selector, verified history reaching the selector, a verdict staying inside its own run, and only a failure marking a tool as failed. The code was correct in all five. The tests were the gap, and they were added or fixed. `ruff` and `mypy` are not installed, so neither ran.

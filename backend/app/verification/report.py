@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.core.events import event_payload, list_events
 from app.db.models import AcceptanceCriterion, PlanTask, Project, Requirement, Run
 
-_REAL_SANDBOX = "DockerSandbox"
+REAL_SANDBOX = "DockerSandbox"
 _EVENT_LIMIT = 5_000
 
 
@@ -28,7 +28,7 @@ def build_report(session: Session, run: Run, project: Project, *, gpt: str, sand
     selections = by_type.get("selection.chosen", [])
     providers = sorted({s["provider"] for s in selections})
     simulated = [name for name, flag in (("GPT orchestration", gpt.startswith("FakeLLM")), ("coding provider", any(s["simulated"] for s in selections)),
-                                         ("Docker tests", sandbox != _REAL_SANDBOX)) if flag]  # fmt: skip
+                                         ("Docker tests", sandbox != REAL_SANDBOX)) if flag]  # fmt: skip
     delivered = by_type.get("delivery.finished", [{}])[-1].get("files", [])
     return {
         "project": {"id": project.id, "name": project.name, "requirement": project.requirement_text, "stack": project.stack},

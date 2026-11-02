@@ -2,6 +2,8 @@
 
 **Current state (2026-11-01):** the offline MVP is finished and verified. A requirement goes through the real API, orchestrator and audit, real OpenCode writes the files on real containers behind the real filter and gateway code, Docker runs the tests, and the tested files are delivered. GPT's replies and the model are scripted. **No real model has been called through this path, and no paid call is authorized.** A live run needs its own approval. Its proposal, with a $1.50 limit, is under "First real demonstration" at the end of this file.
 
+**Stage 2 (2026-11-02):** adaptive tool selection is built in Python and tested offline. See "Stage 2: adaptive tool selection" near the end of this file.
+
 Phase 4 (OpenCode) in progress. The foundation, the contract checks, the verified binary and the precedence experiment are committed (2026-10-30).
 
 Phase 4D Round 1 (2026-10-31):
@@ -23,7 +25,7 @@ Phase 4D Round 3 (2026-10-31): the API filter and independent container terminat
 | 4 | OpenCode integration | 🟡 Foundation committed; binary verified; precedence verified; Phase 4D Stages 1–4 committed as `f4aa786` (2026-10-31). Stages 5 and 6 committed as `53070e8`: adapter, tool allowlist, read-only real-server check (28 PASS, 0 FAIL). Round 3 committed as `ab3f447`: API filter and independent termination, isolated filter run 42 PASS, 0 FAIL. MVP slice committed as `b7a0010`: gateway, launcher, disposable copy, `generate_code`, verification, recovery, delivery, report. Verified on real containers with a scripted model, and closed out on 2026-11-01. A real model, the published port and the route out have not run | Paid-call approval |
 | 5 | Verification-guided development | 🟡 MVP core only: tests in Docker judged against MUST criteria. No frozen tests or score | — |
 | 6 | Failure classification and recovery | 🟡 MVP core only: a small rule table with bounded repair and retry. No 40-log classifier | — |
-| 7 | Adaptive tool selection | 🟡 MVP core only: deterministic provider choice with recorded exclusions. No scoring from past outcomes | — |
+| 7 | Adaptive tool selection | 🟡 Python-only Stage 2 built (2026-11-02): eligibility filter, utility ranking, verified history, fallback. One real provider, so no real comparison. Target not met in simulation, and the breaker is not built | Docker for the deferred tests |
 | 8 | GitHub, Google Drive and n8n integrations, with document retrieval | ⏳ Not started | Google OAuth client, GitHub PAT, n8n container (user) |
 | 9 | React frontend | ⏳ Not started | Node.js (installed) |
 | 10 | Evaluation and competition demonstration | ⏳ Not started | all of the above |
@@ -911,6 +913,35 @@ So 152 of the 153 are detected, and the last is redundant by design. The 94 ran 
 | The crash in `recovery` | **Simulated:** the session is abandoned, in one process. The writer, the stop, the restore and the startup path are real |
 
 **Retained evidence.** Nothing was deleted. `D:\DevPilotCache\launcher-check` holds the 13 folders from the first pass, unchanged by fingerprint, and one more, `20261031T191216Z`, from this round. Two attempts stay QUARANTINED on purpose, one from each pass, in `20261031T171452Z\quarantine` and in the new folder: each stop was recorded as unconfirmed, with a Docker CLI broken by the check. Both containers have since been confirmed gone by a separate read, and their workspaces and evidence are intact. They stay until their cleanup is authorized. Six attempt folders from the first pass hold gateway tokens: test-only, not OpenAI keys, each valid only for a gateway that no longer exists. None is in a report, log or the repository. The cleanup is proposed separately in `D:\DevPilotCache\cleanup-recommendation-2026-11-01.md`, and has not been done.
+
+### Stage 2: adaptive tool selection (2026-11-02)
+
+Python only: no Docker, no model, no key, and the real `.env` was not read. The design and full results are in [ARCHITECTURE_OPTIMIZATION.md](ARCHITECTURE_OPTIMIZATION.md), "Stage 2".
+
+**Built:** `selection/adaptive.py` (eligibility, then `U = 0.30·C + 0.25·R + 0.15·Q + 0.10·L + 0.10·K + 0.10·M`), `selection/history.py` and the `tool_outcomes` table (learning from verified outcomes only, with real and simulated evidence apart), `selection/catalog.py` (what really exists), `selection/model.py`, and `demo/selection_benchmark.py`. `SELECTION_POLICY=fixed` keeps the old preference order.
+
+**Results, all simulated, on hypothetical tools:**
+
+| Each scenario counted equally | Fixed | Adaptive |
+|---|---|---|
+| Correct selection | 15.4% | 84.7% |
+| Simulated success within policy | 33.5% | 64.6% |
+| Policy violations | 4800 | 0 |
+| Switched tool after a failure | 0 of 598 | 488 of 488 |
+
+These figures describe a scenario mix in which the preferred tool is usually wrong or forbidden, and predict nothing about real use. **Fixed preference wins the control scenario** (100.0% against 14.5% correct), because the adaptive policy has no exploration and never tries a better untested tool. **The Phase 7 target is not met:** 85.0% against 90%.
+
+**Tests:** The full offline suite passed on this code: 2,827 passed, 17 skipped and 0 failed, in 102 s, peak 217 MB, one process. The 17 skipped are the opt-in tests: 16 need Docker and 1 calls OpenAI. The real `.env` was never opened, and nothing reached Docker or an external host. 39 deliberate breaks of the selection logic were tried on throwaway copies with no `.env`, and the final tests catch all 39. The first 20, on eligibility and learning, were all caught. The next 19, on tie-breaking, the budget arithmetic, what reaches the selector and how authorization is built, found 5 that no test caught: floating-point ties, remaining tokens reaching the selector, verified history reaching the selector, a verdict staying inside its own run, and only a failure marking a tool as failed. The code was correct in all five. The tests were the gap, and they were added or fixed. `ruff` and `mypy` are not installed.
+
+**Deferred, because they need Docker:** the 16 opt-in Docker tests, and a real-container pass of `generate_code` under the adaptive policy.
+
+**Known limitations, recorded and not addressed in this stage:**
+- Only one real coding provider exists, so no real comparison has happened. The adaptive policy's only real effect today is refusing attempts the budget or memory cannot support.
+- There is no exploration policy, so a better untested tool can be missed for good. On a paid path exploring costs money, so it needs its own decision.
+- There is no circuit breaker.
+- Quality is declared, not measured.
+- The simulated benchmark is biased toward adaptive selection: in 11 of its 13 scenarios the fixed preference is wrong or forbidden.
+- The simulated 90% target was missed, at 85%.
 
 ### First real demonstration (proposed, not authorized)
 

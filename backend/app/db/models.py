@@ -5,6 +5,7 @@ Phase 2: `requirements`, `tasks`, `acceptance_criteria`, `tool_invocations`, `ap
 plus orchestration columns on `runs`. Columns added after Phase 1 carry a server default
 so `init_db` can add them to an existing database (see db/session.py).
 Phase 4: `coding_attempts`.
+Phase 7: `tool_outcomes`.
 """
 
 from __future__ import annotations
@@ -309,6 +310,28 @@ class CodingAttempt(Base):
     stop_evidence: Mapped[str | None] = mapped_column(Text, default=None)  # redacted before storage
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+
+class ToolOutcome(Base):
+    """One coding attempt as the selector learns from it (app/selection/history.py). `evidence` keeps
+    simulated outcomes apart from real ones, and `(run_id, call_id)` keeps an attempt from counting twice."""
+
+    __tablename__ = "tool_outcomes"
+    __table_args__ = (UniqueConstraint("run_id", "call_id", name="uq_tool_outcomes_run_call"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), index=True)
+    call_id: Mapped[str] = mapped_column(String(128))
+    task_key: Mapped[str] = mapped_column(String(128), index=True)
+    tool_id: Mapped[str] = mapped_column(String(64), index=True)
+    task_category: Mapped[str] = mapped_column(String(128), index=True)
+    evidence: Mapped[str] = mapped_column(String(16))  # real or simulated
+    status: Mapped[str] = mapped_column(String(16))  # PENDING until verification judges it, then VERIFIED or FAILED
+    failure_category: Mapped[str | None] = mapped_column(String(64), default=None)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, default=None)
+    cost_usd: Mapped[float | None] = mapped_column(Float, default=None)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    settled_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
 
 
 class Event(Base):
