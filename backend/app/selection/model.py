@@ -113,6 +113,7 @@ class SelectionContext:
     remaining_tokens: int | None = None
     history: Mapping[tuple[str, str], ToolHistory] = field(default_factory=dict)  # (tool, evidence) -> history
     failed_here: frozenset[str] = frozenset()  # tools that already failed this task in this run
+    demote_failed: bool = True  # False: recovery chose to repair or retry on the same tool, so it keeps its rank
 
 
 @dataclass(frozen=True)

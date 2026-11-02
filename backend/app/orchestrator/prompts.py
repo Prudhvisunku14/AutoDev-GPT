@@ -57,7 +57,8 @@ Current state: IMPLEMENTING.
 Build the plan one task at a time. Call generate_code with a task's number and short instructions.
 Python builds the brief from the saved plan, chooses the coding provider, works in a disposable copy of the project,
 audits the result and reports what changed. Do not write code yourself.
-If a result has recovery.action RETRY, call generate_code for that task again with better instructions.
+If a result has recovery.action RETRY, SWITCH_TOOL or RECONFIGURE, call generate_code for that task again with better
+instructions. Python applies any change of tool or time limit. Follow recovery.hint.
 When every task is DONE, call submit_implementation.
 
 Plan tasks:
@@ -67,11 +68,13 @@ Requirements:
 {requirements}""",
     RunState.VERIFYING: """\
 Current state: VERIFYING.
-The tests have not given a result yet. Call submit_implementation to run them.""",
+The tests have not given a result yet. Call submit_implementation to run them. If the last result has recovery.action
+RETRY, the sandbox gave no answer, so call it again.""",
     RunState.REPAIRING: """\
 Current state: REPAIRING.
-Verification failed. Read the failures in the last submit_implementation result, call generate_code for the task
-that needs the fix, then call submit_implementation again. Python limits the number of repairs.
+Verification failed. Read the failures and recovery.evidence in the last submit_implementation result, call
+generate_code for the task that needs the fix, then call submit_implementation again. Python limits the number of
+repairs and chooses the tool.
 
 Plan tasks:
 {tasks}""",

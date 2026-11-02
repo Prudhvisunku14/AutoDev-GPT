@@ -4,6 +4,8 @@
 
 **Stage 2 (2026-11-02):** adaptive tool selection is built in Python and tested offline. See "Stage 2: adaptive tool selection" near the end of this file.
 
+**Stage 3 (2026-11-02):** intelligent failure recovery is implemented in Python and tested offline, but not validated on real failures. See "Stage 3: intelligent failure recovery" near the end of this file.
+
 Phase 4 (OpenCode) in progress. The foundation, the contract checks, the verified binary and the precedence experiment are committed (2026-10-30).
 
 Phase 4D Round 1 (2026-10-31):
@@ -24,7 +26,7 @@ Phase 4D Round 3 (2026-10-31): the API filter and independent container terminat
 | 3 | Docker sandbox | 🟡 Isolation controls verified in real containers (2026-10-30); install proxy and orphan-sweep test on a real container still open | Docker Desktop running, data on D:, `python:3.12-alpine` present |
 | 4 | OpenCode integration | 🟡 Foundation committed; binary verified; precedence verified; Phase 4D Stages 1–4 committed as `f4aa786` (2026-10-31). Stages 5 and 6 committed as `53070e8`: adapter, tool allowlist, read-only real-server check (28 PASS, 0 FAIL). Round 3 committed as `ab3f447`: API filter and independent termination, isolated filter run 42 PASS, 0 FAIL. MVP slice committed as `b7a0010`: gateway, launcher, disposable copy, `generate_code`, verification, recovery, delivery, report. Verified on real containers with a scripted model, and closed out on 2026-11-01. A real model, the published port and the route out have not run | Paid-call approval |
 | 5 | Verification-guided development | 🟡 MVP core only: tests in Docker judged against MUST criteria. No frozen tests or score | — |
-| 6 | Failure classification and recovery | 🟡 MVP core only: a small rule table with bounded repair and retry. No 40-log classifier | — |
+| 6 | Failure classification and recovery | 🟡 Stage 3 implemented and tested offline (2026-11-02), not validated on real failures. Simulated recovery 59.8% against 66.3% for the bounded baseline (55.7% as deployed), at lower cost. Escalation off, repeat limit 2. No real-failure dataset | Docker for the deferred tests, then real failure data |
 | 7 | Adaptive tool selection | 🟡 Python-only Stage 2 built (2026-11-02): eligibility filter, utility ranking, verified history, fallback. One real provider, so no real comparison. Target not met in simulation, and the breaker is not built | Docker for the deferred tests |
 | 8 | GitHub, Google Drive and n8n integrations, with document retrieval | ⏳ Not started | Google OAuth client, GitHub PAT, n8n container (user) |
 | 9 | React frontend | ⏳ Not started | Node.js (installed) |
@@ -942,6 +944,20 @@ These figures describe a scenario mix in which the preferred tool is usually wro
 - Quality is declared, not measured.
 - The simulated benchmark is biased toward adaptive selection: in 11 of its 13 scenarios the fixed preference is wrong or forbidden.
 - The simulated 90% target was missed, at 85%.
+
+### Stage 3: intelligent failure recovery (2026-11-02)
+
+**Implemented and tested offline, not validated on real failures.** Python only: no Docker, no model, no key, and the real `.env` was not read. Design and results: [ARCHITECTURE_OPTIMIZATION.md](ARCHITECTURE_OPTIMIZATION.md), "Stage 3".
+
+**Built:** `recovery/diagnosis.py` (failure categories, evidence, confidence, whether recovery is safe, the actions that could apply, a fingerprint), `recovery/policy.py` (a deterministic choice of RETRY, REPAIR, SWITCH_TOOL, RECONFIGURE or STOP), two columns on `tool_outcomes`, `runs.recovery_json`, and `demo/recovery_benchmark.py`. Security failures and ambiguous states fail closed. A1 and A2 are unchanged.
+
+**Decided (2026-11-02):** `RECOVERY_REPEAT_LIMIT` stays at 2. Timeout escalation is off: `RECOVERY_MAX_ATTEMPT_TIMEOUT_SECONDS` is unset, which means `OPENCODE_TIMEOUT_SECONDS`. Both `RECOVERY_POLICY=bounded` and `intelligent` are kept, the latter for controlled evaluation.
+
+**Simulated result:** the intelligent policy recovers **59.8% against 66.3%** for the bounded baseline, at $0.155 against $0.225 a failure, with 0 unsafe decisions against 1393. As deployed, with escalation off, it recovers 55.7%. A repeat limit of 3 gave 79.6%, which is recorded as an experimental finding only. The scenarios were written for the benchmark, and no real-failure dataset exists.
+
+**Tests:** Whole offline suite: 3,206 passed, 17 skipped (16 opt-in Docker, 1 live), 0 failed, in 83 s, in one process with a 226 MB peak, and the fence refused nothing. 376 are Stage 3's own (220 classification, 90 decisions, 47 through the real flow, 19 benchmark), plus 3 on the configuration. A targeted check broke 25 safety rules one at a time in a throwaway copy, and the tests caught all 25. The three fixes made after review each have tests that fail without them.
+
+**Deferred, because they need Docker:** the 16 opt-in Docker tests under the intelligent policy, a real-container retry, and a real unconfirmed stop.
 
 ### First real demonstration (proposed, not authorized)
 

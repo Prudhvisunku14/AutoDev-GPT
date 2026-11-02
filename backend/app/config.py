@@ -134,6 +134,19 @@ class Settings(BaseSettings):
     selection_cost_reference_usd: float = Field(default=0.25, gt=0)
     selection_memory_reference_mb: float = Field(default=2_048.0, gt=0)
 
+    # --- Failure recovery (app/recovery/) --------------------------------------
+    # `bounded` keeps the fixed retry and repair rules, for comparison or as a way back.
+    recovery_policy: Literal["intelligent", "bounded"] = "intelligent"
+    # The same failure this many times in a row: the action taken after it is not working.
+    recovery_repeat_limit: int = Field(default=2, ge=2, le=10)
+    # Below this rate, over at least this many verified repairs, that repair is not tried.
+    recovery_min_repair_rate: float = Field(default=0.25, ge=0, le=1)
+    recovery_min_repair_samples: int = Field(default=5, ge=1)
+    # The only setting recovery may change: how long one task's coding attempt may run. It never
+    # touches a test timeout, a memory limit, the network or a spending limit. Unset, it is
+    # OPENCODE_TIMEOUT_SECONDS, so no attempt is given longer until this is raised on purpose.
+    recovery_max_attempt_timeout_seconds: float | None = Field(default=None, gt=0, le=3600)
+
     # --- Credentials used by later phases ---------------------------------
     # Declared here only so the redactor knows their values. Phase 1 never uses them.
     openai_api_key: SecretStr | None = None
@@ -171,6 +184,7 @@ class Settings(BaseSettings):
         "openai_max_output_tokens",
         "openai_price_input_per_mtok",
         "openai_price_output_per_mtok",
+        "recovery_max_attempt_timeout_seconds",
         mode="before",
     )
     @classmethod
@@ -234,6 +248,13 @@ class Settings(BaseSettings):
     @property
     def cost_known(self) -> bool:
         return self.openai_price_input_per_mtok is not None and self.openai_price_output_per_mtok is not None
+
+    @property
+    def recovery_attempt_timeout_ceiling(self) -> float:
+        """The longest one coding attempt may be given. Unset, the normal limit: recovery never extends one."""
+        if self.recovery_max_attempt_timeout_seconds is None:
+            return self.opencode_timeout_seconds
+        return self.recovery_max_attempt_timeout_seconds
 
     @property
     def cors_origins(self) -> list[str]:

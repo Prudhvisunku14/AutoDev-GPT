@@ -32,7 +32,8 @@ def evidence_of(*, simulated: bool, sandbox: object) -> str:
 
 
 def record_attempt(
-    session: Session, *, run_id: str, call_id: str, task_key: str, tool_id: str, category: str, evidence: str, status: CodingStatus, kept: bool, seconds: float | None, cost_usd: float | None
+    session: Session, *, run_id: str, call_id: str, task_key: str, tool_id: str, category: str, evidence: str, status: CodingStatus, kept: bool, seconds: float | None, cost_usd: float | None,
+    recovers_from: str | None = None, recovery_action: str | None = None,
 ) -> ToolOutcome | None:
     """A kept attempt waits for verification. One the audit refused, or that failed, is settled now."""
     if status in _SAYS_NOTHING:
@@ -43,6 +44,7 @@ def record_attempt(
     row = ToolOutcome(
         run_id=run_id, call_id=call_id, task_key=task_key, tool_id=tool_id, task_category=category, evidence=evidence, status=PENDING if kept else FAILED,
         failure_category=None if kept else f"CODING_{status.value}", duration_ms=None if seconds is None else int(seconds * 1000), cost_usd=cost_usd, settled_at=None if kept else utcnow(),
+        recovers_from=recovers_from, recovery_action=recovery_action,
     )  # fmt: skip
     session.add(row)
     session.flush()
@@ -91,3 +93,28 @@ def load_history(session: Session, category: str) -> dict[tuple[str, str], ToolH
 def failed_tools(session: Session, task_key: str) -> frozenset[str]:
     """Tools that already failed this task in this run, so a retry looks elsewhere first."""
     return frozenset(session.scalars(select(ToolOutcome.tool_id).where(ToolOutcome.task_key == task_key, ToolOutcome.status == FAILED)))
+
+
+def failed_in_run(session: Session, run_id: str) -> frozenset[str]:
+    """Tools with a failed attempt anywhere in this run: a failed verification judges the whole project."""
+    return frozenset(session.scalars(select(ToolOutcome.tool_id).where(ToolOutcome.run_id == run_id, ToolOutcome.status == FAILED)))
+
+
+def last_attempt(session: Session, run_id: str) -> ToolOutcome | None:
+    return session.scalars(select(ToolOutcome).where(ToolOutcome.run_id == run_id).order_by(ToolOutcome.id.desc()).limit(1)).first()
+
+
+def attempt_seconds(session: Session, run_id: str) -> float:
+    return (session.scalar(select(func.sum(ToolOutcome.duration_ms)).where(ToolOutcome.run_id == run_id)) or 0) / 1000
+
+
+def repair_record(session: Session, *, tool_id: str, evidence: str, category: str) -> tuple[int, int]:
+    """(judged, verified) for this tool's repairs of this failure. Only verification counts, so a waiting
+    attempt is left out, and real and simulated evidence stay apart."""
+    rows = session.execute(
+        select(ToolOutcome.status, func.count())
+        .where(ToolOutcome.tool_id == tool_id, ToolOutcome.evidence == evidence, ToolOutcome.recovers_from == category, ToolOutcome.recovery_action == "REPAIR", ToolOutcome.status != PENDING)
+        .group_by(ToolOutcome.status)
+    ).all()  # fmt: skip
+    counts = {status: count for status, count in rows}
+    return sum(counts.values()), counts.get(VERIFIED, 0)

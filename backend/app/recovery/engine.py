@@ -8,7 +8,9 @@ the limits come from settings:
 - RETRY: the coding attempt failed and nothing was kept. The same task may run again.
 - STOP: another try cannot help or is not allowed. The run ends, and says why.
 
-This is the small rule table the MVP needs, not the full Phase 6 classifier.
+`decide_verification` and `decide_coding` are the fixed bounded policy. They stay as the baseline, and
+`RECOVERY_POLICY=bounded` selects them. The intelligent policy is in diagnosis.py and policy.py, and it adds
+SWITCH_TOOL (another eligible tool takes the task) and RECONFIGURE (one approved task-level setting changes).
 """
 
 from __future__ import annotations
@@ -23,6 +25,8 @@ from app.coding.types import CodingStatus
 class Action(StrEnum):
     REPAIR = "REPAIR"
     RETRY = "RETRY"
+    SWITCH_TOOL = "SWITCH_TOOL"
+    RECONFIGURE = "RECONFIGURE"
     STOP = "STOP"
 
 
@@ -51,9 +55,23 @@ class Decision:
     attempts_used: int
     attempts_allowed: int
     hint: str = ""
+    # The rest come from the intelligent policy.
+    category: str = ""
+    confidence: str = ""
+    evidence: tuple[str, ...] = ()
+    recovery_safe: bool = True
+    actions: tuple[str, ...] = ()  # what could have applied, best first
+    location: str | None = None
+    tool: str | None = None  # SWITCH_TOOL: the tool that takes over
+    real_switch: bool = False  # False: no real tool is involved in the switch
+    timeout_seconds: float | None = None  # RECONFIGURE: the task's new attempt limit
 
     def to_dict(self) -> dict[str, Any]:
         return {**asdict(self), "action": self.action.value}
+
+
+def hint_for(failure_class: str) -> str:
+    return _HINTS.get(failure_class, "")
 
 
 def decide_verification(failure_class: str, *, repairs_used: int, max_repairs: int) -> Decision:

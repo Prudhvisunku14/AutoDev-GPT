@@ -81,13 +81,16 @@ class ToolResult(BaseModel):
 
 
 class ToolError(Exception):
-    """Raised by a tool handler to return a structured failure. Its DB changes are rolled back."""
+    """Raised by a tool handler to return a structured failure. Its DB changes are rolled back.
 
-    def __init__(self, error_class: ErrorClass, summary: str, details: list[str] | None = None) -> None:
+    `after_rollback` runs after that, in the outer transaction, when `begin` must also end the run."""
+
+    def __init__(self, error_class: ErrorClass, summary: str, details: list[str] | None = None, *, after_rollback: Callable[[], None] | None = None) -> None:
         super().__init__(summary)
         self.error_class = error_class
         self.summary = summary
         self.details = details
+        self.after_rollback = after_rollback
 
 
 @dataclass

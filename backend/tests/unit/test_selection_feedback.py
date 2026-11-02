@@ -322,7 +322,7 @@ def test_after_a_failure_the_retry_goes_to_the_other_tool_and_the_copy_was_resto
     r = Rig(tmp_path, *opening(), generate(1), generate(1, "Again."), generate(2), submit(), finish(), launcher=first, selector=chooser)
     run = r.advance()
     assert run.state is RunState.COMPLETED and r.attempts()[0] is AttemptPhase.RESTORED and "half.py" not in r.h.workspace.list_files(r.project_id)
-    assert r.output("generate_code", 0)["data"]["recovery"]["action"] == "RETRY"
+    assert r.output("generate_code", 0)["data"]["recovery"]["action"] == "SWITCH_TOOL"
     retry = r.output("generate_code", 1)["data"]
     assert retry["provider"] == "second" and retry["selection"]["fallback"] == "switched"
 

@@ -1297,3 +1297,113 @@ How to read this:
 **Deferred, because they need Docker:** `tests/integration/test_mvp_end_to_end.py` (7), `tests/integration/test_sandbox_docker.py` (9), and a real-container pass of `generate_code` under the adaptive policy. Real `tool_outcomes` rows cannot exist until a real model runs.
 
 **Tests:** The full offline suite passed on this code: 2,827 passed, 17 skipped and 0 failed, in 102 s, peak 217 MB, one process. The 17 skipped are the opt-in tests: 16 need Docker and 1 calls OpenAI. The real `.env` was never opened, and nothing reached Docker or an external host. 39 deliberate breaks of the selection logic were tried on throwaway copies with no `.env`, and the final tests catch all 39. The first 20, on eligibility and learning, were all caught. The next 19, on tie-breaking, the budget arithmetic, what reaches the selector and how authorization is built, found 5 that no test caught: floating-point ties, remaining tokens reaching the selector, verified history reaching the selector, a verdict staying inside its own run, and only a failure marking a tool as failed. The code was correct in all five. The tests were the gap, and they were added or fixed. `ruff` and `mypy` are not installed, so neither ran.
+
+# Stage 3: intelligent failure recovery (2026-11-02)
+
+**Implemented and tested offline. Not validated on real failures.** Python only: no Docker ran, no model was called, no key was loaded and the real `.env` was not read. GPT stays the only orchestrator.
+
+## Recovery algorithm
+
+A failed attempt or test run goes to `recovery/diagnosis.py`, which names a category with its evidence, a confidence, whether recovery is safe, the actions that could apply, and a fingerprint. `recovery/policy.py` then picks one action: RETRY, REPAIR, SWITCH_TOOL, RECONFIGURE or STOP. It is deterministic, reads no database and starts nothing. GPT gets the decision and writes the fix. It cannot name a tool or a time limit: Python applies those from `runs.recovery_json`.
+
+`RECOVERY_POLICY=intelligent` is the default. `RECOVERY_POLICY=bounded` runs the original `decide_coding` and `decide_verification`, unchanged, for comparison and as a way back.
+
+## Failure categories
+
+Structured signals come first, because program output cannot fake them: the attempt's lifecycle phase, the audit, the sandbox's exit status and the test runner's counts. Text only tells one fault in the code from another.
+
+| Category | Signal | Actions, best first |
+|---|---|---|
+| `SYNTAX_ERROR`, `TEST_FAILURE`, `MISSING_DEPENDENCY`, `RUNTIME_EXCEPTION` | The test output and the runner's counts | REPAIR, SWITCH_TOOL, STOP |
+| `TIMEOUT` | Tests: the limit is never raised | REPAIR, SWITCH_TOOL, STOP |
+| | A coding attempt | RECONFIGURE, SWITCH_TOOL, RETRY, STOP |
+| `RESOURCE_EXHAUSTION` | The sandbox's memory or output limit | REPAIR, SWITCH_TOOL, STOP |
+| | The task's tokens ran out | SWITCH_TOOL, STOP |
+| `TOOL_UNAVAILABLE` | The sandbox gave no answer | RETRY, STOP |
+| | The provider failed or could not be reached | SWITCH_TOOL, RETRY, STOP |
+| `INVALID_CODE` | No tests, an unproved MUST criterion | REPAIR, SWITCH_TOOL, STOP |
+| | The audit refused only the size of the output | RETRY, SWITCH_TOOL, STOP |
+| `SECURITY_VIOLATION` | A policy breach, refused credentials, an unsafe configuration, any other audit finding | STOP |
+| `AMBIGUOUS_STATE` | An attempt not proved undone, an answer that cannot be interpreted, a held project, a test container nobody removed | STOP, keeping the copy |
+| `UNKNOWN` | No rule matched. Confidence LOW | REPAIR or RETRY once, then STOP |
+
+**Fail closed.** Only `ABANDONED`, `REJECTED` and `RESTORED` count as undone. Any other phase, including one added later, is unsafe.
+
+**The same failure.** A test failure is known by its failing tests and its messages without paths or numbers. A test run that never ran is known by the sandbox's status alone. A coding attempt is known by its task and status, because a provider's message can name the attempt's own container.
+
+## Decision rules
+
+1. An unsafe diagnosis stops the run.
+2. The bounded attempt and repair limits still hold, and a switch counts against them.
+3. The first offered action allowed now is taken. Nothing runs unless the selector says a tool can, within budget, tokens and memory. An action needs the time the last attempt took. After the same failure twice in a row, only SWITCH_TOOL is left. SWITCH_TOOL needs another eligible tool. REPAIR is skipped when at least 5 verified repairs of this failure show a smoothed rate under 0.25.
+4. If nothing is left, the run stops and says why. If no tool can start at all, the run ends at once with `no_eligible_tool`.
+
+## Defaults
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `RECOVERY_POLICY` | `intelligent` | `bounded` keeps the original rules |
+| `RECOVERY_REPEAT_LIMIT` | 2 | Kept at 2. A limit of 3 did better in simulation (below), but changing it needs unbiased or real evidence |
+| `RECOVERY_MIN_REPAIR_RATE`, `RECOVERY_MIN_REPAIR_SAMPLES` | 0.25, 5 | Verified repairs only |
+| `RECOVERY_MAX_ATTEMPT_TIMEOUT_SECONDS` | Unset: `OPENCODE_TIMEOUT_SECONDS` | **Escalation is off.** Only a larger value turns RECONFIGURE on. It has been tested, but it is disabled. It never raises a test timeout, a memory limit, the network, a spending limit or the run's deadline |
+
+## Integration with adaptive tool selection
+
+- Recovery asks the Stage 2 selector what can run next, so budget, tokens, memory and the security rules are judged by one set of rules, and a simulation never replaces a real tool.
+- SWITCH_TOOL ranks the failed tool last, as Stage 2 does. REPAIR, RETRY and RECONFIGURE keep its rank.
+- `tool_outcomes.recovers_from` and `recovery_action` record what each attempt was for. Verification settles them as before, so reliability counts verified results only.
+- A1 and A2 are unchanged: a retry is a new attempt with its own call, and a test rerun sends no prompt.
+- `ToolError.after_rollback` lets `begin_external` end a run after rolling back a refused call.
+
+## Benchmark (simulated)
+
+`python -m app.demo.recovery_benchmark` prints every scenario. 20 seeds × 50 failures × 28 scenarios, 22 of them recoverable. The decisions are the real code, reading real-format logs, scored against an oracle that knows each scenario's true chances. Both policies meet identical luck.
+
+| Each scenario counted equally | Bounded | Intelligent |
+|---|---|---|
+| Recovery success | 66.3% | 59.8% |
+| Incorrect decisions | 28.9% | 24.2% |
+| Attempts per failure | 1.12 | 0.78 |
+| Recovery time per failure | 76 s | 58 s |
+| Estimated cost per failure | $0.225 | $0.155 |
+| Safe termination | 95.0% | 100.0% |
+| Unsafe decisions (a later guard would refuse) | 1393 | 0 |
+
+**The intelligent policy recovers less than the baseline: 59.8% against 66.3%**, despite lower cost and no unsafe decisions. It recovered more in 4 scenarios, and the baseline in 15. This table lets a timed-out attempt be given longer where a scenario approves it. **As deployed, with escalation off, the intelligent policy recovers 55.7% against 66.3%, and its incorrect decisions are no longer lower (26.5% against 25.8%).** No claim of better real-world recovery is made.
+
+The table below changes one assumption at a time. It changes no default.
+
+| World | Policy | Recovery success | Incorrect decisions | Attempts per failure | Cost per failure |
+|---|---|---|---|---|---|
+| each try has the same chance | bounded | 66.3% | 28.9% | 1.12 | $0.225 |
+| each try has the same chance | intelligent, repeat limit 2 (the default) | 59.8% | 24.2% | 0.78 | $0.155 |
+| each try has the same chance | intelligent, repeat limit 3 | 79.6% | 10.9% | 1.05 | $0.209 |
+| a failed try halves the next one's chance | bounded | 58.3% | 27.8% | 1.12 | $0.225 |
+| a failed try halves the next one's chance | intelligent, repeat limit 2 (the default) | 58.8% | 24.3% | 0.77 | $0.155 |
+| a failed try halves the next one's chance | intelligent, repeat limit 3 | 70.5% | 11.2% | 1.04 | $0.207 |
+| no attempt is given longer, as deployed | bounded | 66.3% | 25.8% | 1.12 | $0.225 |
+| no attempt is given longer, as deployed | intelligent, repeat limit 2 (the default) | 55.7% | 26.5% | 0.78 | $0.155 |
+| no attempt is given longer, as deployed | intelligent, repeat limit 3 | 75.7% | 14.5% | 1.08 | $0.216 |
+
+A repeat limit of 3 recovers more (79.6% at $0.209) in every world. That is an experimental finding, and the default stays at 2.
+
+**Limits of the benchmark.** The scenarios and their chances were written for it, so its figures describe that mix and predict nothing. Each try is assumed independent, which is the kindest assumption for trying again. The classifier's 96.3% is on logs written for the benchmark. The time per decision leaves out the database and selector work a real decision does.
+
+## Tests
+
+Whole offline suite: 3,206 passed, 17 skipped (16 opt-in Docker, 1 live), 0 failed, in 83 s, in one process with a 226 MB peak, and the fence refused nothing. 376 are Stage 3's own (220 classification, 90 decisions, 47 through the real flow, 19 benchmark), plus 3 on the configuration. A targeted check broke 25 safety rules one at a time in a throwaway copy, and the tests caught all 25. The three fixes made after review each have tests that fail without them.
+
+## Limitations
+
+- **No real-failure dataset exists.** No real failure has been classified, and the 40-log corpus §9.2 calls for has not been collected.
+- **Only one real coding provider exists,** so SWITCH_TOOL has only moved between simulated tools.
+- A retry has no backoff. Progress is judged by fingerprint only, and §9.2's rollback to the last green checkpoint is not built.
+- Verification judges the whole project, so every waiting attempt in a run shares its verdict.
+- The time check is a lower bound, because `active_seconds` is saved only when a turn ends.
+
+## Deferred Docker verification
+
+- `tests/integration/test_mvp_end_to_end.py` (7) and `tests/integration/test_sandbox_docker.py` (9), under the intelligent policy.
+- A real-container pass of `generate_code` through RETRY, where a confirmed stop is real.
+- A real unconfirmed stop and a real test container that cannot be removed, ending in AMBIGUOUS_STATE.
+- The classifier on real sandbox output, and real `recovers_from` rows, which need a real model.

@@ -9,7 +9,7 @@ everything that must not depend on a model's good behaviour:
 - Every attempt goes through `AttemptGuard`. The writer is stopped and confirmed gone before the audit
   reads a file, and a refused attempt is restored only through the guard.
 - The tests run in the Docker sandbox, and the verdict comes from what the sandbox really did.
-- Recovery is bounded in code (app/recovery/engine.py). When it says STOP, the run ends.
+- Recovery is bounded in code (app/recovery/). When it says STOP, the run ends.
 
 The guard saves in its own transactions, so all of its work is in the `run` step, where no database
 transaction is open.
@@ -41,12 +41,14 @@ from app.db.models import TERMINAL_RUN_STATES, AcceptanceCriterion, CodingAttemp
 from app.orchestrator.budget import turn_cost_usd
 from app.orchestrator.llm_client import Usage
 from app.orchestrator.run_control import change_state, complete_run, end_run
+from app.recovery.diagnosis import AttemptSignal, FailureCategory, classify_attempt, classify_refusal, classify_verification
 from app.recovery.engine import REPAIRABLE, Action, Decision, decide_coding, decide_verification
+from app.recovery.policy import RecoveryConfig, RecoveryMemory, RecoveryState, ToolOptions, decide, longer_timeout
 from app.sandbox.docker_cli import SandboxError, SandboxUnavailable
 from app.sandbox.policy import SandboxPolicyError, build_spec
 from app.sandbox.runner import SandboxRunner
 from app.sandbox.spec import ExecResult, ExecSpec, ExecStatus
-from app.selection.history import evidence_of, failed_tools, load_history, record_attempt, settle_verification
+from app.selection.history import attempt_seconds, evidence_of, failed_in_run, failed_tools, last_attempt, load_history, record_attempt, repair_record, settle_verification
 from app.selection.model import BUILD, REPAIR, SelectionContext, task_category
 from app.selection.selector import NoProvider, Selector
 from app.tools.adapters.workspace_fs import WorkspaceError
@@ -62,6 +64,7 @@ LongText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1,
 _FINISHED_TASK = "DONE"
 _FAILED_TASK = "FAILED"
 _RESTORABLE_ERRORS = (RestoreForbidden, OSError, ValueError)
+_SAME_TOOL = frozenset({Action.REPAIR.value, Action.RETRY.value, Action.RECONFIGURE.value})  # recovery chose to stay on the tool
 
 
 @dataclass(frozen=True)
@@ -113,6 +116,8 @@ class _CodingPlan:
     category: str = ""  # which attempts this one is comparable with
     evidence: str = ""  # whether this attempt may inform a real tool's history
     selection: dict[str, Any] = field(default_factory=dict)  # what GPT is told about the choice
+    recovers_from: str | None = None  # the failure this attempt is meant to fix
+    recovery_action: str | None = None
 
 
 @dataclass
@@ -139,12 +144,14 @@ def _begin_generate_code(runtime: CodingRuntime, ctx: ToolContext, args: Generat
         raise ToolError(ErrorClass.POLICY_REFUSED, f"stack {project.stack} cannot be verified yet, so no code is written for it; python-cli can")
     if ctx.workspace is None or ctx.call_id is None:
         raise ToolError(ErrorClass.TOOL_ERROR, "the workspace is not configured for this backend")
-    left = max(ctx.settings.run_budget_usd - run.cost_usd, 0.0) if run.cost_known else None  # attempts together stay inside the run's budget
-    context = _selection_context(ctx, task, stack.id, left)
+    left = _money_left(ctx)  # attempts together stay inside the run's budget
+    context = _selection_context(ctx, task.capability, task.order, stack.id, left)
     try:
         selection = runtime.selector.choose(task.capability, context)
     except NoProvider as exc:
-        raise ToolError(ErrorClass.POLICY_REFUSED, str(exc)) from exc
+        raise ToolError(ErrorClass.POLICY_REFUSED, str(exc), after_rollback=partial(_no_tool_left, runtime, ctx, task.order, exc)) from exc
+    memory = RecoveryMemory.load(run.recovery_json)
+    directive = memory if memory.applies_to(task.order) else RecoveryMemory()
     try:
         root = runtime.candidates.open_or_create(run.id, ctx.workspace.project_dir(project.id))
     except (CandidateError, WorkspaceError) as exc:
@@ -164,22 +171,29 @@ def _begin_generate_code(runtime: CodingRuntime, ctx: ToolContext, args: Generat
     coding_task = CodingTask(
         key=f"{run.id}:{task.order}", title=task.title, brief=brief, session_id=None, abort_first=False,
         max_tokens=min(ctx.settings.opencode_max_tokens_per_task, max(ctx.settings.run_max_tokens - spent, 1)),
-        timeout_seconds=ctx.settings.opencode_timeout_seconds, workspace=root,
+        timeout_seconds=directive.timeout_seconds or ctx.settings.opencode_timeout_seconds, workspace=root,
     )  # fmt: skip
     _record(ctx, "coding.started", {"task": task.order, "title": task.title, "provider": selection.provider, "files_before": len(before.files)})
     return _CodingPlan(
         project.id, run.id, ctx.call_id, task.order, coding_task, root, checkpoint, before, selection.launcher, selection.provider, selection.simulated, ctx.settings, left,
         category=task_category(task.capability, stack.id, context.kind), evidence=evidence_of(simulated=selection.simulated, sandbox=runtime.sandbox), selection=selection.summary(),
+        recovers_from=directive.category or None, recovery_action=directive.action or None,
     )  # fmt: skip
 
 
-def _selection_context(ctx: ToolContext, task: PlanTask, stack_id: str, left: float | None) -> SelectionContext:
+def _money_left(ctx: ToolContext) -> float | None:
+    return max(ctx.settings.run_budget_usd - ctx.run.cost_usd, 0.0) if ctx.run.cost_known else None
+
+
+def _selection_context(ctx: ToolContext, capability: str, task_order: int, stack_id: str, left: float | None, *, kind: str | None = None) -> SelectionContext:
     """What this choice depends on. GPT asked for the capability: everything else here comes from the run's records."""
     run = ctx.run
-    kind = REPAIR if run.state is RunState.REPAIRING else BUILD
+    kind = kind or (REPAIR if run.state is RunState.REPAIRING else BUILD)
+    memory = RecoveryMemory.load(run.recovery_json)
     return SelectionContext(
         stack=stack_id, kind=kind, remaining_usd=left, remaining_tokens=max(ctx.settings.run_max_tokens - run.tokens_in - run.tokens_out, 0),
-        history=load_history(ctx.session, task_category(task.capability, stack_id, kind)), failed_here=failed_tools(ctx.session, f"{run.id}:{task.order}"),
+        history=load_history(ctx.session, task_category(capability, stack_id, kind)), failed_here=failed_tools(ctx.session, f"{run.id}:{task_order}"),
+        demote_failed=not (memory.applies_to(task_order) and memory.action in _SAME_TOOL),
     )  # fmt: skip
 
 
@@ -203,7 +217,9 @@ def _last_failure(run: Run) -> str:
     if run.state is not RunState.REPAIRING or not run.verification_json:
         return ""
     last = json.loads(run.verification_json)
-    return f"{last['reason']}\n\n{last['output_tail']}"
+    memory = RecoveryMemory.load(run.recovery_json)
+    diagnosis = f"Diagnosis: {memory.category}. {memory.evidence}\n\n" if memory.category else ""
+    return f"{diagnosis}{last['reason']}\n\n{last['output_tail']}"
 
 
 class _LateWriter:
@@ -324,7 +340,7 @@ def _finish_generate_code(runtime: CodingRuntime, ctx: ToolContext, plan: _Codin
         run.cost_usd += spent or 0.0
     record_attempt(
         ctx.session, run_id=run.id, call_id=plan.call_id, task_key=plan.task.key, tool_id=plan.provider, category=plan.category, evidence=plan.evidence,
-        status=outcome.status, kept=result.kept, seconds=result.seconds, cost_usd=spent,
+        status=outcome.status, kept=result.kept, seconds=result.seconds, cost_usd=spent, recovers_from=plan.recovers_from, recovery_action=plan.recovery_action,
     )  # fmt: skip
     data: dict[str, object] = {
         "task_order": task.order, "title": task.title, "status": outcome.status.value, "kept": result.kept, "provider": plan.provider,
@@ -341,11 +357,88 @@ def _finish_generate_code(runtime: CodingRuntime, ctx: ToolContext, plan: _Codin
     used = ctx.session.scalar(
         select(func.count()).select_from(CodingAttempt).where(CodingAttempt.run_id == run.id, CodingAttempt.task_key == plan.task.key, CodingAttempt.phase != AttemptPhase.KEPT)
     ) or 0  # fmt: skip
-    decision = decide_coding(outcome.status, quarantined=result.quarantined, attempts_used=used, max_attempts=ctx.settings.opencode_max_attempts_per_task)
+    decision = _after_attempt(runtime, ctx, plan, result, task, used)
     data["recovery"] = _decided(ctx, decision, task=task.order)
     if decision.action is Action.STOP:
-        _end_failed(runtime, ctx, outcome="quarantined" if result.quarantined else "coding_failed", detail=f"{decision.reason}: {outcome.detail}", keep_copy=result.quarantined)
+        keep_copy = result.quarantined or decision.category == FailureCategory.AMBIGUOUS_STATE
+        _end_failed(runtime, ctx, outcome="quarantined" if result.quarantined else "coding_failed", detail=f"{decision.reason}: {outcome.detail}", keep_copy=keep_copy)
     return data
+
+
+# --- Recovery -------------------------------------------------------------------------------------
+
+
+def _tools_left(runtime: CodingRuntime, ctx: ToolContext, capability: str, *, failed: frozenset[str], kind: str) -> ToolOptions:
+    """What could run next, by the selector's own rules: budget, tokens, memory and security all count."""
+    stack = ctx.catalog.get(ctx.project.stack or "")
+    if stack is None:
+        return ToolOptions(can_run=False, why=f"stack {ctx.project.stack} is unknown")
+    context = replace(_selection_context(ctx, capability, 0, stack.id, _money_left(ctx), kind=kind), failed_here=failed, demote_failed=True)
+    try:
+        selection = runtime.selector.choose(capability, context)
+    except NoProvider as exc:
+        return ToolOptions(can_run=False, why=str(exc))
+    ranked = [(c.tool_id, c.simulated) for c in selection.report.ranking] if selection.report is not None else [(selection.provider, selection.simulated)]
+    others = [(tool, simulated) for tool, simulated in ranked if tool not in failed]
+    return ToolOptions(alternatives=tuple(tool for tool, _ in others), real_alternative=any(not simulated for _, simulated in others))
+
+
+def _seconds_left(ctx: ToolContext) -> float:
+    """`active_seconds` is only saved when a turn of the loop ends, so the attempts' own time keeps this honest."""
+    used = max(ctx.run.active_seconds, attempt_seconds(ctx.session, ctx.run.id))
+    return max(ctx.settings.run_wall_clock_seconds - used, 0.0)
+
+
+def _after_attempt(runtime: CodingRuntime, ctx: ToolContext, plan: _CodingPlan, result: _CodingResult, task: PlanTask, used: int) -> Decision:
+    settings, run = ctx.settings, ctx.run
+    if settings.recovery_policy == "bounded":
+        return decide_coding(result.outcome.status, quarantined=result.quarantined, attempts_used=used, max_attempts=settings.opencode_max_attempts_per_task)
+    diagnosis = classify_attempt(AttemptSignal(task.order, result.outcome.status, result.phase, result.outcome.detail or "", tuple(result.violations)))
+    memory = RecoveryMemory.load(run.recovery_json)
+    left = _seconds_left(ctx)
+    judged, verified = repair_record(ctx.session, tool_id=plan.provider, evidence=plan.evidence, category=diagnosis.category.value)
+    kind = REPAIR if run.state is RunState.REPAIRING else BUILD
+    state = RecoveryState(
+        attempts_used=used, max_attempts=settings.opencode_max_attempts_per_task, repairs_used=run.repairs, max_repairs=settings.max_repair_attempts, streak=memory.streak_after(diagnosis),
+        tools=_tools_left(runtime, ctx, task.capability, failed=failed_tools(ctx.session, plan.task.key) | {plan.provider}, kind=kind),
+        repairs_judged=judged, repairs_verified=verified, seconds_left=left, seconds_needed=result.seconds or 0.0,
+        next_timeout=longer_timeout(plan.task.timeout_seconds, ceiling=settings.recovery_attempt_timeout_ceiling, seconds_left=left),
+    )  # fmt: skip
+    decision = decide(diagnosis, state, RecoveryConfig.from_settings(settings))
+    run.recovery_json = memory.after(diagnosis, decision, task=task.order).dump()
+    return decision
+
+
+def _after_verification(runtime: CodingRuntime, ctx: ToolContext, verification: VerificationResult, kind: str) -> Decision:
+    settings, run = ctx.settings, ctx.run
+    if settings.recovery_policy == "bounded":
+        return decide_verification(kind, repairs_used=run.repairs, max_repairs=settings.max_repair_attempts)
+    diagnosis = classify_verification(verification)
+    memory = RecoveryMemory.load(run.recovery_json)
+    last = last_attempt(ctx.session, run.id)
+    tools, judged, verified, needed = ToolOptions(), 0, 0, 0.0
+    if last is not None:
+        tools = _tools_left(runtime, ctx, last.task_category.partition(":")[0], failed=failed_in_run(ctx.session, run.id), kind=REPAIR)
+        judged, verified = repair_record(ctx.session, tool_id=last.tool_id, evidence=last.evidence, category=diagnosis.category.value)
+        needed = (last.duration_ms or 0) / 1000
+    state = RecoveryState(
+        attempts_used=0, max_attempts=settings.opencode_max_attempts_per_task, repairs_used=run.repairs, max_repairs=settings.max_repair_attempts, streak=memory.streak_after(diagnosis),
+        tools=tools, repairs_judged=judged, repairs_verified=verified, seconds_left=_seconds_left(ctx), seconds_needed=needed,
+    )  # fmt: skip
+    decision = decide(diagnosis, state, RecoveryConfig.from_settings(settings))
+    run.recovery_json = memory.after(diagnosis, decision, task=None).dump()
+    return decision
+
+
+def _no_tool_left(runtime: CodingRuntime, ctx: ToolContext, task_order: int, refused: NoProvider) -> None:
+    """Nothing ran, so stopping loses nothing, and asking again would meet the same refusal."""
+    settings = ctx.settings
+    if settings.recovery_policy == "bounded":
+        return
+    state = RecoveryState(attempts_used=0, max_attempts=settings.opencode_max_attempts_per_task, repairs_used=ctx.run.repairs, max_repairs=settings.max_repair_attempts)
+    decision = decide(classify_refusal(refused.excluded), state, RecoveryConfig.from_settings(settings))
+    _decided(ctx, decision, task=task_order)
+    _end_failed(runtime, ctx, outcome="no_eligible_tool", detail=str(refused), keep_copy=False)
 
 
 # --- submit_implementation ------------------------------------------------------------------------
@@ -414,14 +507,16 @@ def _finish_submit(runtime: CodingRuntime, ctx: ToolContext, plan: _VerifyPlan, 
     kind = failure_kind(verification)
     if kind in REPAIRABLE:  # the tests judged the code. Otherwise the sandbox gave no answer, and there is nothing to learn
         _learn(ctx, passed=False, failure=kind)
-    decision = decide_verification(kind, repairs_used=run.repairs, max_repairs=ctx.settings.max_repair_attempts)
+    decision = _after_verification(runtime, ctx, verification, kind)
     data["recovery"] = _decided(ctx, decision)
-    if decision.action is Action.REPAIR:
+    if decision.action in (Action.REPAIR, Action.SWITCH_TOOL):
         run.repairs += 1
         _change_state(ctx, RunState.REPAIRING, f"verification failed: {verification.reason}")
         data["next_state"] = RunState.REPAIRING.value
+    elif decision.action is Action.RETRY:  # the sandbox gave no answer: the run stays in VERIFYING and can test again
+        data["next_state"] = RunState.VERIFYING.value
     else:
-        _end_failed(runtime, ctx, outcome="verification_failed", detail=f"{verification.reason}; {decision.reason}", keep_copy=False)
+        _end_failed(runtime, ctx, outcome="verification_failed", detail=f"{verification.reason}; {decision.reason}", keep_copy=decision.category == FailureCategory.AMBIGUOUS_STATE)
     return data
 
 
@@ -430,6 +525,11 @@ def _learn(ctx: ToolContext, *, passed: bool, failure: str | None = None) -> Non
     settled = settle_verification(ctx.session, ctx.run.id, passed=passed, failure=failure)
     if settled:
         _record(ctx, "selection.learned", {"attempts": settled, "verified": passed, "failure": failure})
+    memory = RecoveryMemory.load(ctx.run.recovery_json)
+    if memory.action:
+        _record(ctx, "recovery.outcome", {"category": memory.category, "action": memory.action, "resolved": passed})
+    if passed:
+        ctx.run.recovery_json = None
 
 
 def _verification_event(v: VerificationResult) -> dict[str, object]:

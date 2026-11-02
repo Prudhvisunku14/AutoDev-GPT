@@ -116,6 +116,13 @@ def test_cors_origins_are_split_on_commas(tmp_path: Path) -> None:
     assert s.cors_origins == ["http://127.0.0.1:5173", "http://localhost:5173"]
 
 
+@pytest.mark.parametrize("unset", [{}, {"recovery_max_attempt_timeout_seconds": ""}, {"recovery_max_attempt_timeout_seconds": None}])
+def test_recovery_gives_no_attempt_longer_unless_that_is_configured(tmp_path: Path, unset: dict[str, object]) -> None:
+    assert make_settings(tmp_path, **unset).recovery_attempt_timeout_ceiling == 600.0
+    assert make_settings(tmp_path, opencode_timeout_seconds=300.0, **unset).recovery_attempt_timeout_ceiling == 300.0
+    assert make_settings(tmp_path, recovery_max_attempt_timeout_seconds=1_200.0).recovery_attempt_timeout_ceiling == 1_200.0
+
+
 def test_env_file_values_are_loaded_and_unknown_keys_ignored(tmp_path: Path) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(f"DEVPILOT_API_TOKEN={API_TOKEN}\nLOG_LEVEL=warning\nUNKNOWN_KEY=ignored\n", encoding="utf-8")
@@ -133,3 +140,4 @@ def test_env_example_matches_the_settings_model(monkeypatch: pytest.MonkeyPatch)
     assert s.devpilot_host == "127.0.0.1"
     assert s.devpilot_port == 8000
     assert s.egress_allowlist_file.is_file()
+    assert s.recovery_repeat_limit == 2 and s.recovery_attempt_timeout_ceiling == s.opencode_timeout_seconds

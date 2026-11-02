@@ -105,6 +105,8 @@ class ToolExecutor:
             return plan
         except ToolError as exc:
             savepoint.rollback()
+            if exc.after_rollback is not None:
+                exc.after_rollback()
             return ToolResult.failure(call.spec.name, exc.error_class, exc.summary, exc.details)
         except Exception:
             savepoint.rollback()

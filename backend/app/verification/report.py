@@ -43,6 +43,7 @@ def build_report(session: Session, run: Run, project: Project, *, gpt: str, sand
                             for a in by_type.get("coding.finished", [])],
         "verifications": by_type.get("verification.finished", []),
         "recovery": by_type.get("recovery.decided", []),
+        "recovery_outcomes": by_type.get("recovery.outcome", []),
         "delivered_files": delivered,
         "real_workspace_changed": bool(delivered),
         "provenance": {"gpt": gpt, "coding_providers": providers, "sandbox": sandbox, "simulated": simulated, "fully_real": not simulated},

@@ -6,6 +6,7 @@ plus orchestration columns on `runs`. Columns added after Phase 1 carry a server
 so `init_db` can add them to an existing database (see db/session.py).
 Phase 4: `coding_attempts`.
 Phase 7: `tool_outcomes`.
+Phase 6: `recovery_json` on `runs`, and what each attempt was recovering from on `tool_outcomes`.
 """
 
 from __future__ import annotations
@@ -179,6 +180,7 @@ class Run(Base):
     reserved_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
     verification_json: Mapped[str | None] = mapped_column(Text, default=None)  # the last test run, judged
     report_json: Mapped[str | None] = mapped_column(Text, default=None)  # written when the run ends
+    recovery_json: Mapped[str | None] = mapped_column(Text, default=None)  # the last recovery decision (app/recovery/policy.py)
 
     project: Mapped[Project] = relationship(back_populates="runs")
 
@@ -332,6 +334,8 @@ class ToolOutcome(Base):
     cost_usd: Mapped[float | None] = mapped_column(Float, default=None)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     settled_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
+    recovers_from: Mapped[str | None] = mapped_column(String(32), default=None)  # the failure this attempt was meant to fix
+    recovery_action: Mapped[str | None] = mapped_column(String(16), default=None)  # the decision that led to it
 
 
 class Event(Base):

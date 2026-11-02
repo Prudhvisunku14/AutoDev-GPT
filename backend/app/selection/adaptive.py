@@ -278,7 +278,7 @@ class AdaptiveSelector:
         position = {option.name: index for index, option in enumerate(self._options)}
         scored = [score(option, capability, context, self._config) for option in eligible]
         # A tool that failed this task goes behind the rest, but stays eligible: the attempt limit, not this order, decides when to stop.
-        ranking = tuple(sorted(scored, key=lambda c: (c.tool_id in context.failed_here, -round(c.score, _SCORE_DIGITS), position[c.tool_id], c.tool_id)))
+        ranking = tuple(sorted(scored, key=lambda c: (context.demote_failed and c.tool_id in context.failed_here, -round(c.score, _SCORE_DIGITS), position[c.tool_id], c.tool_id)))
         chosen = ranking[0]
         fallback = None
         if context.failed_here:
