@@ -24,6 +24,8 @@ import subprocess
 import sys
 import time
 import warnings
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -42,6 +44,7 @@ from app.sandbox.policy import APPROVED_IMAGES  # noqa: E402
 from app.sandbox.process import SubprocessRunner  # noqa: E402
 from app.sandbox.runner import DockerSandbox  # noqa: E402
 from app.selection.selector import ProviderOption, ProviderSelector  # noqa: E402
+from app.verification.report import render_markdown  # noqa: E402
 
 REQUEST = "Create a Python calculator application supporting addition, subtraction, multiplication and division, with unit tests."
 MODEL = "gpt-6.1-sol"
@@ -64,10 +67,30 @@ _GUARD_MARGIN_SECONDS = 300.0
 _MIN_FREE_GB = 5
 
 
-def live_settings(root: Path, *, approved: bool) -> Settings:
+@dataclass(frozen=True)
+class Experiment:
+    """What one paid run is. The defaults are the calculator demonstration above, unchanged. `scripts/live_build.py` is another:
+    it brings its own request, limits, independent acceptance suite and checks, and runs through the same code."""
+
+    name: str = "Calculator"
+    request: str = REQUEST
+    limits: dict[str, Any] | None = None  # None: LIMITS
+    spend_limit: float = SPEND_LIMIT_USD
+    acceptance: dict[str, Any] | None = None  # the evaluator's frozen suite, as the projects API takes it
+    extra_checks: Callable[[], list[tuple[str, bool, str]]] | None = None  # more preflight checks
+    confirm: Callable[[], bool] | None = None  # a person's separate go-ahead, asked after the preflight and before anything is started
+    judge: Callable[[dict[str, Any]], list[str]] | None = None  # why a finished run is not a success; empty means it is
+    show_report: bool = False
+    # Spending across runs. `on_start` runs once the person has confirmed, before anything is started. `on_end` gets what the run
+    # cost, 0.0 when it stopped before any model call, and None when the cost is unknown (it is then counted at the cap).
+    on_start: Callable[[], None] | None = None
+    on_end: Callable[[float | None], None] | None = None
+
+
+def live_settings(root: Path, *, approved: bool, limits: dict[str, Any] | None = None) -> Settings:
     return Settings(
         _env_file=REPO_ROOT / ".env", devpilot_api_token=secrets.token_urlsafe(32), database_url=f"sqlite:///{(root / 'demo.db').as_posix()}",
-        workspaces_dir=root / "workspaces", coding_checkpoints_dir=root / "checkpoints", coding_work_dir=root / "work", coding_live_approved=approved, **LIMITS,
+        workspaces_dir=root / "workspaces", coding_checkpoints_dir=root / "checkpoints", coding_work_dir=root / "work", coding_live_approved=approved, **(LIMITS if limits is None else limits),
     )  # fmt: skip
 
 
@@ -90,7 +113,7 @@ def _port_free(port: int) -> bool:
         return probe.connect_ex(("127.0.0.1", port)) != 0
 
 
-def preflight(settings: Settings, cli: DockerCli) -> list[tuple[str, bool, str]]:
+def preflight(settings: Settings, cli: DockerCli, spend_limit: float = SPEND_LIMIT_USD) -> list[tuple[str, bool, str]]:
     """Every check that needs nothing external. It reads the key's presence, never its value, and sends it nowhere."""
     checks: list[tuple[str, bool, str]] = []
 
@@ -99,7 +122,7 @@ def preflight(settings: Settings, cli: DockerCli) -> list[tuple[str, bool, str]]
 
     check("the OpenAI key is configured", settings.openai_api_key is not None)
     check("prices are the official Standard rates", (settings.openai_price_input_per_mtok, settings.openai_price_output_per_mtok) == (2.0, 10.0), f"${settings.openai_price_input_per_mtok} / ${settings.openai_price_output_per_mtok}")
-    check("the total spend limit is the approved one", settings.run_budget_usd == SPEND_LIMIT_USD and settings.cost_known, f"${settings.run_budget_usd:.2f}")
+    check("the total spend limit is the approved one", settings.run_budget_usd == spend_limit and settings.cost_known, f"${settings.run_budget_usd:.2f}")
     check("the SDK makes no retries of its own", settings.openai_max_retries == 0)
     check("the runtime image is the approved one", settings.opencode_runtime_image in APPROVED_RUNTIME_IMAGES, str(settings.opencode_runtime_image)[:19])
     try:
@@ -151,7 +174,8 @@ def dry_launch(launcher: Any, settings: Settings) -> str | None:
     return None if stopped.confirmed else f"the dry launch could not be confirmed stopped: {stopped.evidence}"
 
 
-def run_demo(settings: Settings, *, llm: Any, coding: ProviderSelector, sandbox: Any, out: Path, request: str = REQUEST, wait: float | None = None, cli: DockerCli | None = None) -> dict[str, Any]:
+def run_demo(settings: Settings, *, llm: Any, coding: ProviderSelector, sandbox: Any, out: Path, request: str = REQUEST, wait: float | None = None, cli: DockerCli | None = None,
+             name: str = "Calculator", acceptance: dict[str, Any] | None = None) -> dict[str, Any]:  # fmt: skip
     """The demonstration, start to finish. A run that pauses is cancelled: nothing carries on spending unattended."""
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=".*httpx.*")
@@ -162,7 +186,9 @@ def run_demo(settings: Settings, *, llm: Any, coding: ProviderSelector, sandbox:
     limit = time.monotonic() + (wait if wait is not None else settings.run_wall_clock_seconds + 120.0)
     began = time.monotonic()
     with TestClient(app) as client:
-        project = client.post(f"{API}/projects", json={"name": "Calculator", "requirement_text": request}, headers=headers).json()
+        project = client.post(f"{API}/projects", json={"name": name, "requirement_text": request, **({"acceptance": acceptance} if acceptance else {})}, headers=headers)
+        project.raise_for_status()  # a suite the API refuses must stop the run before it starts, not be skipped
+        project = project.json()
         run = client.post(f"{API}/projects/{project['id']}/runs", headers=headers).json()
         client.post(f"{API}/runs/{run['id']}/start", headers=headers).raise_for_status()
         while True:
@@ -190,19 +216,20 @@ def run_demo(settings: Settings, *, llm: Any, coding: ProviderSelector, sandbox:
     return summary
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+def main(argv: list[str] | None = None, experiment: Experiment | None = None, *, doc: str | None = None) -> int:
+    exp = experiment or Experiment()
+    parser = argparse.ArgumentParser(description=doc or __doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--approve-spend", type=float, help="the exact approved limit in US dollars; without it nothing external is contacted")
     args = parser.parse_args(argv)
-    if args.approve_spend is not None and args.approve_spend != SPEND_LIMIT_USD:
-        print(f"Refused: the approved limit is ${SPEND_LIMIT_USD:.2f}, and this script takes no other figure.")
+    if args.approve_spend is not None and args.approve_spend != exp.spend_limit:
+        print(f"Refused: the approved limit is ${exp.spend_limit:.2f}, and this script takes no other figure.")
         return 2
     approved = args.approve_spend is not None
     out = DEMO_ROOT / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     out.mkdir(parents=True)
-    settings = live_settings(out, approved=approved)
+    settings = live_settings(out, approved=approved, limits=exp.limits)
     cli = DockerCli("docker", SubprocessRunner())
-    checks = preflight(settings, cli)
+    checks = preflight(settings, cli, exp.spend_limit) + (exp.extra_checks() if exp.extra_checks is not None else [])
     for label, passed, detail in checks:
         print(f"  {'ok  ' if passed else 'FAIL'}  {label}" + (f"  [{detail}]" if detail else ""))
     failed = [label for label, passed, _ in checks if not passed]
@@ -213,22 +240,39 @@ def main(argv: list[str] | None = None) -> int:
     if failed:
         print(f"\nRefused: {len(failed)} checks failed, and nothing was contacted.")
         return 1
+    if exp.confirm is not None and not exp.confirm():  # a person's own go-ahead, separate from the flag above
+        shutil.rmtree(out, ignore_errors=True)
+        print("\nNot confirmed: nothing was started, contacted or spent.")
+        return 0
+    if exp.on_start is not None:  # the run counts at its whole cap from here until it is settled, so a crash cannot hide it
+        exp.on_start()
     keep_awake()
     start_guard(out / "guard", deadline=settings.run_wall_clock_seconds + _GUARD_MARGIN_SECONDS, networks=[name for name, _ in reversed(NETWORKS)])
     if not model_access():
         print("Stopped: the key cannot see the model. Nothing was billed.")
+        if exp.on_end is not None:
+            exp.on_end(0.0)
         return 1
     settings.coding_work_dir.mkdir(parents=True, exist_ok=True)
     launcher = OpenCodeLauncher(settings, cli, EgressPolicy.from_file(settings.egress_allowlist_file))
     problem = launcher.unavailable_reason() or dry_launch(launcher, settings)
     if problem:
         print(f"Stopped before any model call: {problem}")
+        if exp.on_end is not None:
+            exp.on_end(0.0)
         return 1
     selector = ProviderSelector([ProviderOption("opencode_server", launcher, frozenset({"code_generation", "test_generation", "documentation"}), simulated=False)])
-    summary = run_demo(settings, llm=None, coding=selector, sandbox=DockerSandbox.from_settings(settings), out=out, cli=cli)
+    summary = run_demo(settings, llm=None, coding=selector, sandbox=DockerSandbox.from_settings(settings), out=out, cli=cli, request=exp.request, name=exp.name, acceptance=exp.acceptance)
+    if exp.on_end is not None:
+        exp.on_end(summary.get("cost_usd"))
     print(json.dumps({k: v for k, v in summary.items() if k != "report"}, indent=1, default=str))
+    if exp.show_report and summary.get("report"):
+        print("\n" + render_markdown(summary["report"]))
     print(f"Evidence: {out}")
-    return 0 if summary["state"] == "COMPLETED" and summary.get("left_behind") == {"containers": [], "networks": []} else 1
+    problems = exp.judge(summary) if exp.judge is not None else []
+    for problem in problems:
+        print(f"Not a success: {problem}")
+    return 0 if summary["state"] == "COMPLETED" and summary.get("left_behind") == {"containers": [], "networks": []} and not problems else 1
 
 
 if __name__ == "__main__":

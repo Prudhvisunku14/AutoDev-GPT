@@ -152,7 +152,7 @@ class Ledger:
     def reserve(self, run_id: str, cap_usd: float) -> None:
         self._append({"event": "reserved", "run_id": run_id, "usd": cap_usd})
 
-    def settle(self, run_id: str, spent_usd: float, requests: int) -> None:
+    def settle(self, run_id: str, spent_usd: float, requests: int | None = None) -> None:
         self._append({"event": "settled", "run_id": run_id, "usd": round(spent_usd, 6), "requests": requests})
 
     def _append(self, entry: dict[str, Any]) -> None:

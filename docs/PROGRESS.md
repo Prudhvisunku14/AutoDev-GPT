@@ -14,7 +14,9 @@
 
 **Milestone 6 hardening (2026-11-03, committed as `af5c576`):** OAuth security contracts, a fail-closed parser-isolation interface and detailed Drive approvals, offline only. Encryption is pending (`cryptography` is not installed), and the parser container is not built.
 
-**Manual GPT planning CLI (2026-11-03):** `python -m app.plan_cli`, run from `backend`. You type a prompt; it goes through the existing app, database, orchestrator, plan gate and approval queue, and the run stops once the plan is accepted.
+**First real build, prepared (2026-11-03):** `backend/scripts/live_build.py` runs one paid build of a small Python attendance tracker (real GPT, real OpenCode, real Docker, the evaluator's frozen acceptance suite) with a strict $0.50 cap (a total across runs, counted from the start in a ledger) and a typed confirmation. **Prepared and offline-tested only: Docker was not started and no build request was made.** Docker's RAM target fails at the last reading (3.70 GB available, against 4 GB). Readiness, blockers and the ordered procedures: [FIRST_REAL_BUILD.md](FIRST_REAL_BUILD.md).
+
+**Manual GPT planning CLI (2026-11-03, committed as `6297927`):** `python -m app.plan_cli`, run from `backend`. You type a prompt; it goes through the existing app, database, orchestrator, plan gate and approval queue, and the run stops once the plan is accepted.
 - **What GPT can do:** it is offered only the analysis and planning tools.
 - **Limits, all enforced in code before each request:**
   - 3 requests per run;
