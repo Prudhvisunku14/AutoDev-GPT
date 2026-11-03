@@ -10,6 +10,8 @@
 
 **Real-World Milestone 1 (2026-11-02):** GitHub-assisted development: public repository discovery, evaluation and safe import, offline-tested with fixtures. No live GitHub request, real model or Docker run; the weather application was not generated. See [MILESTONE_1_GITHUB.md](MILESTONE_1_GITHUB.md).
 
+**Milestone 6 (2026-11-03, not committed):** Google Drive and a RAG chatbot builder, implemented and offline-tested with a simulated Drive, simulated consent and a test-double embedder. No Google server, real OAuth, paid call or Docker run; no chatbot was generated. See [MILESTONE_2_GOOGLE_DRIVE_RAG.md](MILESTONE_2_GOOGLE_DRIVE_RAG.md).
+
 Phase 4 (OpenCode) in progress. The foundation, the contract checks, the verified binary and the precedence experiment are committed (2026-10-30).
 
 Phase 4D Round 1 (2026-10-31):
@@ -997,6 +999,31 @@ These figures describe a scenario mix in which the preferred tool is usually wro
 
 **Tests:** 97 new across the milestone; whole offline suite 3,385 passed, 17 skipped, 0 failed; the fence refused nothing. Live GitHub, real code generation, real Docker execution and the framework recipes remain unverified.
 
+### Milestone 6: Google Drive and the RAG chatbot builder (2026-11-03)
+
+**Implemented and offline-tested; not committed.** Details, security findings and what real use needs: [MILESTONE_2_GOOGLE_DRIVE_RAG.md](MILESTONE_2_GOOGLE_DRIVE_RAG.md).
+
+**Built:**
+- `app/drive/`: a read-only Drive v3 client behind the `google_drive` egress entry, grants owned by one project, DevPilot's own folder restriction, a consent URL with PKCE, and a simulated Drive for tests.
+- `app/rag/`:
+  - extraction for TXT, Google Docs and DOCX, with PDF behind an interface, because no parser is installed;
+  - chunks that keep their source;
+  - a hashing test-double embedder;
+  - a scoped in-memory index;
+  - retrieval and citation checks;
+  - provider selection through the adaptive selector;
+  - the RAG application blueprint.
+- Seven tools, three of them approval-gated, behind `DRIVE_SOURCE` (off by default). The plan gate checks a RAG plan against its blueprint.
+- `python -m app.demo.rag`, which passes 24 of 24 checks and ends blocked, with nothing generated.
+
+**Simulated:** Google Drive, consent, embeddings and GPT. **Pending:**
+- real OAuth (callback, token exchange, encrypted refresh tokens, revocation at Google);
+- parsing in the no-network parser container (SECURITY.md §8);
+- a PDF parser;
+- a real embedding provider;
+- real code generation;
+- Docker verification.
+
 ### Product backlog (requested 2026-11-02, not built)
 
 **A. GitHub-assisted development** (discovery, evaluation and import built offline in Milestone 1; adapting and testing reused code waits on the blockers there)
@@ -1008,7 +1035,7 @@ These figures describe a scenario mix in which the preferred tool is usually wro
 
 **Full-stack coding interfaces (2026-11-02, after commit `6ead6b3`, not committed):** component tasks confined to their folders, per-component recipes and evidence, and a project that passes only when every component and every MUST criterion pass. Tested with scripted outputs and a simulated runtime approval; the real FastAPI and React runtimes, Docker verification, live GitHub and real code generation are pending. Details: [MILESTONE_1_GITHUB.md](MILESTONE_1_GITHUB.md).
 
-**B. Google Drive-to-RAG development** (the next requested capability; not started)
+**B. Google Drive-to-RAG development** (built offline in Milestone 6, see above; real OAuth, the parser container, real embeddings and generation pending)
 - User-authorised OAuth access (SECURITY.md §7).
 - Narrowly scoped permissions: only the folders or documents the user picks.
 - Ingestion of PDF, DOCX and Google Docs, parsed in the no-network document-parser container (SECURITY.md §8).

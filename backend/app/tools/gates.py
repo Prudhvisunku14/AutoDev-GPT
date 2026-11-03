@@ -13,8 +13,10 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, StringConstraints, model_validator
 from sqlalchemy import select
 
+from app.core.events import event_payload, list_events
 from app.db.models import AcceptanceCriterion, PlanTask, Requirement, RunState
 from app.orchestrator.run_control import change_state
+from app.rag.blueprint import plan_problems
 from app.tools.base import ErrorClass, RiskLevel, ToolArgs, ToolContext, ToolError, ToolSpec
 from app.tools.registry import ToolRegistry
 
@@ -199,6 +201,9 @@ def submit_plan(ctx: ToolContext, args: SubmitPlanArgs) -> dict[str, object]:
         problems.append(f"requirements not covered by any task: {', '.join(uncovered)}")
     if not any(t.capability == "code_generation" for t in args.tasks):
         problems.append("at least one task must have capability code_generation")
+    rag = [event_payload(e) for e in list_events(ctx.session, run_id=ctx.run.id, limit=5_000) if e.type == "rag.blueprint"]
+    if rag:  # a RAG application keeps its blueprint's components, stacks and dependencies
+        problems += plan_problems([c.model_dump() for c in args.components or []], [(t.component, t.depends_on) for t in args.tasks], rag[-1])
     _reject_if(problems, "submit_plan")
 
     assert stack is not None

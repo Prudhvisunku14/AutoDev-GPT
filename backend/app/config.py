@@ -155,6 +155,20 @@ class Settings(BaseSettings):
     repository_max_archive_mb: float = Field(default=20.0, gt=0, le=200)
     repository_max_files: int = Field(default=2_000, ge=1, le=20_000)
 
+    # --- Google Drive and the RAG knowledge base (Milestone 6) --------------
+    # off: no Drive tools. google: the Drive v3 client with the real consent URL; the OAuth code exchange is not
+    # implemented yet, so it never grants. Tests and the offline demonstration pass a fixture runtime to create_app;
+    # no setting selects fixtures or the embedding test double.
+    drive_source: Literal["off", "google"] = "off"
+    google_oauth_client_id: str | None = None  # public identifier; its secret is google_oauth_client_secret
+    google_oauth_redirect_uri: str = "http://127.0.0.1:8000/oauth/google/callback"
+    drive_max_files: int = Field(default=200, ge=1, le=5_000)  # discovered, and ingested in one call
+    drive_max_file_mb: float = Field(default=10.0, gt=0, le=100)
+    drive_max_total_mb: float = Field(default=100.0, gt=0, le=2_000)  # read in one ingestion call
+    drive_max_depth: int = Field(default=3, ge=0, le=10)  # folders opened below an approved one
+    drive_page_size: int = Field(default=100, ge=1, le=1_000)
+    rag_max_embedding_tokens: int = Field(default=2_000_000, gt=0)  # estimated, before anything is embedded
+
     # --- Credentials used by later phases ---------------------------------
     # Declared here only so the redactor knows their values. Phase 1 never uses them.
     openai_api_key: SecretStr | None = None

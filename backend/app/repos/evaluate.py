@@ -75,15 +75,22 @@ class Finding:
     what: str
 
 
+def instruction_findings(text: str) -> list[str]:
+    """What in any untrusted text (a README, a document) tries to direct an AI agent, or pipes a download into a shell."""
+    found = []
+    if any(p.search(text) for p in _INJECTION):
+        found.append("text addressed to AI agents that tries to change their instructions")
+    if _PIPE_TO_SHELL.search(text):
+        found.append("a command that pipes a download into a shell")
+    return found
+
+
 def scan_untrusted(detail: RepoDetail) -> list[Finding]:
     """What in the repository's text tries to direct an agent, or would run code on install. Nothing is executed."""
     findings: list[Finding] = []
     texts = {"README": detail.readme, **detail.manifests}
     for where, text in texts.items():
-        if any(p.search(text) for p in _INJECTION):
-            findings.append(Finding(HIGH, where, "text addressed to AI agents that tries to change their instructions"))
-        if _PIPE_TO_SHELL.search(text):
-            findings.append(Finding(HIGH, where, "a command that pipes a download into a shell"))
+        findings += [Finding(HIGH, where, what) for what in instruction_findings(text)]
     for path, text in detail.manifests.items():
         if path.endswith("package.json"):
             try:

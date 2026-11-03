@@ -31,8 +31,11 @@ def build_report(session: Session, run: Run, project: Project, *, gpt: str, sand
     providers = sorted({s["provider"] for s in selections})
     tests = "test execution (replayed from recorded runs, not Docker)" if sandbox == REPLAY_SANDBOX else "Docker tests"
     searches = by_type.get("repository.searched", [])
+    drive, indexed = by_type.get("drive.authorized", []), by_type.get("rag.indexed", [])
     simulated = [name for name, flag in (("GPT orchestration", gpt.startswith("FakeLLM")), ("coding provider", any(s["simulated"] for s in selections)),
-                                         (tests, sandbox != REAL_SANDBOX), ("repository data (fixtures, not GitHub)", any(s["source"] == "fixture" for s in searches))) if flag]  # fmt: skip
+                                         (tests, sandbox != REAL_SANDBOX), ("repository data (fixtures, not GitHub)", any(s["source"] == "fixture" for s in searches)),
+                                         ("Google Drive data and consent (fixtures, not Google)", any(d.get("simulated") for d in drive)),
+                                         ("embeddings (a hashing test double: lexical, not semantic)", any(i.get("simulated") for i in indexed))) if flag]  # fmt: skip
     delivered = by_type.get("delivery.finished", [{}])[-1].get("files", [])
     if run.acceptance_json is not None:
         independent = json.loads(run.acceptance_json)
@@ -40,8 +43,14 @@ def build_report(session: Session, run: Run, project: Project, *, gpt: str, sand
         independent = {"configured": True, "verdict": "NOT_RUN", "reason": "the code never reached the acceptance suite", "suite_sha256": run.acceptance_sha256, "criteria": []}
     else:
         independent = _NOT_CONFIGURED
+    knowledge = None
+    if drive or indexed:  # metadata only: the report never holds a document's text
+        knowledge = {"authorizations": drive, "discovered": by_type.get("drive.discovered", []), "ingested": by_type.get("drive.ingested", []), "index": (indexed or [None])[-1],
+                     "embedding_selection": (by_type.get("selection.embedding") or [None])[-1], "retrieval": (by_type.get("rag.retrieval_configured") or [None])[-1],
+                     "blueprint": (by_type.get("rag.blueprint") or [None])[-1], "revoked": by_type.get("drive.revoked", [])}  # fmt: skip
     return {
         "project": {"id": project.id, "name": project.name, "requirement": project.requirement_text, "stack": project.stack},
+        **({"knowledge": knowledge} if knowledge is not None else {}),
         "run": {"id": run.id, "state": run.state.value, "outcome": run.outcome, "detail": run.status_detail, "turns": run.turns,
                 "tokens": run.tokens_in + run.tokens_out, "cost_usd": run.cost_usd if run.cost_known else None, "repairs": run.repairs},
         "requirements": [{"code": r.code, "text": r.text} for r in session.scalars(select(Requirement).where(Requirement.run_id == run.id).order_by(Requirement.code))],
@@ -72,6 +81,14 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines = [f"# {report['project']['name']}: {run['state']}", "", f"Requirement: {report['project']['requirement']}", ""]
     provenance = report["provenance"]
     lines += [f"**Simulated in this run:** {', '.join(provenance['simulated'])}" if provenance["simulated"] else "**Nothing in this run was simulated.**", ""]
+    knowledge = report.get("knowledge")
+    if knowledge:
+        index, retrieval = knowledge.get("index") or {}, knowledge.get("retrieval") or {}
+        ingested = [d for call in knowledge["ingested"] for d in call["documents"]]
+        lines += ["## Knowledge base", f"- Authorizations: {len(knowledge['authorizations'])}; revoked: {len(knowledge['revoked'])}",
+                  f"- Documents: {sum(d['status'] == 'ingested' for d in ingested)} ingested of {len(ingested)} requested",
+                  f"- Index: {index.get('chunks', 0)} chunks by {index.get('embedder', 'none')}{' (a test double)' if index.get('simulated') else ''}",
+                  *[f"- Check: {c['question']} -> {'grounded, ' + str(len(c['citations'])) + ' citation(s)' if c['grounded'] else 'not in the documents'}" for c in retrieval.get("checks", [])], ""]  # fmt: skip
     lines += ["## Tasks", *[f"- {t['order']}. {t['title']}: {t['status']}" for t in report["tasks"]], ""]
     where = {REPLAY_SANDBOX: "replayed from recorded runs, not Docker", REAL_SANDBOX: "Docker sandbox"}.get(provenance.get("sandbox", ""), "no real sandbox")
     lines += [f"## The provider's tests ({where})"]

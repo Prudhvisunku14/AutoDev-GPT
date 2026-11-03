@@ -33,6 +33,7 @@ from app.sandbox.runner import SandboxRunner
 from app.selection.selector import Selector
 from app.stacks.catalog import StackCatalog
 from app.tools.adapters.coding import CodingRuntime, recover_attempts, register_coding_tools
+from app.tools.adapters.drive import DriveRuntime, register_drive_tools
 from app.tools.adapters.repositories import RepositoryRuntime, register_repository_tools
 from app.tools.adapters.sandbox import register_sandbox_tools
 from app.tools.adapters.workspace_fs import WorkspaceFS
@@ -54,6 +55,7 @@ def create_app(
     sandbox: SandboxRunner | None = None,
     coding: Selector | None = None,
     repositories: RepositorySource | None = None,
+    drive: DriveRuntime | None = None,
 ) -> FastAPI:
     """Build the app. `llm` replaces the OpenAI client (tests and the offline demo use FakeLLM).
 
@@ -61,6 +63,7 @@ def create_app(
     tests never touch Docker. `coding`, which needs a sandbox, chooses who writes the code and lets
     GPT drive a run to the end. Without it a run pauses at IMPLEMENTING. `repositories` enables the
     approval-gated search and import of public code in PLANNING (fixtures offline; GitHub once approved).
+    `drive` enables the Google Drive and RAG knowledge-base tools (a fixture Drive offline; off by default).
     """
     settings = settings or get_settings()
     redactor = Redactor(settings.secret_values())
@@ -94,6 +97,8 @@ def create_app(
         register_coding_tools(registry, runtime)
     if repositories is not None:
         register_repository_tools(registry, RepositoryRuntime(repositories))
+    if drive is not None:
+        register_drive_tools(registry, drive)
     executor = ToolExecutor(registry, PolicyEngine(), redactor, max_output_chars=settings.tool_output_max_chars)
     llm_provider, llm_problem = _llm_wiring(settings, egress, llm)
     orchestrator = Orchestrator(
