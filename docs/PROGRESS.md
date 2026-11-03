@@ -22,6 +22,8 @@
 - **OpenAI's own 429s:** recorded; passed on for the engine's own bounded backoff, or ended when they are hard quotas or long pauses.
 - **Fewer requests:** a one-task request for the experiment, and a brief line that asks for fewer steps. Details and what is still unknown: [FIRST_REAL_BUILD.md](FIRST_REAL_BUILD.md) §10. **No second paid run has been made or authorized.**
 
+**Second real build, prepared and committed; the paid run not yet authorized (2026-11-03):** at most $0.50 more on top of the ledger's $0.379808, a typed `second run` confirmation, no paid retry by itself. See [FIRST_REAL_BUILD.md](FIRST_REAL_BUILD.md) §11.
+
 **First real build, prepared (2026-11-03):** `backend/scripts/live_build.py` runs one paid build of a small Python attendance tracker (real GPT, real OpenCode, real Docker, the evaluator's frozen acceptance suite) with a strict $0.50 cap (a total across runs, counted from the start in a ledger) and a typed confirmation. **Prepared and offline-tested only: Docker was not started and no build request was made.** Docker's RAM target fails at the last reading (3.70 GB available, against 4 GB). Readiness, blockers and the ordered procedures: [FIRST_REAL_BUILD.md](FIRST_REAL_BUILD.md).
 
 **Manual GPT planning CLI (2026-11-03, committed as `6297927`):** `python -m app.plan_cli`, run from `backend`. You type a prompt; it goes through the existing app, database, orchestrator, plan gate and approval queue, and the run stops once the plan is accepted.

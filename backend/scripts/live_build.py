@@ -1,16 +1,17 @@
 """The first real build: GPT plans, real OpenCode writes a small Python application, real Docker tests it, and an evaluator's
-frozen suite judges it independently. One paid run, at most $0.50 in all.
+frozen suite judges it independently. One paid run, at most $0.50, within the experiments' cumulative total below.
 
     & $env:DEVPILOT_PYTHON scripts\\live_build.py                       # preflight only: contacts nothing external
-    & $env:DEVPILOT_PYTHON scripts\\live_build.py --approve-spend 0.50  # APPROVAL: asks for a typed "yes", then spends up to that much
+    & $env:DEVPILOT_PYTHON scripts\\live_build.py --approve-spend 0.50  # APPROVAL: asks for a typed "second run", then spends up to that much
 
 Run it from the backend folder, with Docker running. This is `scripts/live_demo.py`'s code with another experiment: the same
 preflight, keep-awake, guard, free model-access check, dry launch, real containers and cleanup. Nothing is scripted: a run counts
 as a success only if the real model made requests, nothing in it was simulated, the evaluator's suite passed, and no container or
 network was left behind.
 
-The $0.50 is a total, not a per-run figure: a ledger beside the run folders counts every run at its whole cap from the moment it
-starts until it is settled, so a second paid run is refused once the first has spent anything (or crashed).
+The $0.50 is per run. Across runs, a ledger beside the run folders counts every run at its whole cap from the moment it starts until it
+is settled, so a crash cannot hide spending. The first experiment's $0.379808 stays in it; the second may add at most $0.50
+(EXPERIMENT_BUDGET_USD), and a run is refused when it could pass that total.
 
 The limits are constants in this file, so what was approved is what runs. `.env` supplies only the key, and both forms load it into
 this process, the preflight too. The cap is strict: before every GPT request and every OpenCode request, the most it could cost is
@@ -35,8 +36,16 @@ import live_demo  # noqa: E402
 from app.plan_cli import Ledger  # noqa: E402
 from app.verification.acceptance import AcceptanceSuite, SuiteCriterion, validate  # noqa: E402
 
-SPEND_LIMIT_USD = 0.50
-EXPERIMENT_BUDGET_USD = 0.50  # in all, across every run of this script: one full run, or none if an earlier one spent anything
+SPEND_LIMIT_USD = 0.50  # one run, GPT and OpenCode together: the only figure --approve-spend accepts
+# Across runs. The first experiment (2026-11-03) is in the ledger at $0.379808, settled, and stays there: the ledger is never reset.
+# The second experiment may add at most $0.50 to it. A run starts only if what is counted plus a whole run's cap still fits, so
+# after the second run has spent anything, a third is refused; one that stopped before any model call counted nothing and may be
+# repeated. Committed with the user's approval on 2026-11-03. The paid run itself is approved separately, each time: the
+# --approve-spend flag and the typed confirmation.
+FIRST_EXPERIMENT_USD = 0.379808
+SECOND_EXPERIMENT_USD = 0.50
+EXPERIMENT_BUDGET_USD = round(FIRST_EXPERIMENT_USD + SECOND_EXPERIMENT_USD, 6)
+CONFIRMATION = "second run"
 NAME = "Student attendance tracker"
 REQUEST = (
     "Create a Python student attendance tracker that can add students, record daily attendance and calculate attendance percentages. Include unit tests.\n"
@@ -196,7 +205,7 @@ def machine_checks(read: Callable[[], dict[str, float | None]] = machine_reading
 
 
 class BuildSpend:
-    """Spending across runs of this script, so the experiment's $0.50 is a total and not a per-run figure. A run counts at its whole
+    """Spending across runs of this script, so EXPERIMENT_BUDGET_USD is a cumulative total and not a per-run figure. A run counts at its whole
     cap from the moment it starts until it is settled, so a crash or a closed terminal cannot hide it. A run that stopped before any
     model call settles at zero. An unreadable ledger refuses: nothing is started without knowing what was spent."""
 
@@ -204,11 +213,17 @@ class BuildSpend:
         self._path = path or (lambda: live_demo.DEMO_ROOT / "build-ledger.jsonl")
         self._run: str | None = None
 
-    def check(self) -> list[tuple[str, bool, str]]:
-        label = f"no earlier run has used the ${EXPERIMENT_BUDGET_USD:.2f} experiment budget"
+    def counted(self) -> float | None:
+        """What the ledger counts so far, or None when it cannot be read."""
         try:
-            spent = Ledger(self._path()).spent()
+            return Ledger(self._path()).spent()
         except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    def check(self) -> list[tuple[str, bool, str]]:
+        label = f"a whole run (${SPEND_LIMIT_USD:.2f}) still fits the ${EXPERIMENT_BUDGET_USD:.4f} the experiments may spend in all"
+        spent = self.counted()
+        if spent is None:
             return [(label, False, f"the ledger {self._path()} cannot be read")]
         return [(label, spent + SPEND_LIMIT_USD <= EXPERIMENT_BUDGET_USD + 1e-9, f"${spent:.4f} already counted (ledger: {self._path()})")]
 
@@ -226,18 +241,23 @@ SPEND = BuildSpend()
 
 
 def confirm(ask: Callable[[str], str] = input, say: Callable[[str], None] = print) -> bool:
-    """A person's own go-ahead, in the terminal. Anything but a typed yes stops the run before Docker or OpenAI are touched."""
+    """A person's own go-ahead, in the terminal. Anything but the typed phrase stops the run before Docker or OpenAI are touched.
+    The phrase is not "yes", so a habit from the first experiment cannot start the second."""
     limits = LIMITS
+    counted = SPEND.counted()
     say(
-        f"\nThis starts a PAID run: {live_demo.MODEL} plans, real OpenCode writes the code, and real Docker containers test it.\n"
+        f"\nThis starts a PAID run, the SECOND experiment: {live_demo.MODEL} plans, real OpenCode writes the code, and real Docker containers test it.\n"
+        f"  Already counted in the ledger: {'unreadable' if counted is None else f'${counted:.4f}'} (the first experiment's ${FIRST_EXPERIMENT_USD:.4f} included).\n"
+        f"  This run adds at most ${SPEND_LIMIT_USD:.2f}, and the experiments together stay within ${EXPERIMENT_BUDGET_USD:.4f}.\n"
         f"  Total cap: ${SPEND_LIMIT_USD:.2f} across GPT and OpenCode, enforced before every request (a request that could pass it is not sent).\n"
         f"  GPT: at most {limits['max_turns']} turns, {limits['openai_max_output_tokens']:,} output tokens each, no retries.\n"
         f"  OpenCode: each attempt capped at ${limits['gateway_max_usd_per_task']:.2f} or what is left, {limits['gateway_max_requests_per_task']} requests, "
         f"{limits['opencode_max_attempts_per_task']} attempts, {limits['max_repair_attempts']} repair.\n"
         f"  Time: {limits['run_wall_clock_seconds']:,.0f} s. Docker networks are created for each attempt and removed afterwards.\n"
-        "  A run that stops at the cap is reported as stopped, not as a success. Costs use $2 in / $10 out per million tokens; OpenAI's usage page is the authority."
+        "  A run that stops at the cap is reported as stopped, not as a success. Costs use $2 in / $10 out per million tokens; OpenAI's usage page is the authority.\n"
+        "  Nothing is retried at a cost by itself: a refused or rate-limited attempt stops the run, and a new run needs this question again."
     )
-    return ask("Type yes to start: ").strip().lower() == "yes"
+    return ask(f'Type "{CONFIRMATION}" to start: ').strip().lower() == CONFIRMATION
 
 
 def judge(summary: dict[str, Any]) -> list[str]:

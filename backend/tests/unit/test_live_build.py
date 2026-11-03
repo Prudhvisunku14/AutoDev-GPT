@@ -157,12 +157,31 @@ def test_machine_checks_use_the_readiness_thresholds(build: ModuleType) -> None:
     assert set(build.machine_readings()) == {"c_free_gb", "ram_available_gb", "commit_percent"}
 
 
-@pytest.mark.parametrize(("typed", "accepted"), [("yes", True), (" YES ", True), ("y", False), ("", False), ("no", False), ("yes please", False)])
-def test_only_a_typed_yes_confirms(build: ModuleType, typed: str, accepted: bool) -> None:
+@pytest.mark.parametrize(
+    ("typed", "accepted"),
+    [("second run", True), (" Second Run ", True), ("yes", False), ("y", False), ("", False), ("second", False), ("second run please", False)],
+)
+def test_only_the_typed_phrase_confirms_and_a_plain_yes_does_not(build: ModuleType, demo: ModuleType, typed: str, accepted: bool) -> None:
+    first_experiment(demo)
     said: list[str] = []
-    assert build.confirm(lambda _q: typed, said.append) is accepted
+    asked: list[str] = []
+    assert build.confirm(lambda q: asked.append(q) or typed, said.append) is accepted
     text = "\n".join(said)
-    assert "$0.50" in text and "PAID" in text and "not sent" in text
+    assert "$0.50" in text and "PAID" in text and "SECOND experiment" in text and "not sent" in text and "retried at a cost by itself" in text
+    assert "Already counted in the ledger: $0.3798" in text and "$0.8798" in text and '"second run"' in asked[0]
+
+
+def test_the_second_experiment_adds_at_most_fifty_cents_to_what_the_ledger_already_counts(build: ModuleType) -> None:
+    assert build.FIRST_EXPERIMENT_USD == 0.379808 and build.SECOND_EXPERIMENT_USD == 0.50 == build.SPEND_LIMIT_USD
+    assert build.EXPERIMENT_BUDGET_USD == pytest.approx(0.879808)
+
+
+def first_experiment(demo: ModuleType) -> Path:
+    """The ledger as the first experiment left it on 2026-11-03, written into this test's own folder."""
+    path = demo.DEMO_ROOT / "build-ledger.jsonl"
+    path.write_text('{"event": "reserved", "run_id": "aef8843f06af6022", "usd": 0.5, "at": "2026-11-03T07:34:27+00:00"}\n'
+                    '{"event": "settled", "run_id": "aef8843f06af6022", "usd": 0.379808, "requests": null, "at": "2026-11-03T07:44:36+00:00"}\n', encoding="utf-8")  # fmt: skip
+    return path
 
 
 class _Guarded:
@@ -247,33 +266,53 @@ def clear_run_folders(demo: ModuleType) -> None:
         shutil.rmtree(folder)
 
 
-def test_the_budget_is_a_total_across_runs_and_counts_a_run_at_its_cap_from_the_start(build: ModuleType, demo: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_second_run_is_allowed_counted_from_its_start_and_a_third_is_refused(build: ModuleType, demo: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    first_experiment(demo)
     guarded = _Guarded(demo, monkeypatch)
     seen: list[list[str]] = []
     monkeypatch.setattr(demo, "keep_awake", lambda: seen.append([e["event"] for e in ledger_lines(demo)]))
+    assert build.SPEND.check()[0][1] is True  # $0.3798 counted, and a whole $0.50 run still fits $0.8798
     assert demo.main(["--approve-spend", "0.50"], spend_experiment(build)) == 0
-    assert seen == [["reserved"]]  # already counted, at its whole cap, when the first container could start
-    reserved, settled = ledger_lines(demo)
-    assert reserved["usd"] == 0.50 and settled["usd"] == 0.2 and build.SPEND.check()[0][1] is False
+    assert seen == [["reserved", "settled", "reserved"]]  # counted at its whole cap before the first container could start
+    lines = ledger_lines(demo)
+    assert [(e["event"], e["usd"]) for e in lines] == [("reserved", 0.5), ("settled", 0.379808), ("reserved", 0.5), ("settled", 0.2)]  # the first run untouched
+    assert build.SPEND.counted() == pytest.approx(0.579808) and build.SPEND.check()[0][1] is False
     clear_run_folders(demo)
     guarded.started.clear()
-    assert demo.main(["--approve-spend", "0.50"], spend_experiment(build)) == 1  # $0.20 is counted, and another full run could pass $0.50
-    assert guarded.started == [] and len(ledger_lines(demo)) == 2
+    assert demo.main(["--approve-spend", "0.50"], spend_experiment(build)) == 1  # another whole run could pass the total
+    assert guarded.started == [] and len(ledger_lines(demo)) == 4
+
+
+def test_whatever_the_runs_cost_the_second_experiment_never_adds_more_than_fifty_cents(build: ModuleType, demo: ModuleType) -> None:
+    from app.plan_cli import Ledger
+
+    for costs in ([0.5], [0.2, 0.3], [0.0, 0.0, 0.49], [0.01, 0.5], [0.0, 0.5, 0.5]):
+        path = first_experiment(demo)
+        added = 0.0
+        for n, cost in enumerate(costs):
+            if not build.SPEND.check()[0][1]:
+                break
+            Ledger(path).reserve(f"run-{n}", build.SPEND_LIMIT_USD)
+            Ledger(path).settle(f"run-{n}", cost)
+            added += cost
+        assert added <= build.SECOND_EXPERIMENT_USD + 1e-9, costs
 
 
 def test_a_run_that_stopped_before_any_model_call_costs_nothing_and_may_be_repeated(build: ModuleType, demo: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    first_experiment(demo)
     guarded = _Guarded(demo, monkeypatch)
     monkeypatch.setattr(demo, "model_access", lambda: False)
     assert demo.main(["--approve-spend", "0.50"], spend_experiment(build)) == 1
-    assert [e["usd"] for e in ledger_lines(demo)] == [0.50, 0.0] and build.SPEND.check()[0][1] is True
+    assert [e["usd"] for e in ledger_lines(demo)][2:] == [0.50, 0.0] and build.SPEND.check()[0][1] is True
     clear_run_folders(demo)
     monkeypatch.setattr(demo, "dry_launch", lambda *_: "the port is taken")
     monkeypatch.setattr(demo, "model_access", lambda: True)
     assert demo.main(["--approve-spend", "0.50"], spend_experiment(build)) == 1
-    assert [e["usd"] for e in ledger_lines(demo)] == [0.50, 0.0, 0.50, 0.0] and "run_demo" not in guarded.started
+    assert [e["usd"] for e in ledger_lines(demo)][2:] == [0.50, 0.0, 0.50, 0.0] and "run_demo" not in guarded.started
 
 
 def test_a_run_that_crashes_or_has_an_unknown_cost_stays_counted_at_its_cap(build: ModuleType, demo: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    first_experiment(demo)
     _Guarded(demo, monkeypatch)
 
     def crash(*_a: Any, **_k: Any) -> dict[str, Any]:
@@ -282,8 +321,8 @@ def test_a_run_that_crashes_or_has_an_unknown_cost_stays_counted_at_its_cap(buil
     monkeypatch.setattr(demo, "run_demo", crash)
     with pytest.raises(RuntimeError):
         demo.main(["--approve-spend", "0.50"], spend_experiment(build))
-    assert [e["event"] for e in ledger_lines(demo)] == ["reserved"] and build.SPEND.check()[0][1] is False  # never settled, so still $0.50
-    (demo.DEMO_ROOT / "build-ledger.jsonl").unlink()
+    assert [e["event"] for e in ledger_lines(demo)] == ["reserved", "settled", "reserved"] and build.SPEND.check()[0][1] is False  # never settled, so still $0.50
+    (demo.DEMO_ROOT / "build-ledger.jsonl").unlink()  # this test's own copy, to test the unknown cost on an empty ledger
     clear_run_folders(demo)
     monkeypatch.setattr(demo, "run_demo", lambda *_a, **_k: {"state": "COMPLETED", "left_behind": {"containers": [], "networks": []}, "cost_usd": None})
     assert demo.main(["--approve-spend", "0.50"], spend_experiment(build)) == 0

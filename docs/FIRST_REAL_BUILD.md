@@ -242,3 +242,24 @@ The OpenCode 1.19.5 binary was read as bytes (never run) at the offsets the test
 
 - **Task 1's code cannot be reviewed.** Attempt 2's `attendance.py` was kept only in the run's disposable copy, which was removed when the run failed. The database holds its path and size (1,596 bytes), never its content. The OpenCode session is not stored. Nothing on disk can be reviewed, and even if it could, it was never tested or accepted, so it must not be reused as delivered code.
 - **Not built:** counting cached tokens at a cached price (it needs a verified rate); keeping a failed attempt's files in the evidence folder for review (they would never be delivered, but it changes the restore path and deserves its own review).
+
+## 11. The second experiment: prepared and committed, the paid run NOT yet authorized
+
+The same attendance tracker, with the fixes above (committed as `1b79d67`), and the budget change below, committed with the user's approval. **The paid run is approved separately**, when it is started: the `--approve-spend 0.50` flag and the typed confirmation.
+
+| | |
+|---|---|
+| Per run | $0.50, GPT and OpenCode together (`--approve-spend 0.50` is the only figure the script accepts) |
+| In all | The ledger's $0.379808 from the first experiment, plus at most $0.50: **$0.879808**. A run starts only if what is counted plus a whole run's cap fits, so after the second run has spent anything a third is refused. A run that stopped before any model call counts nothing and may be repeated |
+| Ledger | `D:\DevPilotCache\live-demo\build-ledger.jsonl`, appended to and never reset. The first experiment's two lines stay as they are |
+| Confirmation | After the preflight, the script shows what is already counted and the totals, then waits for the typed phrase `second run` (a plain `yes` does nothing) |
+| Retries | No paid retry by itself. A refused or rate-limited attempt stops the run. The only call before the run is the free model-access check (`GET /v1/models/...`), after the confirmation |
+
+Expected cost, if both the plan and the single coding task go through first time: GPT about $0.08, and one OpenCode attempt of 4 to 7 requests at $0.02 to $0.05 each, so roughly **$0.15 to $0.35**. A repair or a second attempt adds to that, and the cap stops it at $0.50.
+
+Before the paid run (each a separate approval): Docker running, the machine checks met at the time (RAM has dipped below 4 GB before; it read 4.72 GB at the last check), the 16 Docker tests, and the free preflight `python scripts\live_build.py`. Then:
+
+```powershell
+Set-Location D:\DOWNLOAND_NEW_D\AI\AI\backend
+python scripts\live_build.py --approve-spend 0.50     # then type: second run
+```
