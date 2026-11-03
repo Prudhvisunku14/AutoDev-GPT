@@ -9,6 +9,9 @@ Model IDs, URLs and keys come only from Settings.
 from __future__ import annotations
 
 import json
+import re
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol
@@ -52,11 +55,23 @@ RESUMABLE_ERROR_KINDS = frozenset(
 
 
 class LLMError(Exception):
-    def __init__(self, kind: LLMErrorKind, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self, kind: LLMErrorKind, message: str, *, status_code: int | None = None, code: str | None = None, request_id: str | None = None,
+        retry_after: float | None = None, rate_limit: dict[str, str] | None = None,
+    ) -> None:  # fmt: skip
         super().__init__(message)
         self.kind = kind
         self.message = message
         self.status_code = status_code
+        self.code = code  # OpenAI's error code, such as rate_limit_exceeded or insufficient_quota
+        self.request_id = request_id  # what to quote to OpenAI's support
+        self.retry_after = retry_after  # seconds, from Retry-After when OpenAI sent one
+        self.rate_limit = rate_limit or {}  # the x-ratelimit-* headers. Never an authorization header
+
+    def facts(self) -> dict[str, Any]:
+        """What is known about the failure beyond its message, for the run's event log."""
+        found = {"status_code": self.status_code, "code": self.code, "request_id": self.request_id, "retry_after": self.retry_after, "rate_limit": self.rate_limit or None}
+        return {k: v for k, v in found.items() if v is not None}
 
     @property
     def resumable(self) -> bool:
@@ -113,10 +128,30 @@ def llm_config_problem(settings: Settings, egress: EgressPolicy) -> str | None:
     return None
 
 
+# A 429 whose code says "rate_limit_exceeded" is temporary and was never processed, so it is not billed. It may be waited out, a
+# couple of times and for a bounded while. Anything that says the money or the account is the problem is final (see map_openai_error).
+RATE_RETRIES = 2
+RATE_WAIT_CAP = 20.0  # seconds: a Retry-After beyond this is not waited for, and the run pauses instead
+RATE_WAIT_TOTAL = 40.0
+_DEFAULT_WAITS = (1.0, 3.0)
+HARD_QUOTA_CODES = frozenset({"insufficient_quota", "billing_hard_limit_reached", "billing_not_active", "account_deactivated", "access_terminated"})
+_RATE_HEADERS = ("x-ratelimit-limit-requests", "x-ratelimit-limit-tokens", "x-ratelimit-remaining-requests", "x-ratelimit-remaining-tokens", "x-ratelimit-reset-requests", "x-ratelimit-reset-tokens")
+_SAFE_VALUE = re.compile(r"^[A-Za-z0-9 ._:,;=+/-]{1,64}$")
+
+
+def rate_wait(error: LLMError, tries: int, waited: float) -> float | None:
+    """How long to wait before sending the request again, or None when it must not be sent again."""
+    if error.kind is not LLMErrorKind.RATE_LIMIT or error.code != "rate_limit_exceeded" or tries >= RATE_RETRIES:
+        return None
+    wait = _DEFAULT_WAITS[tries] if error.retry_after is None else error.retry_after
+    return wait if wait <= RATE_WAIT_CAP and waited + wait <= RATE_WAIT_TOTAL else None
+
+
 class OpenAIResponsesClient:
-    def __init__(self, settings: Settings, *, http_client: httpx.Client | None = None) -> None:
+    def __init__(self, settings: Settings, *, http_client: httpx.Client | None = None, sleep: Callable[[float], None] = time.sleep) -> None:
         if settings.openai_api_key is None or not settings.openai_model:
             raise LLMError(LLMErrorKind.CONFIG, "OPENAI_API_KEY and OPENAI_MODEL must be set")
+        self._sleep = sleep
         self._model = settings.openai_model
         self._max_output_tokens = settings.openai_max_output_tokens
         self._client = openai.OpenAI(
@@ -143,11 +178,38 @@ class OpenAIResponsesClient:
             kwargs["previous_response_id"] = request.previous_response_id
         if self._max_output_tokens:
             kwargs["max_output_tokens"] = self._max_output_tokens
-        try:
-            response = self._client.responses.create(**kwargs)
-        except openai.OpenAIError as exc:
-            raise map_openai_error(exc) from None
+        tries, waited = 0, 0.0
+        while True:
+            try:
+                response = self._client.responses.create(**kwargs)
+                break
+            except openai.OpenAIError as exc:
+                error = map_openai_error(exc)
+                wait = rate_wait(error, tries, waited)
+                if wait is None:
+                    raise error from None
+                tries, waited = tries + 1, waited + wait
+                self._sleep(wait)
         return _parse_response(response)
+
+
+def _headers_of(exc: openai.APIStatusError) -> dict[str, str]:
+    try:
+        return {str(k).lower(): str(v).strip() for k, v in exc.response.headers.items()}
+    except AttributeError:
+        return {}
+
+
+def _seconds(headers: dict[str, str]) -> float | None:
+    """Retry-After, in seconds. Anything that is not a plain non-negative number (an HTTP date, say) is not used."""
+    for name, scale in (("retry-after-ms", 0.001), ("retry-after", 1.0)):
+        try:
+            value = float(headers[name]) * scale
+        except (KeyError, ValueError):
+            continue
+        if 0 <= value < float("inf"):
+            return value
+    return None
 
 
 def map_openai_error(exc: openai.OpenAIError) -> LLMError:
@@ -159,12 +221,19 @@ def map_openai_error(exc: openai.OpenAIError) -> LLMError:
     if isinstance(exc, openai.APIStatusError):
         status = exc.status_code
         code = getattr(exc, "code", None)
+        code = code if isinstance(code, str) else None
         detail = _short(exc.message)
+        headers = _headers_of(exc)
+        request_id = headers.get("x-request-id")
+        facts: dict[str, Any] = {
+            "status_code": status, "code": code, "request_id": request_id if request_id and _SAFE_VALUE.fullmatch(request_id) else None,
+            "retry_after": _seconds(headers), "rate_limit": {k: headers[k] for k in _RATE_HEADERS if k in headers and _SAFE_VALUE.fullmatch(headers[k])},
+        }  # fmt: skip
         if isinstance(exc, openai.AuthenticationError | openai.PermissionDeniedError):
-            return LLMError(LLMErrorKind.AUTH, f"OpenAI rejected the credentials ({status}): {detail}", status_code=status)
+            return LLMError(LLMErrorKind.AUTH, f"OpenAI rejected the credentials ({status}): {detail}", **facts)
         if isinstance(exc, openai.RateLimitError):
-            kind = LLMErrorKind.QUOTA if code == "insufficient_quota" else LLMErrorKind.RATE_LIMIT
-            return LLMError(kind, f"OpenAI rate limit or quota ({status}): {detail}", status_code=status)
+            kind = LLMErrorKind.QUOTA if code in HARD_QUOTA_CODES else LLMErrorKind.RATE_LIMIT
+            return LLMError(kind, f"OpenAI rate limit or quota ({status}): {detail}", **facts)
         if isinstance(exc, openai.NotFoundError):
             return LLMError(LLMErrorKind.MODEL_NOT_FOUND, f"OpenAI resource not found ({status}): {detail}", status_code=status)
         if isinstance(exc, openai.BadRequestError | openai.UnprocessableEntityError):

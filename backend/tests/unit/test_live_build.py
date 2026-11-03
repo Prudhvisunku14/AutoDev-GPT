@@ -117,6 +117,7 @@ def test_the_request_names_everything_the_hidden_tests_use_and_none_of_them(buil
                    "rounded to 2 decimal places", "None when no mark", "replaces the earlier mark", "test_attendance.py", "unittest", "unit tests"):  # fmt: skip
         assert needed in build.REQUEST, needed
     assert "test_at_" not in build.REQUEST and "S1" not in build.REQUEST and "66.67" not in build.REQUEST and "assertEqual" not in build.REQUEST
+    assert "plan it as one coding task that writes attendance.py and test_attendance.py together" in build.REQUEST  # the first run's plan split them
 
 
 def test_the_limits_are_valid_strict_and_win_over_the_environment_file(build: ModuleType, demo: ModuleType, tmp_path: Path) -> None:
@@ -127,6 +128,16 @@ def test_the_limits_are_valid_strict_and_win_over_the_environment_file(build: Mo
     assert s.gateway_max_usd_per_task < s.run_budget_usd and demo.live_settings(tmp_path, approved=True, limits=build.LIMITS).coding_live_approved is True
     Settings(_env_file=None, devpilot_api_token="t" * 32, **build.LIMITS)  # type: ignore[call-arg]
     assert demo.LIMITS["run_budget_usd"] == 1.50 and demo.SPEND_LIMIT_USD == 1.50  # the calculator demonstration is unchanged
+
+
+def test_the_token_limits_are_never_tighter_than_the_dollars_allow(build: ModuleType) -> None:
+    """The first real run set them to 80,000 an attempt and 150,000 a run, and the gateway refused three of four attempts on tokens while
+    only $0.10 of the $0.50 was spent. At the cheapest price, an attempt's dollars buy this many tokens, and a token limit below it can
+    only produce a false stop; the dollars are the limit that matters."""
+    cheapest = min(build.LIMITS["openai_price_input_per_mtok"], build.LIMITS["openai_price_output_per_mtok"]) / 1_000_000
+    assert build.LIMITS["opencode_max_tokens_per_task"] >= build.LIMITS["gateway_max_usd_per_task"] / cheapest
+    assert build.LIMITS["run_max_tokens"] >= build.SPEND_LIMIT_USD / cheapest
+    assert build.LIMITS["opencode_max_tokens_per_task"] <= build.LIMITS["run_max_tokens"]
 
 
 def test_the_first_request_of_each_kind_fits_inside_the_cap(build: ModuleType) -> None:

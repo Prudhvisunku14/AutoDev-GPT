@@ -562,7 +562,7 @@ class Orchestrator:
                 if not run.is_terminal and run.state is not RunState.AWAITING_APPROVAL:
                     pause_run(s, run, self._events, reason="llm_stopped", detail=message)
                 return
-            self._record(s, run, "llm.error", {"kind": exc.kind, "message": message, "resumable": exc.resumable})
+            self._record(s, run, "llm.error", {"kind": exc.kind, "message": message, "resumable": exc.resumable, **exc.facts()})
             if run.is_terminal or run.state is RunState.AWAITING_APPROVAL:
                 return
             if exc.resumable:

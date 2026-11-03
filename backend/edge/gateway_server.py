@@ -38,8 +38,11 @@ from edge.gateway_policy import (  # noqa: E402
     Usage,
     UsageScanner,
     answer_status,
+    answer_to_429,
     check_request,
     check_route,
+    error_facts,
+    safe_headers,
     usage_from,
     with_output_limit,
 )
@@ -59,6 +62,7 @@ class _TlsReply:
         self._response = response
         self.status = response.status
         self.media = response.getheader("content-type") or ""
+        self.headers = safe_headers(dict(response.getheaders()))  # only the allowed few: never an authorization or cookie header
 
     def read(self, amount: int) -> bytes:
         return self._response.read1(amount)
@@ -160,14 +164,31 @@ class Gateway:
             except (OSError, http.client.HTTPException) as exc:
                 raise Refused(502, f"the upstream could not be reached ({type(exc).__name__})") from exc
             try:
-                status = answer_status(reply.status, reply.media, stream=request.stream)
-                record["status"] = status
-                if request.stream and status == 200:
-                    usage = _relay(conn, reply)
+                headers = safe_headers(getattr(reply, "headers", {}))  # filtered again here, whatever sent them
+                record["upstream"] = {"status": reply.status, **({"headers": headers} if headers else {})}  # why it failed, for whoever reads the audit
+                if reply.status == 200:
+                    status = answer_status(reply.status, reply.media, stream=request.stream)
+                    record["status"] = status
+                    if request.stream:
+                        usage = _relay(conn, reply)
+                    else:
+                        data = _read_bounded(reply)
+                        usage = _usage_of(data)
+                        send_answer(conn, status, "application/json", data)
                 else:
                     data = _read_bounded(reply)
-                    usage = _usage_of(data)
-                    send_answer(conn, status, "application/json", data)
+                    facts = error_facts(data)
+                    record["upstream"].update(facts)
+                    if reply.status == 429 and reply.media.split(";", 1)[0].strip().lower() == "application/json":
+                        # Rejected before any work, so not billed. Passed on for OpenCode's own bounded backoff, or ended.
+                        status, own, extra = answer_to_429(facts, headers)
+                        record["status"] = status
+                        send_answer(conn, status, "application/json", own if own is not None else data, extra)
+                        usage = Usage(0, 0)
+                    else:
+                        status = answer_status(reply.status, reply.media, stream=request.stream)
+                        record["status"] = status
+                        send_answer(conn, status, "application/json", data)
             finally:
                 reply.close()
         finally:

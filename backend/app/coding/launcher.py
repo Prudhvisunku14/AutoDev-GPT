@@ -255,6 +255,32 @@ def read_ledger(path: Path) -> dict[str, Any]:
     return totals
 
 
+def read_refusals(path: Path) -> dict[str, Any]:
+    """What the gateway's own audit says about requests it did not simply pass on. The model engine reports a refusal by DevPilot's
+    own budget as a rate limit, so this is where the real reason is. An unreadable audit says nothing, and claims nothing."""
+    found: dict[str, Any] = {"budget_refusals": 0, "budget_reason": None, "upstream_429": 0, "upstream_rejections": []}
+    if not path.is_file():
+        return found
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        reason = str(entry.get("reason") or "")
+        # Status 402 since the gateway stopped answering a used-up budget with 429. Older audits say 429.
+        if entry.get("forwarded") is False and entry.get("status") in (402, 429) and "budget is used up" in reason:
+            found["budget_refusals"] += 1
+            found["budget_reason"] = reason[:80]
+        upstream = entry.get("upstream")
+        if isinstance(upstream, dict) and upstream.get("status") not in (None, 200):
+            found["upstream_429"] += upstream.get("status") == 429
+            if len(found["upstream_rejections"]) < 5:  # what OpenAI said, including the status the engine was given
+                found["upstream_rejections"].append({k: upstream[k] for k in ("status", "code", "type", "headers") if k in upstream} | {"answered": entry.get("status")})
+    return found
+
+
 class OpenCodeLauncher:
     """The real launcher. The no-model check runs it on real containers through a subclass that only
     removes from this layout (scripts/opencode_launcher_check.py). The live path needs the approvals."""
@@ -299,7 +325,8 @@ class OpenCodeLauncher:
         return ContainerTerminator(self._cli, container_id or "")
 
     def usage_for(self, run_id: str, call_id: str) -> dict[str, Any]:
-        return read_ledger(self._attempt_folder(run_id, call_id) / "ledger" / "ledger.jsonl")
+        folder = self._attempt_folder(run_id, call_id) / "ledger"
+        return {**read_ledger(folder / "ledger.jsonl"), **read_refusals(folder / "gateway-audit.jsonl")}
 
     def sweep(self) -> None:
         for label in (CONTAINER_LABEL, EDGE_LABEL):

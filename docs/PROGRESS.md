@@ -14,6 +14,14 @@
 
 **Milestone 6 hardening (2026-11-03, committed as `af5c576`):** OAuth security contracts, a fail-closed parser-isolation interface and detailed Drive approvals, offline only. Encryption is pending (`cryptography` is not installed), and the parser container is not built.
 
+**First real build, run once and FAILED (2026-11-03), diagnosed and fixed offline, not re-run:** real GPT and OpenCode ran; task 1 completed, task 2 failed. All 18 refusals were DevPilot's own gateway, whose token budget (80,000 an attempt, chosen too tight against its byte-based reservations) ran out after 3 to 6 requests. OpenAI answered all 16 forwarded requests with 200. The gateway reported it as a 429, which the engine retried and recovery retried again; $0.27 of the $0.30 spent was rolled back. Counted cost $0.3798, nothing delivered, acceptance `NOT_RUN`. Fixes:
+- **Gateway refusals:** a 402 with the reason, which the pinned engine does not retry. Its retry rule was read from the binary, ported and tested, and the port reproduces the run's timing.
+- **Recovery:** a refused or rate-limited attempt is not automatically started again.
+- **Start-up floor:** an attempt with room for fewer than 4 requests is not started.
+- **Token limits:** no tighter than the dollars; modelled, the dollars bind first.
+- **OpenAI's own 429s:** recorded; passed on for the engine's own bounded backoff, or ended when they are hard quotas or long pauses.
+- **Fewer requests:** a one-task request for the experiment, and a brief line that asks for fewer steps. Details and what is still unknown: [FIRST_REAL_BUILD.md](FIRST_REAL_BUILD.md) §10. **No second paid run has been made or authorized.**
+
 **First real build, prepared (2026-11-03):** `backend/scripts/live_build.py` runs one paid build of a small Python attendance tracker (real GPT, real OpenCode, real Docker, the evaluator's frozen acceptance suite) with a strict $0.50 cap (a total across runs, counted from the start in a ledger) and a typed confirmation. **Prepared and offline-tested only: Docker was not started and no build request was made.** Docker's RAM target fails at the last reading (3.70 GB available, against 4 GB). Readiness, blockers and the ordered procedures: [FIRST_REAL_BUILD.md](FIRST_REAL_BUILD.md).
 
 **Manual GPT planning CLI (2026-11-03, committed as `6297927`):** `python -m app.plan_cli`, run from `backend`. You type a prompt; it goes through the existing app, database, orchestrator, plan gate and approval queue, and the run stops once the plan is accepted.

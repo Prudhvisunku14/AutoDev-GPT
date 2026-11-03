@@ -41,9 +41,10 @@ STREAM = b'event: response.output_text.delta\ndata: {"delta":"hi"}\n\n' + DONE
 
 
 class FakeReply:
-    def __init__(self, status: int, media: str, body: bytes = b"") -> None:
+    def __init__(self, status: int, media: str, body: bytes = b"", headers: dict[str, str] | None = None) -> None:
         self.status = status
         self.media = media
+        self.headers = headers or {}
         self._body = body
         self.closed = False
 
@@ -300,7 +301,7 @@ def test_the_request_budget_stops_the_next_request_before_it_is_forwarded() -> N
     rig = Rig()
     for _ in range(3):
         assert rig.send(_request(_body()))[0] == 200
-    assert rig.send(_request(_body()))[0] == 429
+    assert rig.send(_request(_body()))[0] == 402  # not 429: that is what a client retries
     assert len(rig.upstream.calls) == 3
 
 
@@ -308,7 +309,7 @@ def test_the_token_budget_stops_a_request_that_could_not_fit() -> None:
     ceiling = len(_body()) + 512
     rig = Rig(policy=GatewayPolicy(model="gpt-test", max_output_tokens=1_000, max_requests=99, max_tokens=ceiling + 149))
     assert rig.send(_request(_body()))[0] == 200  # 150 used
-    assert rig.send(_request(_body()))[0] == 429
+    assert rig.send(_request(_body()))[0] == 402
     assert len(rig.upstream.calls) == 1
 
 
@@ -339,7 +340,7 @@ def test_the_spending_limit_counts_what_is_already_spent(spent: float, allowed: 
     else:
         with pytest.raises(Refused) as caught:
             budget.reserve(request)
-        assert caught.value.status == 429
+        assert caught.value.status == 402
 
 
 def test_outstanding_requests_hold_their_money_until_they_settle() -> None:
@@ -377,7 +378,7 @@ def test_requests_running_together_cannot_both_spend_the_same_room() -> None:
     budget.reserve(request)
     with pytest.raises(Refused) as caught:
         budget.reserve(CheckedRequest(b"{}", True, 40, 100))
-    assert caught.value.status == 429
+    assert caught.value.status == 402
 
 
 def test_an_answer_with_no_usage_is_charged_its_whole_reservation() -> None:
@@ -394,7 +395,7 @@ def test_a_failed_request_is_charged_too() -> None:
 
 def test_a_spending_limit_refuses_what_could_overrun_it() -> None:
     policy = GatewayPolicy(model="gpt-test", max_output_tokens=1_000, max_requests=9, max_tokens=10_000_000, max_usd=0.001, price_input_per_mtok=5.0, price_output_per_mtok=15.0)
-    assert Rig(policy=policy).send(_request(_body()))[0] == 429
+    assert Rig(policy=policy).send(_request(_body()))[0] == 402
 
 
 def test_the_cost_is_recorded_when_prices_are_set() -> None:

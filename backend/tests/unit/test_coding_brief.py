@@ -37,6 +37,16 @@ def test_the_rules_are_part_of_every_brief() -> None:
         assert rule in brief
 
 
+def test_every_brief_says_that_each_step_is_a_paid_request() -> None:
+    """The first real run spent requests on the engine's own todo list and on rereading files. This asks for fewer; it removes no
+    tool and changes no rule, so nothing can fail because of it. Whether the model listens can only be seen in a real run."""
+    for language in ("Python", "JavaScript"):
+        brief = build_brief(replace(BASE, language=language))
+        assert "Each step you take is a paid model request within a fixed budget" in brief
+        assert "write each file whole in one change" in brief and "keep a todo list only for a task with many steps" in brief
+        assert brief.index("paid model request") < brief.index("<task>") or brief.index("paid model request") > brief.index("</instructions>")  # among the rules, never inside a data block
+
+
 def test_python_projects_get_the_sandbox_notes() -> None:
     assert "python -m unittest discover" in build_brief(BASE)
     assert "unittest" not in build_brief(replace(BASE, language="JavaScript", stack_id="react-vite"))

@@ -68,10 +68,11 @@ _EVENT_BREAK = re.compile(rb"\r\n\r\n|\n\n")
 class Refused(Exception):
     """The request stops here. `reason` is for the audit log; nothing here holds a secret."""
 
-    def __init__(self, status: int, reason: str) -> None:
+    def __init__(self, status: int, reason: str, *, body: bytes | None = None) -> None:
         super().__init__(reason)
         self.status = status
         self.reason = reason
+        self.body = body  # a complete JSON answer for the client, when the generic one would hide what it needs to know
 
 
 @dataclass(frozen=True)

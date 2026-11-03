@@ -60,7 +60,7 @@ STREAM_IDLE_SECONDS = 30.0
 STREAM_MAX_SECONDS = 900.0
 MAX_CONNECTIONS = 32
 _DRAIN_SECONDS = 0.1
-_STATUS_TEXT = {200: "OK", 204: "No Content", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 408: "Request Timeout",
+_STATUS_TEXT = {200: "OK", 204: "No Content", 400: "Bad Request", 401: "Unauthorized", 402: "Payment Required", 403: "Forbidden", 404: "Not Found", 408: "Request Timeout",
                 413: "Content Too Large", 429: "Too Many Requests", 431: "Request Header Fields Too Large", 502: "Bad Gateway", 503: "Service Unavailable", 504: "Gateway Timeout"}  # fmt: skip
 _CONFIG_KEYS = frozenset({"directory", "provider_id", "model_id", "session_rules", "upstream_host", "upstream_port"})
 BUSY_RECORD = {"method": "?", "target": "?", "status": 503, "forwarded": False, "reason": "every connection slot is in use", "ms": 0}
@@ -198,7 +198,7 @@ def reply_error(conn: socket.socket, refusal: Refused) -> None:
     # Nothing about the rules for a caller who has not shown the token.
     public = refusal.reason if refusal.status == 403 else _STATUS_TEXT.get(refusal.status, "refused")
     try:
-        send_answer(conn, refusal.status, "application/json", json.dumps({"error": public}).encode())
+        send_answer(conn, refusal.status, "application/json", refusal.body if refusal.body is not None else json.dumps({"error": public}).encode())
         _drain(conn)
     except OSError:
         pass
@@ -269,10 +269,14 @@ def _relay_stream(conn: socket.socket, reply: UpstreamReply) -> None:
         conn.sendall(chunk)
 
 
-def send_answer(conn: socket.socket, status: int, media: str, body: bytes) -> None:
+def send_answer(conn: socket.socket, status: int, media: str, body: bytes, headers: dict[str, str] | None = None) -> None:
     lines = [f"HTTP/1.1 {status} {_STATUS_TEXT.get(status, 'Status')}"]
     if status != 204:
         lines += [f"Content-Type: {media}", f"Content-Length: {len(body)}"]
+    for name, value in (headers or {}).items():  # names fixed in DevPilot's code; values are checked to be plain digits
+        if not (name.replace("-", "").isalpha() and value.isdigit()):
+            raise ValueError(f"refusing to send the header {name!r}")
+        lines.append(f"{name}: {value}")
     lines += ["Cache-Control: no-store", "Connection: close", "", ""]
     conn.sendall("\r\n".join(lines).encode("ascii") + (b"" if status == 204 else body))
 

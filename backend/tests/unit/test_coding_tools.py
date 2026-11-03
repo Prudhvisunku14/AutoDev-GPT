@@ -196,6 +196,28 @@ def test_the_gateways_ledger_counts_against_the_run(tmp_path: Path) -> None:
     assert run.cost_usd == pytest.approx(0.25 + gpt_turns) and run.tokens_in + run.tokens_out == run.turns * 1_200 + 5_000
 
 
+def test_an_attempt_the_gateway_refused_ends_the_run_without_another_paid_attempt(tmp_path: Path) -> None:
+    """The first real run, end to end: the engine says "Too Many Requests", the gateway's audit says its own token budget. Recovery used
+    to start the same attempt again; now the run stops, the copy is restored, the money spent is counted, and the next attempt never starts."""
+
+    class Refusing(SimulatedLauncher):
+        def start(self, request: LaunchRequest) -> Any:
+            session = super().start(request)
+            session.usage = {"requests": 6, "charged_tokens": 39_391, "cost_usd": 0.1095, "all_known": True, "budget_refusals": 6,
+                             "budget_reason": "the token budget is used up", "upstream_429": 0, "upstream_rejections": []}  # fmt: skip
+            return session
+
+    refused = ScriptedAttempt({"calculator.py": mvp.CALCULATOR}, status=CodingStatus.FAILED, detail="APIError: Too Many Requests: Too Many Requests")
+    launcher = Refusing([refused, GOOD])
+    rig = Rig(tmp_path, *opening(), generate(1), generate(1), pause(), launcher=launcher, openai_price_input_per_mtok=2.0, openai_price_output_per_mtok=10.0)
+    run = rig.advance()
+    assert run.state is RunState.FAILED and run.outcome == "coding_failed" and "token budget is used up" in (run.status_detail or "")
+    assert rig.attempts() == [AttemptPhase.RESTORED] and rig.untouched() and launcher._script == [GOOD]  # the second attempt was never started
+    decided = rig.h.events_of(rig.run_id, "recovery.decided")[-1]
+    assert decided["action"] == "STOP" and decided["category"] == "RESOURCE_EXHAUSTION"
+    assert run.cost_usd == pytest.approx(0.1095 + run.turns * (1_000 * 2 + 200 * 10) / 1_000_000)
+
+
 @pytest.mark.parametrize(
     ("ledger", "allowance", "expected"),
     [({}, 0.5, None), ({"requests": 2, "cost_usd": 0.1, "all_known": True}, 0.5, 0.1), ({"requests": 2, "cost_usd": 0.1, "all_known": False}, 0.5, 0.1),

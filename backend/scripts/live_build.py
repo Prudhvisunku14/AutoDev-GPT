@@ -50,8 +50,13 @@ REQUEST = (
     "- percentage(student_id: str) -> float | None: present marks divided by marks recorded, times 100, rounded to 2 decimal places. "
     "None when no mark was recorded. An unknown student_id raises KeyError.\n"
     "\n"
-    "Put the unit tests in test_attendance.py, using unittest."
+    "Put the unit tests in test_attendance.py, using unittest.\n"
+    "\n"
+    "The program is small: plan it as one coding task that writes attendance.py and test_attendance.py together."
 )
+# The one-task line is there because the first run's plan split the module from its tests: the second session paid OpenCode's base
+# prompt again and read the first session's file, and each task can fail and be retried on its own. It changes nothing the evaluator
+# checks: the frozen suite still judges the result, and the plan gate still requires every requirement to be covered.
 
 ACCEPTANCE_TESTS = '''"""Acceptance tests for the attendance tracker, written by the evaluator before any code exists."""
 
@@ -142,10 +147,16 @@ ACCEPTANCE: dict[str, Any] = SUITE.to_dict()
 
 # live_demo's approved limits, tightened for a $0.50 run. The run budget is shared by GPT and OpenCode, and each attempt gets the
 # smaller of GATEWAY_MAX_USD_PER_TASK and what the run has left. A request whose worst case could pass a limit is not sent.
+#
+# The token limits are NOT tighter than the dollars allow. The first real run (2026-11-03) set them to 80,000 an attempt and 150,000 a
+# run, and three of its four attempts were refused by the gateway's own token budget, after about $0.27 of work that was then rolled
+# back: the gateway reserves each request at its size in bytes (about five times its real tokens), so a limit of that size ran out after
+# 3 to 6 requests while only $0.10 of the $0.50 was spent. At $2 per million tokens, $0.50 buys at most about 250,000 tokens, so limits at
+# or above these can never bind before the dollars do, and the dollars are the limit that matters.
 LIMITS: dict[str, Any] = {
     **live_demo.LIMITS,
-    "run_budget_usd": SPEND_LIMIT_USD, "openai_max_output_tokens": 3_000, "run_max_tokens": 150_000, "max_turns": 12, "max_tool_calls": 12,
-    "gateway_max_output_tokens": 4_000, "gateway_max_usd_per_task": 0.30, "opencode_max_tokens_per_task": 80_000,
+    "run_budget_usd": SPEND_LIMIT_USD, "openai_max_output_tokens": 3_000, "run_max_tokens": 300_000, "max_turns": 12, "max_tool_calls": 12,
+    "gateway_max_output_tokens": 4_000, "gateway_max_usd_per_task": 0.30, "opencode_max_tokens_per_task": 200_000,
 }  # fmt: skip
 
 FLOORS = {"c_free_gb": 10.0, "ram_available_gb": 4.0, "commit_max_percent": 70.0}

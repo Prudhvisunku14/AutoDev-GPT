@@ -68,7 +68,7 @@ REQUEST = LLMRequest(
 
 def _client(tmp_path: Path, handler: Callable[[httpx.Request], httpx.Response], **overrides: Any) -> OpenAIResponsesClient:
     settings = make_settings(tmp_path, **{"openai_model": MODEL, "openai_max_retries": 0, **overrides})
-    return OpenAIResponsesClient(settings, http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+    return OpenAIResponsesClient(settings, http_client=httpx.Client(transport=httpx.MockTransport(handler)), sleep=lambda _seconds: None)  # a wait is never really waited here
 
 
 def _error(status: int, code: str | None = None, message: str = "boom") -> Callable[[httpx.Request], httpx.Response]:

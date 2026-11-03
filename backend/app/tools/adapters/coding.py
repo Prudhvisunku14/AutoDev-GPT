@@ -287,9 +287,35 @@ def _attempt(runtime: CodingRuntime, plan: _CodingPlan, cancel: threading.Event 
     finally:
         session.close()
     result.ledger = session.usage
+    _name_a_budget_refusal(result)
     if not result.quarantined:
         plan.checkpoint.discard()
     return result
+
+
+def _name_a_budget_refusal(result: _CodingResult) -> None:
+    """Name what the engine's error hides, from the gateway's audit, when a failed attempt met a limit.
+
+    - DevPilot's own budget: the first real run's engine reported it as "Too Many Requests", which looks worth trying again. The same
+      attempt would meet the same limit, so it is a resource limit, and the recovery policy never retries one.
+    - OpenAI's 429s: a hard quota or a long pause ended the attempt, or OpenCode gave up after its own five retries. Starting another
+      paid attempt straight away would meet the same answer, so the run stops with the facts, and a person decides when to go on.
+
+    An attempt that was kept, or that failed with nothing of the sort in its audit, is left as it is."""
+    if result.kept or result.outcome.status is not CodingStatus.FAILED:
+        return
+    refused, rejected = result.ledger.get("budget_refusals", 0), result.ledger.get("upstream_429", 0)
+    if refused:
+        reason = result.ledger.get("budget_reason") or "a budget is used up"
+        detail = f"the model gateway refused {refused} request(s) because {reason}"
+    elif rejected:
+        said = [f"{r.get('code') or 'no code'}{', Retry-After ' + r['headers']['retry-after'] if 'retry-after' in r.get('headers', {}) else ''}"
+                f"{', request ' + r['headers']['x-request-id'] if 'x-request-id' in r.get('headers', {}) else ''}" for r in result.ledger.get("upstream_rejections", []) if r.get("status") == 429]  # fmt: skip
+        detail = f"OpenAI answered {rejected} request(s) with 429 ({'; '.join(said[:3])})"
+    else:
+        return
+    result.outcome.status = CodingStatus.LIMIT
+    result.outcome.detail = f"{detail}; the engine reported: {result.outcome.detail}"
 
 
 def _settle(plan: _CodingPlan, guard: AttemptGuard, session: CodingSession, outcome: CodingOutcome) -> _CodingResult:

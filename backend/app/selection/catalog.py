@@ -36,6 +36,10 @@ OPENAI_KEY_NAME, OPENAI_HOST = "OPENAI_API_KEY", "api.openai.com"
 _MEASURED_REQUEST_TOKENS = 16_690 + 512
 # OpenCode 1 GB, API filter 256 MB, gateway 256 MB: the containers' own limits.
 _OPENCODE_MEMORY_MB = 1_536
+# An attempt is several requests, one for each tool call and one to finish. The first real run (2026-11-03) made 2 to 6 of them in an
+# attempt that got anywhere, and the gateway reserves each request at its byte size, about five times what it really uses. An attempt
+# that starts with room for fewer than this cannot be expected to finish, so it is not started: it would spend money to be rolled back.
+_ATTEMPT_REQUESTS = 4
 
 PLANNED_TOOLS = (
     ToolProfile("opencode_via_n8n", ToolStatus.PLANNED, _ALL_CAPABILITIES, _DECLARED_STACKS, _KINDS, environment="planned"),
@@ -50,7 +54,7 @@ def opencode_profile(settings: Settings) -> ToolProfile:
         floor = (_MEASURED_REQUEST_TOKENS * settings.openai_price_input_per_mtok + settings.gateway_max_output_tokens * settings.openai_price_output_per_mtok) / 1_000_000
     return ToolProfile(
         OPENCODE_NAME, ToolStatus.IMPLEMENTED, _ALL_CAPABILITIES, _SHOWN_STACKS, _KINDS, environment=DOCKER_INTERNAL, credentials=frozenset({OPENAI_KEY_NAME}), network=frozenset({OPENAI_HOST}),
-        min_cost_usd=floor, min_tokens=_MEASURED_REQUEST_TOKENS + settings.gateway_max_output_tokens, memory_mb=_OPENCODE_MEMORY_MB,
+        min_cost_usd=floor, min_tokens=_ATTEMPT_REQUESTS * _MEASURED_REQUEST_TOKENS + settings.gateway_max_output_tokens, memory_mb=_OPENCODE_MEMORY_MB,
     )  # fmt: skip
 
 

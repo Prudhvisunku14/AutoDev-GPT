@@ -29,6 +29,7 @@ still running hold their reservations, so several at once cannot spend the same 
 from __future__ import annotations
 
 import json
+import math
 import re
 import threading
 from collections.abc import Iterable, Mapping
@@ -49,6 +50,27 @@ _INPUT_OVERHEAD_TOKENS = 512  # what the provider adds around messages and tools
 # configured prices would not hold, and neither would the reservation. Not a status OpenCode retries.
 SHORT_CONTEXT_TOKENS = 272_000
 SERVICE_TIER = "default"  # "auto" follows the project's own setting, which may be the dearer Fast tier
+
+# How the pinned OpenCode 1.19.5 retries, read from its binary (never run). An HTTP error is retried when the AI SDK marks it retryable
+# (408, 409, 429 and 5xx) OR its message or response body matches one of the client's patterns, up to 5 times, waiting 2 s doubling
+# (25% jitter), or exactly what Retry-After says, with no upper limit. So the gateway does not retry by itself (OpenCode already does,
+# and the two would multiply), and an answer that must END an attempt carries status 402 and a body DevPilot wrote, checked against
+# those patterns (`STOP_BODY_PATTERNS` in the tests): echoing OpenAI's own text could restart the retries ("access_terminated" matches).
+#
+# The first real run showed what a 429 for DevPilot's own budget does: six refusals an attempt, then "Too Many Requests", the reason
+# hidden. A used-up budget is final and says why.
+STOP_STATUS = 402
+BUDGET_CODE = "devpilot_budget_used_up"
+QUOTA_CODE = "devpilot_upstream_quota"
+LONG_WAIT_CODE = "devpilot_upstream_long_pause"
+# OpenAI's 429s. A rate limit is passed on for OpenCode to wait out; anything that says the money or the account is the problem is final.
+HARD_QUOTA_CODES = frozenset({"insufficient_quota", "billing_hard_limit_reached", "billing_not_active", "account_deactivated", "access_terminated"})
+LONGEST_FORWARDED_WAIT = 20.0  # seconds. OpenCode honours Retry-After without limit, so a longer one ends the attempt instead
+# Headers worth keeping when something goes wrong. Never an authorization or cookie header, and values are short printable text.
+SAFE_HEADERS = ("x-request-id", "retry-after", "retry-after-ms", "x-ratelimit-limit-requests", "x-ratelimit-limit-tokens", "x-ratelimit-remaining-requests",
+                "x-ratelimit-remaining-tokens", "x-ratelimit-reset-requests", "x-ratelimit-reset-tokens", "openai-processing-ms")  # fmt: skip
+_SAFE_VALUE = re.compile(r"^[A-Za-z0-9 ._:,;=+/-]{1,64}$")
+_SAFE_CODE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
 ALLOWED_FIELDS = frozenset(
     {
@@ -114,6 +136,70 @@ class Usage:
     input_tokens: int
     output_tokens: int
     cached_tokens: int = 0
+
+
+def stop_body(code: str, message: str) -> bytes:
+    """An OpenAI-shaped error that ends the attempt. Only DevPilot's own words: see STOP_STATUS."""
+    return json.dumps({"error": {"message": message, "type": code, "param": None, "code": code}}).encode()
+
+
+def budget_refusal(reason: str) -> Refused:
+    """The refusal for a used-up budget: status 402 and an answer that names the reason."""
+    return Refused(STOP_STATUS, reason, body=stop_body(BUDGET_CODE, f"DevPilot's model gateway refused this request: {reason}. Asking again cannot help."))
+
+
+QUOTA_STOP = stop_body(QUOTA_CODE, "OpenAI refused the request because of the account's quota or billing. DevPilot stops this attempt; asking again cannot help.")
+LONG_WAIT_STOP = stop_body(LONG_WAIT_CODE, "OpenAI asked for a longer pause than one coding attempt may take, so DevPilot stops this attempt.")
+
+
+def safe_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    """The allowed headers of an upstream answer, by lower-case name, each only if it looks like short plain text."""
+    lowered = {str(k).lower(): str(v).strip() for k, v in headers.items()}
+    return {name: lowered[name] for name in SAFE_HEADERS if name in lowered and _SAFE_VALUE.fullmatch(lowered[name])}
+
+
+def error_facts(body: bytes) -> dict[str, str]:
+    """The error `code` and `type` of an OpenAI error answer, if they look like identifiers. Never the message: it can echo input."""
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return {}
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        return {}
+    return {key: error[key] for key in ("code", "type") if isinstance(error.get(key), str) and _SAFE_CODE.fullmatch(error[key])}
+
+
+def is_hard_quota(facts: Mapping[str, str]) -> bool:
+    return facts.get("code") in HARD_QUOTA_CODES or facts.get("type") in HARD_QUOTA_CODES
+
+
+def asked_wait(headers: Mapping[str, str]) -> float | None:
+    """The pause OpenAI asked for, in seconds, from Retry-After-ms or Retry-After. None when it named none, or named a date."""
+    asked = _number(headers["retry-after-ms"], scale=0.001) if "retry-after-ms" in headers else None
+    if asked is None and "retry-after" in headers:
+        asked = _number(headers["retry-after"])
+    return asked
+
+
+def answer_to_429(facts: Mapping[str, str], headers: Mapping[str, str]) -> tuple[int, bytes | None, dict[str, str]]:
+    """What the client is told about OpenAI's 429: (status, a body of DevPilot's own or None to pass OpenAI's on, headers to add).
+    A hard quota, or a pause longer than LONGEST_FORWARDED_WAIT, ends the attempt. Anything else is passed on for OpenCode's own
+    bounded backoff, with the pause OpenAI asked for, so it is honoured exactly."""
+    if is_hard_quota(facts):
+        return STOP_STATUS, QUOTA_STOP, {}
+    wait = asked_wait(headers)
+    if wait is not None and wait > LONGEST_FORWARDED_WAIT:
+        return STOP_STATUS, LONG_WAIT_STOP, {}
+    return 429, None, ({"Retry-After": str(math.ceil(wait))} if wait is not None else {})
+
+
+def _number(text: str, *, scale: float = 1.0) -> float | None:
+    try:
+        value = float(text) * scale
+    except ValueError:  # an HTTP date, or nonsense
+        return None
+    return value if 0 <= value < float("inf") else None
 
 
 def check_route(head: Head) -> None:
@@ -230,14 +316,14 @@ class Budget:
         policy = self._policy
         with self._lock:
             if self.requests >= policy.max_requests:
-                raise Refused(429, "the request budget is used up")
+                raise budget_refusal("the request budget is used up")
             room = policy.max_tokens - self.tokens - self._held - request.input_ceiling
             if room <= 0:
-                raise Refused(429, "the token budget is used up")
+                raise budget_refusal("the token budget is used up")
             output = min(request.max_output_tokens, room)
             worst = policy.cost_usd(request.input_ceiling, output)
             if policy.max_usd is not None and worst is not None and self.usd + self._held_usd + worst > policy.max_usd:
-                raise Refused(429, "the spending budget is used up")
+                raise budget_refusal("the spending budget is used up")
             self.requests += 1
             held = request.input_ceiling + output
             self.outstanding += 1
