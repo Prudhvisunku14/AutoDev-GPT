@@ -12,7 +12,19 @@
 
 **Milestone 6 (2026-11-03, committed as `829b9da`):** Google Drive and a RAG chatbot builder, implemented and offline-tested with a simulated Drive, simulated consent and a test-double embedder. No Google server, real OAuth, paid call or Docker run; no chatbot was generated, and there is no working live Google Drive RAG chatbot. See [MILESTONE_2_GOOGLE_DRIVE_RAG.md](MILESTONE_2_GOOGLE_DRIVE_RAG.md).
 
-**Milestone 6 hardening (2026-11-03, not committed):** OAuth security contracts, a fail-closed parser-isolation interface and detailed Drive approvals, offline only. Encryption is pending (`cryptography` is not installed), and the parser container is not built.
+**Milestone 6 hardening (2026-11-03, committed as `af5c576`):** OAuth security contracts, a fail-closed parser-isolation interface and detailed Drive approvals, offline only. Encryption is pending (`cryptography` is not installed), and the parser container is not built.
+
+**Manual GPT planning CLI (2026-11-03):** `python -m app.plan_cli`, run from `backend`. You type a prompt; it goes through the existing app, database, orchestrator, plan gate and approval queue, and the run stops once the plan is accepted.
+- **What GPT can do:** it is offered only the analysis and planning tools.
+- **Limits, all enforced in code before each request:**
+  - 3 requests per run;
+  - $0.25 per run against the worst case;
+  - 90,000 tokens per run, which holds even if the prices are wrong;
+  - $1.50 across runs, in a ledger;
+  - no retries.
+- **What it reports:** which coding tool build mode would choose for each task, and why, without starting anything.
+- **Tested offline:** FakeLLM and a stand-in client, 21 tests.
+- **First real run (user-triggered, 2026-11-03):** `gpt-6.1-sol` analysed "a college attendance management portal" into 32 requirements and planned 9 tasks on `python-fastapi`. Both passed the gates. 2 requests, 3,465 in / 3,196 out tokens, about $0.039 at the configured prices. Planning only: nothing was generated, and build mode is blocked (no FastAPI verification image, OpenCode not eligible for that stack).
 
 Phase 4 (OpenCode) in progress. The foundation, the contract checks, the verified binary and the precedence experiment are committed (2026-10-30).
 
@@ -1003,7 +1015,7 @@ These figures describe a scenario mix in which the preferred tool is usually wro
 
 ### Milestone 6: Google Drive and the RAG chatbot builder (2026-11-03)
 
-**Implemented and offline-tested; committed as `829b9da`.** The security hardening after it (OAuth contracts, parser isolation, approval details) is not committed. It is described in §14 of the milestone document. With the hardening, the whole offline suite gives 3,585 passed, 17 skipped and 0 failed. Details, security findings and what real use needs: [MILESTONE_2_GOOGLE_DRIVE_RAG.md](MILESTONE_2_GOOGLE_DRIVE_RAG.md).
+**Implemented and offline-tested; committed as `829b9da`.** The security hardening after it (OAuth contracts, parser isolation, approval details) is committed as `af5c576`. It is described in §14 of the milestone document. With the hardening, the whole offline suite gives 3,585 passed, 17 skipped and 0 failed. Details, security findings and what real use needs: [MILESTONE_2_GOOGLE_DRIVE_RAG.md](MILESTONE_2_GOOGLE_DRIVE_RAG.md).
 
 **Built:**
 - `app/drive/`: a read-only Drive v3 client behind the `google_drive` egress entry, grants owned by one project, DevPilot's own folder restriction, a consent URL with PKCE, and a simulated Drive for tests.
@@ -1025,6 +1037,58 @@ These figures describe a scenario mix in which the preferred tool is usually wro
 - a real embedding provider;
 - real code generation;
 - Docker verification.
+
+### Manual GPT planning from the terminal (2026-11-03)
+
+**Purpose:** evidence that the real GPT API can take a person's own prompt and produce a valid plan through DevPilot's own orchestration, before more features are added. **Built, offline-tested, and run once live by the user:** the real model's analysis and plan for a college attendance portal passed the gates (see the entry at the top of this file).
+
+**Entry point:** `app/plan_cli.py`, run from `backend` as `python -m app.plan_cli`. Without `--live` it is a dry run: it shows the first request exactly as it would be sent, and its worst-case cost, from a throwaway database. Nothing is sent. With `--live`, it asks for the prompt and a typed "yes".
+
+**What it reuses:**
+- `create_app`, with the configured database and nothing wired but the GPT client;
+- the orchestrator, the analysis and plan gates, the approval queue (a GPT question is answered in the terminal, and Enter stops the run) and `RunGuard`;
+- the adaptive selector and the verification-readiness check, asked what build mode would decide for each task. The OpenCode launcher is given a Docker CLI that cannot start a process.
+
+No new model gateway was written.
+
+**Limits:**
+- **Fixed in code, not `.env`:**
+  - at most 3 requests per run, counted before sending, with OPENAI_MAX_RETRIES forced to 0;
+  - MAX_TURNS 3;
+  - $0.25 per run, through `RunGuard`'s worst case before every request;
+  - 90,000 tokens per run, worst case before every request, which holds even if the prices are wrong;
+  - 6,000 output tokens per request.
+- **Across runs:** $1.50, in `data/planning/ledger.jsonl`. A run counts at its cap until it is settled, and an unreadable ledger refuses.
+- **Required before sending:** prices must be configured, and requests must go to OpenAI's own endpoint.
+- **Tools:** only `submit_analysis`, `submit_plan` and `request_human_input` may be offered. The run is refused at `submit_criteria`, then closed, so it cannot be resumed outside the limits.
+
+**Output:**
+- **On screen:**
+  1. the requirement;
+  2. GPT's responses, with each gate verdict;
+  3. the analysis and plan;
+  4. the tasks;
+  5. tool eligibility;
+  6. blockers;
+  7. tokens and estimated cost;
+  8. the verdict.
+- **Report file:** `data/planning/<run_id>.json`, which also keeps GPT's raw tool arguments.
+
+**Also changed:** `create_app` takes a `gpt_label`, so a real client behind a guard is not reported as FakeLLM. `.env.example`'s Google redirect URI now uses the path the OAuth code accepts.
+
+**Tests:** `test_plan_cli.py`, 21, offline (FakeLLM and a stand-in for the OpenAI client). They cover:
+- the prompt reaching the orchestrator, and the stop at plan acceptance;
+- the gate still rejecting a bad plan;
+- the request, token, run-cap and experiment-cap limits;
+- a GPT question waiting for the person, and Ctrl+C;
+- confirmation and preflight refusals;
+- the dry run leaving the database alone;
+- live mode having no path to a scripted model;
+- no key in the output or report.
+
+Related suites (orchestrator, coding, repository, Drive, API report, live smoke): 200 passed together.
+
+**Billing uncertainty:** costs are computed from the configured OPENAI_PRICE_* values. If those are lower than the model's real prices, the real cost is higher by the same ratio. OpenAI's usage page is the authority.
 
 ### Product backlog (requested 2026-11-02, not built)
 

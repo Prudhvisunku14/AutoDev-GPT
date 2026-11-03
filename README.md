@@ -133,6 +133,20 @@ Live smoke test, which asks one question: can GPT submit a structured analysis? 
 & $env:DEVPILOT_PYTHON backend\scripts\live_smoke_test.py --send    # paid; run only after approval
 ```
 
+Manual planning from your own prompt, in the terminal. It uses the real orchestrator and gate checks, and stops once the plan is accepted. Nothing is generated or run. Run it from the `backend` folder:
+
+```powershell
+cd backend
+& $env:DEVPILOT_PYTHON -m app.plan_cli           # dry run: shows the first request and its worst-case cost; sends nothing
+& $env:DEVPILOT_PYTHON -m app.plan_cli --live    # paid: asks for your prompt, then for a typed "yes"
+```
+
+Live mode needs `OPENAI_API_KEY`, `OPENAI_MODEL` and both `OPENAI_PRICE_*` values in `.env`. Its limits are fixed in `app/plan_cli.py`:
+- per run: at most 3 requests, $0.25 and 90,000 tokens, with no retries;
+- across runs: $1.50, tracked in `data/planning/ledger.jsonl`.
+
+Each run's full report is written to `data/planning/<run_id>.json`.
+
 Docker and WSL2 setup for Phase 3: [docs/SETUP_WINDOWS.md](docs/SETUP_WINDOWS.md).
 
 ### Competition demonstration (offline, free)

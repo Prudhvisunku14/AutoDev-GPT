@@ -156,9 +156,9 @@ class Settings(BaseSettings):
     repository_max_files: int = Field(default=2_000, ge=1, le=20_000)
 
     # --- Google Drive and the RAG knowledge base (Milestone 6) --------------
-    # off: no Drive tools. google: the Drive v3 client with the real consent URL; the OAuth code exchange is not
-    # implemented yet, so it never grants. Tests and the offline demonstration pass a fixture runtime to create_app;
-    # no setting selects fixtures or the embedding test double.
+    # off: no Drive tools. google: the Drive v3 client and the OAuth flow (app/drive/oauth.py), which fails closed
+    # until cryptography is installed and DEVPILOT_TOKEN_KEY is set, and has never run against Google. Tests and the
+    # offline demonstration pass a fixture runtime to create_app; no setting selects fixtures or the embedding test double.
     drive_source: Literal["off", "google"] = "off"
     google_oauth_client_id: str | None = None  # public identifier; its secret is google_oauth_client_secret
     google_oauth_redirect_uri: str = "http://127.0.0.1:8000/oauth/google/callback"

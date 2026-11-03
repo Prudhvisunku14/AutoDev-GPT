@@ -56,8 +56,10 @@ def create_app(
     coding: Selector | None = None,
     repositories: RepositorySource | None = None,
     drive: DriveRuntime | None = None,
+    gpt_label: str | None = None,
 ) -> FastAPI:
-    """Build the app. `llm` replaces the OpenAI client (tests and the offline demo use FakeLLM).
+    """Build the app. `llm` replaces the OpenAI client (tests and the offline demo use FakeLLM). `gpt_label` names
+    what `llm` really is in reports, for a real client wrapped in a guard (app/plan_cli.py).
 
     `sandbox` enables the Docker sandbox tool. Without it no container is ever started, so
     tests never touch Docker. `coding`, which needs a sandbox, chooses who writes the code and lets
@@ -86,7 +88,7 @@ def create_app(
     register_phase2_tools(registry)
     if sandbox is not None:
         register_sandbox_tools(registry)
-    gpt_label = "FakeLLM (scripted)" if llm is not None else "OpenAI Responses API"
+    gpt_label = gpt_label or ("FakeLLM (scripted)" if llm is not None else "OpenAI Responses API")
     runtime: CodingRuntime | None = None
     candidates: WorkspaceFS | None = None
     if coding is not None:
