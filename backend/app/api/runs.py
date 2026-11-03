@@ -1,7 +1,9 @@
 """Runs: creation, start/resume, inspection, cancellation, events and the live stream.
 
 Runs never start by themselves: `POST /runs/{id}/start` is the only way to make the
-orchestrator call GPT (and spend money) for a run.
+orchestrator call GPT (and spend money) for a run. The dashboard sends a spending approval with
+it: the approved figure must be the limit the backend enforces, and prices must be set so that
+limit can be enforced at all. REQUIRE_SPEND_APPROVAL makes the approval mandatory.
 """
 
 from __future__ import annotations
@@ -12,16 +14,17 @@ import time
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.deps import EventsDep, SessionDep, load_project, load_run
+from app.api.capabilities import get_capabilities
 from app.core.auth import require_api_token
 from app.core.events import event_payload, list_events
 from app.db import repositories
-from app.db.models import AcceptanceCriterion, Event, PlanTask, Requirement, Run, RunState, ToolInvocation
+from app.db.models import AcceptanceCriterion, Event, PlanTask, Project, Requirement, Run, RunState, ToolInvocation
 from app.orchestrator.run_control import cancel_run as cancel_run_and_close
 from app.verification.report import build_report
 from app.schemas.api import (
@@ -31,9 +34,13 @@ from app.schemas.api import (
     InvocationOut,
     PlanOut,
     RequirementOut,
+    RunListItem,
     RunOut,
+    StartRunIn,
     TaskOut,
 )
+
+_SAME_DOLLARS = 1e-9
 
 router = APIRouter(tags=["runs"], dependencies=[Depends(require_api_token)])
 
@@ -55,22 +62,60 @@ def list_project_runs(project_id: str, session: SessionDep) -> list[RunOut]:
     return [RunOut.model_validate(r) for r in repositories.list_runs(session, project.id)]
 
 
+@router.get("/runs", response_model=list[RunListItem])
+def list_all_runs(session: SessionDep, limit: Annotated[int, Query(ge=1, le=500)] = 200) -> list[RunListItem]:
+    """Every run on this backend, newest first, with its project's name."""
+    rows = session.execute(select(Run, Project.name).join(Project, Run.project_id == Project.id).order_by(Run.created_at.desc(), Run.id).limit(limit))
+    return [RunListItem(**RunOut.model_validate(run).model_dump(), project_name=name) for run, name in rows]
+
+
 @router.get("/runs/{run_id}", response_model=RunOut)
 def get_run(run_id: str, session: SessionDep) -> RunOut:
     return RunOut.model_validate(load_run(session, run_id))
 
 
 @router.post("/runs/{run_id}/start", response_model=RunOut, status_code=status.HTTP_202_ACCEPTED)
-def start_run(run_id: str, request: Request, session: SessionDep, events: EventsDep, background: BackgroundTasks) -> RunOut:
+def start_run(
+    run_id: str,
+    request: Request,
+    session: SessionDep,
+    events: EventsDep,
+    background: BackgroundTasks,
+    approval: Annotated[StartRunIn | None, Body()] = None,
+) -> RunOut:
     """Start a CREATED run, or resume a paused one. Calls GPT; may cost money."""
     run = load_run(session, run_id)
+    project = load_project(session, run.project_id)
     if run.is_terminal:
         raise HTTPException(status.HTTP_409_CONFLICT, f"Run is already {run.state}")
     if run.state is RunState.AWAITING_APPROVAL:
         raise HTTPException(status.HTTP_409_CONFLICT, "Run is waiting for an approval decision")
+    settings = request.app.state.settings
+    limit = settings.run_budget_usd
+    if approval is None and (settings.require_spend_approval or (project.stack is not None and run.started_at is None)):
+        raise HTTPException(status.HTTP_409_CONFLICT, f"This backend starts a run only with a spending approval: approve its limit of ${limit:.2f}")
+    if approval is not None:
+        if not settings.cost_known:
+            raise HTTPException(status.HTTP_409_CONFLICT, "No spending limit can be enforced: OPENAI_PRICE_INPUT_PER_MTOK and OPENAI_PRICE_OUTPUT_PER_MTOK are not set")
+        if abs(approval.approved_max_usd - limit) > _SAME_DOLLARS:
+            raise HTTPException(status.HTTP_409_CONFLICT, f"The approval is for ${approval.approved_max_usd:.2f}, but this run's enforced limit is ${limit:.2f}: approve that limit")
+    if project.stack is not None and run.started_at is None:
+        capabilities = get_capabilities(request)
+        if not capabilities.can_build:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"Build unavailable: {'; '.join(capabilities.problems)}")
+        selected = next((stack for stack in capabilities.stacks if stack.id == project.stack), None)
+        if selected is None or not selected.verifiable:
+            reason = selected.reason if selected is not None else "the selected stack is not in the backend catalog"
+            raise HTTPException(status.HTTP_409_CONFLICT, f"The selected stack cannot be built and verified: {reason}")
     problem = request.app.state.llm_problem()
     if problem is not None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"GPT orchestrator is not configured: {problem}")
+    policy = request.app.state.start_policy
+    refusal = policy.admit(session, run) if policy is not None else None
+    if refusal is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Not started: {refusal}")
+    if approval is not None:
+        events.record(session, project_id=run.project_id, run_id=run.id, type="run.spend_approved", payload={"max_usd": limit, "state": run.state})
     events.record(session, project_id=run.project_id, run_id=run.id, type="run.start_requested", payload={"state": run.state})
     # Queued after the response, i.e. after this transaction has committed.
     background.add_task(request.app.state.run_manager.submit, run.id)
@@ -174,12 +219,19 @@ def get_invocations(run_id: str, session: SessionDep) -> list[InvocationOut]:
 @router.get("/runs/{run_id}/report")
 def get_report(run_id: str, request: Request, session: SessionDep) -> dict[str, Any]:
     """The final execution report, once the run has ended."""
-    run = load_run(session, run_id)
+    report = final_report(request, session, load_run(session, run_id))
+    if report is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No final report yet")
+    return report
+
+
+def final_report(request: Request, session: Session, run: Run) -> dict[str, Any] | None:
+    """The run's final report, or None while it is still going."""
     if run.report_json is not None:
         report: dict[str, Any] = json.loads(run.report_json)
         return report
     if not run.is_terminal:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "No final report yet")
+        return None
     # A run that ended outside the coding tools, such as on a limit or a GPT error, wrote no report.
     state = request.app.state
     return build_report(session, run, run.project, gpt=state.gpt_label, sandbox=type(state.sandbox).__name__)

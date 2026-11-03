@@ -110,6 +110,21 @@ def test_plan_is_persisted_sets_stack_and_advances(h: Harness) -> None:
     assert h.run(run_id).state is RunState.DEFINING_CRITERIA
 
 
+def test_plan_must_match_the_stack_the_user_selected(h: Harness) -> None:
+    run_id = _run_in(h, RunState.PLANNING)
+    with h.sessions.begin() as session:
+        run = session.get(Run, run_id)
+        assert run is not None
+        project = session.get(Project, run.project_id)
+        assert project is not None
+        project.stack = "python-fastapi"
+
+    _rejected(_call(h, run_id, "submit_plan", PLAN), "the user selected stack python-fastapi", "the plan selected python-cli")
+    assert _count(h, PlanTask, run_id) == 0
+    assert h.project(run_id).stack == "python-fastapi"
+    assert h.run(run_id).state is RunState.PLANNING
+
+
 @pytest.mark.parametrize(
     ("mutate", "fragments"),
     [

@@ -30,6 +30,16 @@ def test_create_project_persists_and_creates_workspace(
     assert fetched == project
 
 
+def test_create_project_rejects_a_known_but_unverifiable_stack(client: TestClient, auth: dict[str, str]) -> None:
+    response = client.post(
+        f"{API}/projects",
+        json={"name": "UI", "requirement_text": "Build a front end", "stack": "react-vite"},
+        headers=auth,
+    )
+    assert response.status_code == 422
+    assert "cannot be built and verified" in response.json()["detail"]
+
+
 @pytest.mark.parametrize(
     "body",
     [
@@ -39,7 +49,7 @@ def test_create_project_persists_and_creates_workspace(
         {"name": "n" * 201, "requirement_text": "r"},
         {"name": "n", "requirement_text": "r" * 20_001},
         {"name": "n"},
-        {"name": "n", "requirement_text": "r", "stack": "python-fastapi"},  # extra fields refused
+        {"name": "n", "requirement_text": "r", "stack": "not-a-stack"},
         {"name": 5, "requirement_text": "r"},
     ],
 )
@@ -55,6 +65,65 @@ def test_list_projects_with_pagination(client: TestClient, auth: dict[str, str])
     assert {p["id"] for p in page + rest} == ids
     assert client.get(f"{API}/projects?limit=0", headers=auth).status_code == 422
     assert client.get(f"{API}/projects?limit=201", headers=auth).status_code == 422
+
+
+def test_backend_wide_run_list_includes_project_names(client: TestClient, auth: dict[str, str]) -> None:
+    projects = [_create_project(client, auth, name=f"Project {i}") for i in range(2)]
+    runs = [client.post(f"{API}/projects/{project['id']}/runs", headers=auth).json() for project in projects]
+    response = client.get(f"{API}/runs?limit=1", headers=auth)
+    assert response.status_code == 200
+    assert len(response.json()) == 1
+    all_runs = client.get(f"{API}/runs", headers=auth).json()
+    assert {row["project_name"] for row in all_runs} == {"Project 0", "Project 1"}
+    assert {row["id"] for row in all_runs} == {run["id"] for run in runs}
+
+
+def test_budget_and_capabilities_report_enforced_backend_state(client: TestClient, auth: dict[str, str]) -> None:
+    budget = client.get(f"{API}/budget", headers=auth)
+    capabilities = client.get(f"{API}/capabilities", headers=auth)
+    assert budget.status_code == capabilities.status_code == 200
+    assert budget.json()["run_limit_usd"] > 0
+    assert budget.json()["cost_known"] is False
+    assert "neither calculated nor limited" in budget.json()["estimate"]
+    stacks = {stack["id"]: stack for stack in capabilities.json()["stacks"]}
+    assert "python-cli" in stacks
+    assert stacks["react-vite"]["verifiable"] is False
+    assert "OPENCODE_ENABLED is false" in capabilities.json()["coding"]["detail"]
+    assert capabilities.json()["can_build"] is False
+
+
+def test_dashboard_selected_stack_requires_explicit_spend_approval(client: TestClient, auth: dict[str, str]) -> None:
+    project = _create_project(client, auth, stack="python-cli")
+    run = client.post(f"{API}/projects/{project['id']}/runs", headers=auth).json()
+    response = client.post(f"{API}/runs/{run['id']}/start", headers=auth)
+    assert response.status_code == 409
+    assert "spending approval" in response.json()["detail"]
+    assert client.get(f"{API}/runs/{run['id']}", headers=auth).json()["state"] == "CREATED"
+
+
+def test_backend_rejects_an_approval_above_its_enforced_limit(client: TestClient, app: FastAPI, auth: dict[str, str]) -> None:
+    app.state.settings.openai_price_input_per_mtok = 1
+    app.state.settings.openai_price_output_per_mtok = 1
+    project = _create_project(client, auth, stack="python-cli")
+    run = client.post(f"{API}/projects/{project['id']}/runs", headers=auth).json()
+    limit = app.state.settings.run_budget_usd
+
+    response = client.post(f"{API}/runs/{run['id']}/start", json={"approved_max_usd": limit + 0.01}, headers=auth)
+
+    assert response.status_code == 409
+    assert "but this run's enforced limit is" in response.json()["detail"]
+    assert client.get(f"{API}/runs/{run['id']}", headers=auth).json()["state"] == "CREATED"
+
+
+def test_backend_refuses_approval_when_prices_cannot_enforce_a_spending_cap(client: TestClient, auth: dict[str, str]) -> None:
+    project = _create_project(client, auth, stack="python-cli")
+    run = client.post(f"{API}/projects/{project['id']}/runs", headers=auth).json()
+
+    response = client.post(f"{API}/runs/{run['id']}/start", json={"approved_max_usd": 2.0}, headers=auth)
+
+    assert response.status_code == 409
+    assert "No spending limit can be enforced" in response.json()["detail"]
+    assert client.get(f"{API}/runs/{run['id']}", headers=auth).json()["state"] == "CREATED"
 
 
 @pytest.mark.parametrize("project_id", ["f" * 32, "not-an-id", "..%2F..%2Fetc"])

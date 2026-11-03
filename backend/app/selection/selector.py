@@ -66,6 +66,11 @@ class ProviderSelector:
     def __init__(self, options: list[ProviderOption]) -> None:
         self._options = options
 
+    @property
+    def options(self) -> tuple[ProviderOption, ...]:
+        """The providers in preference order, for describing the configuration. Choosing still goes through `choose`."""
+        return tuple(self._options)
+
     def first_launcher(self) -> CodingLauncher:
         """The launcher that can stop what an earlier backend started."""
         return self._options[0].launcher

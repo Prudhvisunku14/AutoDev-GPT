@@ -1,0 +1,8 @@
+# Line endings for the files a Windows user runs directly. Only these are pinned; nothing else is renormalised.
+# A .cmd file with LF-only endings can misbehave in cmd.exe, so it is always checked out with CRLF, whatever core.autocrlf says.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+# The Docker build reads this file inside a Linux builder: keep it LF.
+Dockerfile* text eol=lf
+*.sh text eol=lf

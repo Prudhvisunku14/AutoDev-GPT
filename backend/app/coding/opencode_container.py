@@ -41,6 +41,25 @@ PINNED_BINARY_SHA256 = "528058cf8f2a7196ec94dc113052b785f8f94f6802ced3980ad73593
 # plus one file, ripgrep 15.1.0 at /usr/local/bin/rg (archive SHA-256 1c9297be...91599), built with no network.
 APPROVED_RUNTIME_IMAGES: frozenset[str] = frozenset({"sha256:a7753fe443915eed28c577c1d1b3f0e27ab1c5bd16b7debc7de9579d2aaefe99"})
 
+# An image ID is a machine-specific fact: under Docker's containerd image store it is the digest of a build record, so a rebuild of
+# identical content gets a new one, and a locally built image's layers differ between machines. So an installation approves the image
+# it built itself, and only after `app.cli.image_audit` proved its contents (non-root user, one added layer holding exactly the
+# hash-pinned ripgrep, the OpenCode runtime libraries). The ID is still matched exactly; this set is empty until `approve_locally` is
+# called, and the built-in constant above is never changed by it.
+_LOCALLY_APPROVED: set[str] = set()
+_IMAGE_ID = re.compile(r"sha256:[a-f0-9]{64}")
+
+
+def approve_locally(image_id: str) -> None:
+    """Accept this exact image ID for this process. The caller must have audited the image first."""
+    if not _IMAGE_ID.fullmatch(image_id):
+        raise ValueError("a runtime image is approved by its full ID (sha256:<64 hex>)")
+    _LOCALLY_APPROVED.add(image_id)
+
+
+def approved_runtime_images() -> frozenset[str]:
+    return APPROVED_RUNTIME_IMAGES | frozenset(_LOCALLY_APPROVED)
+
 CONTAINER_LABEL = "devpilot.opencode"
 RUN_USER = "65534:65534"  # "nobody": numeric, so the image needs no passwd entry
 MEMORY = "1g"
@@ -305,7 +324,7 @@ def production_problems(c: ProductionContainer, settings: Settings) -> list[str]
     problems: list[str] = []
     if not _CONTAINER_NAME.fullmatch(c.name):
         problems.append("the container name is not a DevPilot OpenCode name")
-    if c.image.image_id not in APPROVED_RUNTIME_IMAGES:
+    if c.image.image_id not in approved_runtime_images():
         problems.append("the image is not an approved OpenCode runtime image")
     if not c.image.ripgrep:
         problems.append("the image has no ripgrep, so OpenCode would try to download it")

@@ -19,8 +19,16 @@ PROTECTED = [
     ("POST", f"/api/v1/projects/{PID}/runs"),
     ("GET", f"/api/v1/projects/{PID}/runs"),
     ("GET", f"/api/v1/runs/{PID}"),
+    ("GET", "/api/v1/runs"),
+    ("POST", f"/api/v1/runs/{PID}/start"),
     ("POST", f"/api/v1/runs/{PID}/cancel"),
     ("GET", f"/api/v1/runs/{PID}/events"),
+    ("GET", f"/api/v1/runs/{PID}/artifact"),
+    ("GET", f"/api/v1/runs/{PID}/artifact.zip"),
+    ("GET", "/api/v1/budget"),
+    ("GET", "/api/v1/capabilities"),
+    ("GET", "/api/v1/history/runs"),
+    ("POST", f"/api/v1/approvals/{PID}/decision"),
 ]
 
 BAD_HEADERS = [

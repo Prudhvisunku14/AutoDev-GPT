@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api import approvals, health, integrations, projects, runs
+from app.api import approvals, artifacts, budget, capabilities, health, history, integrations, projects, runs
 from app.coding.attempt_store import SqlAttemptStore
 from app.coding.candidate import CandidateWorkspaces
 from app.config import Settings, get_settings
@@ -26,6 +26,7 @@ from app.db.session import create_db_engine, create_session_factory, init_db
 from app.orchestrator.llm_client import LLMClient, OpenAIResponsesClient, llm_config_problem
 from app.orchestrator.loop import Orchestrator
 from app.orchestrator.run_manager import RunManager
+from app.orchestrator.start_policy import StartPolicy
 from app.orchestrator.state_machine import FULL_RUN_STATES, ORCHESTRATED_STATES
 from app.repos.source import RepositorySource
 from app.sandbox.docker_cli import SandboxError
@@ -57,9 +58,11 @@ def create_app(
     repositories: RepositorySource | None = None,
     drive: DriveRuntime | None = None,
     gpt_label: str | None = None,
+    start_policy: StartPolicy | None = None,
 ) -> FastAPI:
     """Build the app. `llm` replaces the OpenAI client (tests and the offline demo use FakeLLM). `gpt_label` names
-    what `llm` really is in reports, for a real client wrapped in a guard (app/plan_cli.py).
+    what `llm` really is in reports, for a real client wrapped in a guard (app/plan_cli.py). `start_policy` may refuse
+    a start across runs, such as a session-wide spending cap (scripts/live_server.py).
 
     `sandbox` enables the Docker sandbox tool. Without it no container is ever started, so
     tests never touch Docker. `coding`, which needs a sandbox, chooses who writes the code and lets
@@ -156,6 +159,8 @@ def create_app(
     app.state.sandbox = sandbox
     app.state.drive = drive
     app.state.gpt_label = gpt_label
+    app.state.coding_selector = coding if runtime is not None else None
+    app.state.start_policy = start_policy
 
     app.add_middleware(
         CORSMiddleware,
@@ -188,6 +193,10 @@ def create_app(
     app.include_router(projects.router, prefix=API_PREFIX)
     app.include_router(runs.router, prefix=API_PREFIX)
     app.include_router(approvals.router, prefix=API_PREFIX)
+    app.include_router(artifacts.router, prefix=API_PREFIX)
+    app.include_router(budget.router, prefix=API_PREFIX)
+    app.include_router(capabilities.router, prefix=API_PREFIX)
+    app.include_router(history.router, prefix=API_PREFIX)
     app.include_router(integrations.router)  # its own paths: the OAuth callback is not under the API prefix
     if UI_DIR.is_dir():
         app.mount("/ui", StaticFiles(directory=UI_DIR, html=True), name="ui")

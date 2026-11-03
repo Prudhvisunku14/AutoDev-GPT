@@ -67,6 +67,14 @@ class Settings(BaseSettings):
     run_max_tokens: int = Field(default=1_000_000, gt=0)
     run_wall_clock_seconds: float = Field(default=1800, gt=0)
     tool_output_max_chars: int = Field(default=20_000, ge=1_000)
+    # A start must then carry a spending approval (POST /runs/{id}/start with approved_max_usd equal to RUN_BUDGET_USD).
+    # The dashboard always sends one. The terminal scripts start runs behind their own flags and typed confirmations;
+    # scripts/live_server.py, which serves the dashboard for real builds, sets this.
+    require_spend_approval: bool = False
+
+    # --- Earlier terminal builds (scripts/live_demo.py, scripts/live_build.py) ------
+    # Shown read-only, from each run folder's summary.json and workspace. Their databases are never opened.
+    history_dir: Path | None = None  # off unless set: a folder of earlier terminal builds, which only the developer's machine has
 
     # --- Server-sent events ------------------------------------------------
     sse_poll_seconds: float = Field(default=0.5, gt=0)
@@ -207,6 +215,7 @@ class Settings(BaseSettings):
         "openai_price_input_per_mtok",
         "openai_price_output_per_mtok",
         "recovery_max_attempt_timeout_seconds",
+        "history_dir",
         mode="before",
     )
     @classmethod

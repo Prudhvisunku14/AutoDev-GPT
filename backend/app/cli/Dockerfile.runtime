@@ -1,0 +1,13 @@
+# The OpenCode runtime image, built on the user's own machine by `devpilot setup` and audited before it is approved
+# (app/cli/image_audit.py). The build context holds this file and one other: `rg`, the ripgrep 15.1.0 binary that setup
+# downloaded and verified against a pinned SHA-256.
+#
+# The OpenCode binary is NOT in the image: it is mounted read-only at run time, after its own hash is checked.
+# Containers started from this image have no network. Only this build uses the network (to fetch the base image and the two
+# C++ runtime libraries the musl OpenCode binary links against).
+FROM python:3.12-alpine
+RUN apk add --no-cache --no-scripts libstdc++ libgcc
+USER 65534:65534
+LABEL devpilot.purpose="opencode-runtime"
+# Last, so the audit can require that the final layer holds exactly this one file.
+COPY --chmod=0755 rg /usr/local/bin/rg

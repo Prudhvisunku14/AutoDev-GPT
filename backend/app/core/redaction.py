@@ -17,12 +17,17 @@ MASK = "[REDACTED]"
 # Shorter known values are not masked by substring: they would destroy ordinary text.
 MIN_KNOWN_SECRET_LENGTH = 8
 
-_TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
+# Credential formats: text that matches one is a credential wherever it appears.
+_CREDENTIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"sk-[A-Za-z0-9_\-]{20,}"),  # OpenAI keys, including sk-proj-
     re.compile(r"gh[pousr]_[A-Za-z0-9]{30,}"),  # GitHub classic and app tokens
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),  # GitHub fine-grained PATs
     re.compile(r"ya29\.[0-9A-Za-z\-_]{20,}"),  # Google OAuth access tokens
     re.compile(r"1//[0-9A-Za-z\-_]{20,}"),  # Google OAuth refresh tokens
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),  # PEM private keys
+)
+_TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
+    *_CREDENTIAL_PATTERNS,
     # Authorization: Bearer/Basic <x>. The token must contain a digit (Basic: or padding),
     # so ordinary prose like "basic arithmetic" or "the bearer instrument" is left alone.
     # Configured tokens are masked regardless, through the known-value list.
@@ -52,6 +57,11 @@ class Redactor:
         for pattern in _TOKEN_PATTERNS:
             text = pattern.sub(MASK, text)
         return _KEY_VALUE_PATTERN.sub(lambda m: f"{m.group(1)}{m.group(2)}{MASK}", text)
+
+    def contains_secret(self, text: str) -> bool:
+        """Whether `text` holds a configured secret or a credential format. Header-like and `key=value` text alone does
+        not count: generated tests use fake tokens such as `Bearer test-token-1`, and they are not secrets."""
+        return any(secret in text for secret in self._known) or any(p.search(text) for p in _CREDENTIAL_PATTERNS)
 
     def redact(self, value: Any) -> Any:
         """Recursively redact strings inside dicts, lists and tuples."""

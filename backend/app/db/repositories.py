@@ -11,10 +11,11 @@ from app.db.models import TERMINAL_RUN_STATES, Project, Run, RunState, utcnow
 
 
 def create_project(
-    session: Session, *, project_id: str, name: str, requirement_text: str, workspace_path: str, acceptance_json: str | None = None
+    session: Session, *, project_id: str, name: str, requirement_text: str, workspace_path: str, acceptance_json: str | None = None,
+    stack: str | None = None,
 ) -> Project:
     project = Project(
-        id=project_id, name=name, requirement_text=requirement_text, workspace_path=workspace_path, acceptance_json=acceptance_json
+        id=project_id, name=name, requirement_text=requirement_text, workspace_path=workspace_path, acceptance_json=acceptance_json, stack=stack
     )
     session.add(project)
     session.flush()

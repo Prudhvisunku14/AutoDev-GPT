@@ -1176,3 +1176,65 @@ The source is GitHub's release of BurntSushi/ripgrep, the version OpenCode 1.19.
 **Failure and cleanup:** the same paths the offline run exercised. A failed attempt stops the container, confirms it from an independent read, and restores the disposable copy. Over budget, the gateway answers 429 and the run stops. If a stop cannot be confirmed, the run is quarantined and everything stays for review. The real project is written only by `finish`, after a pass.
 
 **Account access.** A real call to `gpt-6.1-sol` succeeded on 2026-10-29. It was not re-checked here, because that means sending the key to OpenAI. The script does it first, at no charge. It proves the key sees the model, not that quota remains.
+
+### Dashboard integration: coding engine, console, mobile, end-to-end (2026-11-04)
+
+**Not committed.** No paid call, no live build, and the real `.env` was never opened (audit hooks in the tests and in the end-to-end backend refuse it).
+
+**Why the dashboard said "No coding engine is configured (OPENCODE_ENABLED)":** `python -m app` connects OpenCode only when `OPENCODE_ENABLED=true`, and `.env.example` ships `false`. Turning it on is not enough: the launcher also requires `CODING_LIVE_APPROVED`, the approved runtime image, the verified binary's manifest, `OPENCODE_MODEL=openai/<model>`, prices, `OPENAI_MAX_OUTPUT_TOKENS` and `OPENAI_MAX_RETRIES=0`, and real builds have only ever run behind the terminal scripts' preflight and guard.
+- `coding/launcher.py`: the launcher's checks are now `config_problems()`, used by `unavailable_reason()` and by `/capabilities`, which names every missing setting even when the engine is not connected (names only, never values).
+- `scripts/live_server.py` (new): serves the dashboard with `live_build.py`'s proven configuration ($0.50 a run), the same preflight, model-access check, dry launch, guard and keep-awake, `REQUIRE_SPEND_APPROVAL`, a session total (`--approve-session`, at most $5.00, `SessionBudget` in `orchestrator/start_policy.py`) and a session length (`--hours`). Not run: it loads the key.
+- Gemini is not supported: the OpenCode policy bundles only `@ai-sdk/openai`, the gateway forwards only to `api.openai.com`, and GPT is the only orchestrator.
+
+**Console warnings:** `MaxListenersExceededWarning` and `ObjectMultiplex` are not from the app. The production bundle and the source contain no event emitter, and headless Edge with no extensions logged neither across 91 messages. They match MetaMask's injected `obj-multiplex` stream. App-owned listeners were audited: `useMediaQuery` passed a new subscribe function on every render, so React re-subscribed each time; it is now stable. Plan and analysis are fetched only after the run records them, so a working run no longer logs a 404 on every poll.
+
+**Mobile:** the build-approval dialog had no height limit and could clip its checkbox and buttons. It now has a scrolling body and a fixed footer holding the checkbox and both buttons, stacks them on phones, takes focus and closes on Escape. `/runs` scrolled sideways below 1280 px because an absolutely positioned `sr-only` header escaped the table's unpositioned scroll container. Popovers span the screen below the header on phones. Long setting names wrap.
+
+**History download fix:** `verification/artifact.py` no longer fails on a partial report (`report.md` falls back to a note; `report.json` is complete).
+
+**Tests:**
+- Backend, new: `test_start_policy.py` (9), `test_live_server.py` (11), `test_api_history.py` (12, including that reading history writes nothing and never opens a database). Full suite: 3801 passed, 17 skipped (opt-in Docker and paid tests), 0 failed.
+- Frontend: typecheck and ESLint clean; 95 Vitest tests passed; production build passed.
+- End to end, an isolated real backend (fake token, no key, own database, sandbox sweep disabled so the user's running backend is untouched) behind a second Vite server: 28 of 28 HTTP checks through the proxy, and 58 of 58 checks in headless Edge at 320, 375, 400, 768 and 1280 px, including a real download of the verified attendance archive through the UI.
+
+**Still blocked:** code generation from the dashboard (needs `live_server.py`, Docker, the key and the user's approval to spend), FastAPI and React (verification images defined, not built or approved), Gemini (not in the architecture).
+
+### Dashboard simplified; the approve button explained (2026-11-04)
+
+**Not committed.** No paid call, no live build, `.env` never opened.
+
+**Why "Approve and start build" stayed disabled after ticking the box:** it was not a UI fault. The button requires the box **and** `assessReadiness`, built from `/capabilities`, `/budget` and `/status`. `python -m app` has no coding engine, so the backend said no and the button agreed. The reason was buried at the bottom of a long dialog, and the readiness check was written out twice (Composer, RunDetail). Nothing was bypassed: the button is still disabled on such a backend, the backend refuses a start independently, and both are tested.
+
+**Changed (frontend only; no backend script removed):**
+- `lib/readiness.ts` (new): the one readiness check, returning a short line (`Ready to build`, `Setup required — Coding engine is not configured`, …) and the full diagnostics kept for an *Advanced details* fold (`components/BuildStatus.tsx`).
+- `Composer.tsx` rewritten: no technology-stack section, no stack explanations, no environment names, no warning panels, no attachment button. Python command-line (`DEFAULT_STACK`) is the default. The dialog shows the application, the maximum spending, the approval box, Cancel, Approve and one concise error. A request for React, FastAPI, a website or a mobile app is declined with one sentence (`unsupportedRequest`). The box is always usable; start needs readiness. Double-click guarded; busy state on the button.
+- `RunDetail.tsx` start panel uses the same check. `Templates.tsx`: FastAPI/React templates replaced by Python command-line ones, including a weather forecast.
+
+**Backend change:** `verification/artifact.py` now offers a download in two tiers. (1) With an evaluator's independent acceptance suite: it must have passed. (2) For a freeform request, which has no suite: the project's own tests must have passed in the sandbox with at least one test run, and the archive, manifest and UI say "Verified by the generated tests only". Unchanged refusals: a failed acceptance suite (own passing tests do not outvote it), any simulated component, a run that did not complete, no delivered files. `/artifact` reports `verification`. This is a decision the user may reverse: delete the `elif _own_tests_passed` branch to require independent acceptance again.
+
+**Real pipeline, what is and is not ready (checked read-only):** the verified OpenCode 1.19.5 binary, its manifest and the ripgrep 15.1.0 binary (hash checked against its manifest) are on D:. `scripts/live_server.py` supplies every setting `python -m app` lacks, tested: with its constants and a key, `config_problems` is empty once live coding is approved, and the only problem without the approval is `CODING_LIVE_APPROVED`. **Docker Desktop was not running**, so the runtime image could not be checked or built; D: has 128 GB and C: 12.5 GB free (live_build needs 10).
+
+**Tests:** frontend 107 Vitest tests, typecheck, ESLint and build clean. Backend: `test_verified_artifact.py` +3, `test_live_server.py` +1; full suite 3805 passed, 17 skipped (opt-in Docker and paid tests), 0 failed. End to end in headless Edge, over real HTTP, against (a) the real backend with no coding engine: 16 of 16, including that ticking the box leaves start disabled with one concise reason and nothing is created; (b) an offline real backend with **simulated** GPT (FakeLLM), coding (SimulatedLauncher) and tests (ReplaySandbox): 18 of 18, from typing the request to COMPLETED, one build only on a double click, the spending approval recorded, and the download correctly refused because the run was simulated. A real verified build has not been run.
+
+### The `devpilot` command line and the Windows installer (2026-11-04)
+
+**Not committed, not pushed.** No OpenAI request and no paid call; the repository's `.env` was never opened (the CLI cannot read it: it builds `Settings(_env_file=None)`).
+
+**Goal:** `git clone …; cd AutoDev-GPT; .\setup.cmd; .\devpilot.cmd build` for a new user, over the existing engine, with nothing machine-specific.
+
+**New:**
+- `setup.cmd`, `setup.ps1`, `devpilot.cmd` (repo root). `setup.ps1` finds Python 3.12, checks Git and Docker, creates `.venv`, installs `backend\requirements.lock` and `-e backend`, then runs `devpilot setup`. It never touches the key.
+- `backend/app/cli/` (`devpilot` entry point in `pyproject.toml`): `main` (build, doctor, setup, forget-key), `paths` (`%LOCALAPPDATA%\DevPilot` or `DEVPILOT_HOME`), `userconfig` (model, prices, cap; no secrets), `credentials` (key via `OPENAI_API_KEY`, else **Windows DPAPI**-encrypted file), `runtime` (pinned ripgrep, OpenCode via the unchanged `scripts/fetch_opencode.py`, image build, audit, approval record), `image_audit`, `doctor`, `engine`, `build`, `setup`, `Dockerfile.runtime`.
+- `docs/INSTALL_WINDOWS.md`, `examples/prompts.md`; README quick start; `.gitignore` additions.
+
+**Reuse, not a second implementation:** `devpilot build` calls `create_app` with the real OpenCode launcher, Docker sandbox, GPT client, `SessionBudget`, the guard process and keep-awake, and drives it through the same projects/runs/start/approvals API as the dashboard. The start carries `approved_max_usd` equal to the enforced `run_budget_usd` (`REQUIRE_SPEND_APPROVAL` on). Packaging is `verification/artifact.py`, the code behind the dashboard's download, with one optional addition (`extra=`, for `DEVPILOT-HOW-TO-RUN.txt`).
+
+**The image-ID mismatch, root cause and fix:** see `docs/RUNTIME_IMAGE_VALIDATION.md`. The ID is a digest of an OCI index that embeds BuildKit's provenance record, so identical content rebuilt gets a new ID; and a locally built image's layers differ per machine. A fixed ID cannot be right elsewhere. `setup` now builds under a new tag, audits the exported image's *contents* offline and records that exact ID as approved for the installation (`opencode_container.approve_locally`, used by `launcher.config_problems` and `production_problems`). The built-in constant is unchanged; rebuilt or replaced images lose approval until audited again. The earlier "approve `c1e2f26e…`?" request is therefore moot; the old scripts still compare against the constant.
+
+**Spending:** typed `approve <cap>` (or `--approve-spend` with the exact figure) is the only way a build starts; default cap $0.50, at most $2.00; the engine enforces it before every request; per-attempt gateway cap `min(0.30, 0.6 × cap)`; the limits are those of the verified builds. A decline, a wrong figure, or a failed check starts nothing and creates no engine.
+
+**Tests (offline):** `test_cli_foundation` 8, `test_cli_image_audit` 24, `test_cli_runtime` 19, `test_cli_doctor` 10, `test_cli_build` 33, `test_cli_main_and_install` 20 (including a PowerShell parse of `setup.ps1` and `git check-ignore` checks that secrets and outputs are ignored and the installer is not). Full suite: 3922 passed, 17 skipped (opt-in Docker and paid tests), 0 failed.
+
+**Real clean-checkout run:** a copy of exactly what git would hold (tracked plus untracked-not-ignored: 384 files, no `.env`, `.venv`, `node_modules` or data) with a throwaway `DEVPILOT_HOME` and a **fake** key in the environment. `.\setup.cmd --key-from-env --model gpt-6.1-sol --input-price 2 --output-price 10 --yes` installed the pinned dependencies, downloaded and hash-verified ripgrep (GitHub) and OpenCode (npm), built the image, audited it (user 65534:65534, six layers matching their hashes, last layer only `rg` with the pinned SHA-256, `libstdc++` and `libgcc_s` present) and passed `devpilot doctor` **17 of 17**. A second `setup` took 13.6 s and skipped everything. `devpilot --help`, `doctor`, a declined approval, a mismatched `--approve-spend`, an unsupported request and an over-limit cap all behaved and spent nothing. The fake key was in no file; the real `%LOCALAPPDATA%\DevPilot` was never created; the existing `devpilot/opencode-runtime:1.19.5` and `devpilot/opencode-check:1.19.5` images were unchanged.
+
+**Not verified:** a real build through `devpilot build`: it needs your key and your approval to spend. The test-start of the real containers (the "dry launch") was not run, because it needs the live-coding approval flag. FastAPI, React and full-stack remain unsupported, declined at the prompt. Not tried: a machine with Docker's classic image store, a non-Windows OS, or a Docker Desktop that cannot reach the Alpine mirrors.

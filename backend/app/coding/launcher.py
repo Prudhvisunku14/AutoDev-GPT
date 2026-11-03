@@ -37,7 +37,7 @@ from typing import Any, Protocol
 from app.coding.container_stop import ContainerTerminator
 from app.coding.opencode_contract import FILTER_HEALTH_PATH, endpoint_problem
 from app.coding.opencode_container import (
-    APPROVED_RUNTIME_IMAGES,
+    APPROVED_RUNTIME_IMAGES,  # noqa: F401  (re-exported: the launcher's tests replace it)
     CONTAINER_LABEL,
     CORE_NETWORK,
     MODEL_NETWORK,
@@ -48,6 +48,7 @@ from app.coding.opencode_container import (
     ContainerPolicyError,
     ProductionContainer,
     RuntimeImage,
+    approved_runtime_images,
     build_production_args,
     deployment_problems,
     network_problems,
@@ -281,6 +282,34 @@ def read_refusals(path: Path) -> dict[str, Any]:
     return found
 
 
+def config_problems(s: Settings, egress: EgressPolicy) -> list[str]:
+    """Every setting live coding needs that is missing or wrong. Configuration only: nothing is started or sent, and a
+    secret's presence is checked, never its value."""
+    missing: list[str] = []
+    if not s.opencode_enabled:
+        missing.append("OPENCODE_ENABLED is false")
+    if not s.coding_live_approved:
+        missing.append("CODING_LIVE_APPROVED is false: live coding, Docker networks and model calls need a person's approval")
+    if s.opencode_runtime_image not in approved_runtime_images():
+        missing.append("no approved runtime image: the images on disk have no ripgrep, so OpenCode would try to download it")
+    if s.opencode_manifest_file is None:
+        missing.append("OPENCODE_MANIFEST_FILE is not set")
+    if not (s.opencode_model or "").startswith("openai/"):
+        missing.append("OPENCODE_MODEL is not an openai/<model> name")
+    if s.openai_api_key is None:
+        missing.append("OPENAI_API_KEY is not set")
+    if not s.cost_known:
+        missing.append("OPENAI_PRICE_INPUT_PER_MTOK and OPENAI_PRICE_OUTPUT_PER_MTOK are not set, so no spending limit could be enforced")
+    if s.openai_max_output_tokens is None:
+        missing.append("OPENAI_MAX_OUTPUT_TOKENS is not set, so a GPT call has no upper bound")
+    if s.openai_max_retries != 0:
+        missing.append("OPENAI_MAX_RETRIES must be 0: a retry the SDK makes by itself could be billed without being counted")
+    endpoint = endpoint_problem(s, egress)
+    if endpoint is not None:
+        missing.append(endpoint)
+    return missing
+
+
 class OpenCodeLauncher:
     """The real launcher. The no-model check runs it on real containers through a subclass that only
     removes from this layout (scripts/opencode_launcher_check.py). The live path needs the approvals."""
@@ -296,30 +325,7 @@ class OpenCodeLauncher:
         return PROVIDER_NAME
 
     def unavailable_reason(self) -> str | None:
-        s = self._settings
-        missing: list[str] = []
-        if not s.opencode_enabled:
-            missing.append("OPENCODE_ENABLED is false")
-        if not s.coding_live_approved:
-            missing.append("CODING_LIVE_APPROVED is false: live coding, Docker networks and model calls need a person's approval")
-        if s.opencode_runtime_image not in APPROVED_RUNTIME_IMAGES:
-            missing.append("no approved runtime image: the images on disk have no ripgrep, so OpenCode would try to download it")
-        if s.opencode_manifest_file is None:
-            missing.append("OPENCODE_MANIFEST_FILE is not set")
-        if not (s.opencode_model or "").startswith("openai/"):
-            missing.append("OPENCODE_MODEL is not an openai/<model> name")
-        if s.openai_api_key is None:
-            missing.append("OPENAI_API_KEY is not set")
-        if not s.cost_known:
-            missing.append("OPENAI_PRICE_INPUT_PER_MTOK and OPENAI_PRICE_OUTPUT_PER_MTOK are not set, so no spending limit could be enforced")
-        if s.openai_max_output_tokens is None:
-            missing.append("OPENAI_MAX_OUTPUT_TOKENS is not set, so a GPT call has no upper bound")
-        if s.openai_max_retries != 0:
-            missing.append("OPENAI_MAX_RETRIES must be 0: a retry the SDK makes by itself could be billed without being counted")
-        endpoint = endpoint_problem(s, self._egress)
-        if endpoint is not None:
-            missing.append(endpoint)
-        return "; ".join(missing) or None
+        return "; ".join(config_problems(self._settings, self._egress)) or None
 
     def writer_for(self, container_id: str | None) -> WriterControl:
         return ContainerTerminator(self._cli, container_id or "")

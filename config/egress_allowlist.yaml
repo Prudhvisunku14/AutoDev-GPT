@@ -6,6 +6,7 @@
 components:
   backend:            # GPT orchestrator (Phase 2)
     - api.openai.com
+    - 127.0.0.1:4096  # the local OpenCode server's API (Phase 4); loopback only
   opencode:           # OpenCode container (Phase 4)
     - api.openai.com
   github:             # GitHub adapter and import (Phase 8)

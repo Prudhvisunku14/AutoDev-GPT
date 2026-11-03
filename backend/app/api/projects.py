@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from app.api.deps import EventsDep, RedactorDep, SessionDep, WorkspaceDep, load_project
 from app.core.auth import require_api_token
@@ -18,14 +18,21 @@ from app.tools.adapters.workspace_fs import (
     WorkspaceNotFound,
 )
 from app.verification.acceptance import AcceptanceSuite, SuiteCriterion, SuiteError, freeze, validate
+from app.verification.recipes import readiness
 
 router = APIRouter(prefix="/projects", tags=["projects"], dependencies=[Depends(require_api_token)])
 
 
 @router.post("", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
 def create_project(
-    body: ProjectCreate, session: SessionDep, workspace: WorkspaceDep, events: EventsDep, redactor: RedactorDep
+    body: ProjectCreate, request: Request, session: SessionDep, workspace: WorkspaceDep, events: EventsDep, redactor: RedactorDep
 ) -> ProjectOut:
+    if body.stack is not None:
+        if request.app.state.catalog.get(body.stack) is None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"Unsupported technology stack: {body.stack}")
+        ready, reason = readiness(body.stack)
+        if not ready:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"This stack cannot be built and verified: {reason}")
     project_id = new_id()
     frozen = None
     if body.acceptance is not None:  # parsed and checked here, never executed
@@ -43,6 +50,7 @@ def create_project(
         requirement_text=redactor.redact_text(body.requirement_text),
         workspace_path=str(workspace.root / project_id),
         acceptance_json=redactor.redact_text(frozen) if frozen is not None else None,
+        stack=body.stack,
     )
     workspace.create_project(project_id)
     events.record(session, project_id=project.id, type="project.created", payload={"name": project.name, "acceptance_criteria": len(body.acceptance.criteria) if body.acceptance else 0})

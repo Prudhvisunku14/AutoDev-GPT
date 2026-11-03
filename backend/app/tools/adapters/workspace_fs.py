@@ -121,6 +121,15 @@ class WorkspaceFS:
         except UnicodeDecodeError as exc:
             raise PathRejected("file is not UTF-8 text") from exc
 
+    def read_bytes(self, project_id: str, rel_path: str) -> bytes:
+        """The file exactly as stored, for packaging. Same jail and size limit as read_text."""
+        target = self.resolve(project_id, rel_path)
+        if not target.is_file():
+            raise WorkspaceNotFound("file does not exist")
+        if target.stat().st_size > self._max_file_bytes:
+            raise WorkspaceLimitExceeded(f"file exceeds {self._max_file_bytes} bytes")
+        return target.read_bytes()
+
     def list_files(self, project_id: str) -> list[str]:
         """Relative POSIX paths of regular files. Links are never followed or listed."""
         base = self.project_dir(project_id)

@@ -10,8 +10,56 @@ You describe the software you want in plain language. DevPilot AI then:
 - diagnoses and repairs failures within strict limits
 - delivers the source code, documentation, test results and a final report
 
-> **Status: the offline MVP is verified.** A requirement goes through the GPT function-calling loop, real OpenCode on real containers, tests in Docker and delivery, with GPT's replies and the model scripted. **No real model has been called through this path, and no paid run is authorized.**
+> **Status.** The engine is verified offline, and a Python command-line application has been generated, tested in Docker and independently verified end to end by real GPT and OpenCode, from the terminal scripts (the second of two paid runs, $0.51 in all; the first failed and led to fixes). The new `devpilot` command drives that same engine; its flow is offline-tested and its installer was tried from a clean checkout, but **a real paid build through `devpilot build` has not been run yet**. Only **Python command-line applications** are supported: React, websites and full-stack generation are not, until they pass real end-to-end tests.
 > See [docs/PROGRESS.md](docs/PROGRESS.md) for exactly what has been built and verified.
+
+## Quick start (Windows)
+
+```powershell
+git clone https://github.com/Prudhvisunku14/AutoDev-GPT.git
+cd AutoDev-GPT
+.\setup.cmd
+.\devpilot.cmd doctor
+.\devpilot.cmd build
+```
+
+### Requirements
+
+| | |
+|---|---|
+| **Operating system** | Windows 10 or 11 (the installer and the encrypted key store are Windows-only for now) |
+| **Python** | **3.12**, exactly: [download](https://www.python.org/downloads/release/python-3129/) (3.13 is not supported) |
+| **Docker Desktop** | installed **and running** (WSL2 backend): [download](https://www.docker.com/products/docker-desktop/). Every build runs the code and its tests in containers |
+| **Git** | to clone and update: [download](https://git-scm.com/download/win) |
+| **OpenAI API key** | **your own**, on an account **with credit**. A build spends your credit; DevPilot has no key and no credit of its own |
+| **Connectivity** | internet during `setup.cmd` (PyPI, the npm registry, GitHub, Docker Hub and Alpine mirrors) and during every build (GPT and the model gateway reach `api.openai.com`). The containers that run the generated code and its tests have **no** network |
+| **Disk** | roughly 2 GB free |
+| **Spending** | every build is capped; the default is **$0.50** per build, GPT and OpenCode together, at most **$2.00** with `--max-usd`. You must type `approve 0.50` before anything is sent. The real cost cannot be known beforehand, only the limit, which is enforced in code before every model request. Your OpenAI invoice is the authority on what was billed |
+
+`setup.cmd` checks all of this and tells you what is missing and how to fix it; it never installs system software for you.
+
+### What is supported, and what is verified
+
+- **Supported: Python command-line applications**, generated, tested in Docker and verified. A request for anything else (React, websites, FastAPI or other web APIs, mobile apps, full-stack) is declined at the prompt, not quietly built as something else; those workflows have not passed real end-to-end tests.
+- **Verified so far:** the engine and the installer, offline. The installer was run from a clean checkout and `devpilot doctor` passed 17 of 17. Real GPT and OpenCode generated, Docker-tested and independently verified a Python application from the older terminal scripts (the second of two paid runs, $0.51 in all; the first failed and led to fixes).
+- **Not yet verified: a real paid build through the new `devpilot build` command.** Its flow is covered by offline tests with GPT scripted, the coding engine simulated and tests replayed, and it has never been run against the real OpenAI API. Treat your first build as that test: start with the default $0.50 limit.
+- "Verified" for a free-form request means the generated project's own tests passed in the no-network Docker sandbox. There is no independent acceptance suite for it, and the ZIP's manifest says so.
+
+**`setup.cmd`** (safe to run again) checks those requirements, creates a private Python environment in the folder (`.venv`), installs the pinned dependencies, then asks for your OpenAI key (typed hidden; stored **encrypted for your Windows account**, never in a file in this folder, never printed, sent only to OpenAI), your model name and your own per-token prices (they cap your spending). It then downloads OpenCode and ripgrep (both checked against pinned SHA hashes), builds the Docker runtime image, audits that image's contents offline, and runs the readiness check. It makes no OpenAI request.
+
+**`devpilot build`** asks what to build, shows the spending limit and asks you to type `approve 0.50`. It then plans with GPT, writes the code with OpenCode, tests it in a no-network Docker sandbox, repairs failures within strict limits, and saves a verified ZIP and folder under `.\devpilot-output\`. Nothing is spent before you approve; the limit (default **$0.50** per build, at most $2.00 via `--max-usd`) is enforced in code before every model request.
+
+```powershell
+.\devpilot.cmd --help
+.\devpilot.cmd doctor                        # checks this computer; says how to fix anything missing; never contacts OpenAI
+.\devpilot.cmd build                         # interactive
+.\devpilot.cmd build "a python tool that converts csv files to json, with unit tests"
+.\devpilot.cmd build "..." --approve-spend 0.50   # approve without typing; the figure must equal the limit exactly
+.\devpilot.cmd setup --rebuild               # build and audit the Docker image again
+.\devpilot.cmd forget-key                    # delete the stored key
+```
+
+More: [docs/INSTALL_WINDOWS.md](docs/INSTALL_WINDOWS.md) (troubleshooting, where files live, how the Docker image is verified) and [examples/prompts.md](examples/prompts.md).
 
 ## How it works
 
@@ -52,19 +100,17 @@ Details are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | Integrations | n8n, GitHub REST API and clone, Google Drive (OAuth 2.0, read-only), SQLite FTS5 retrieval over PDF, DOCX and text |
 | Frontend | React + Vite + TypeScript |
 
-## Prerequisites (for later phases)
+## Prerequisites for development
 
-- Python 3.12
-- Docker Desktop with WSL2 (Phase 3 and later)
-- Git
-- Node.js LTS (Phase 9)
-- A Google Cloud OAuth client for Google Drive (Phase 8)
-- An OpenAI API key
-- Disk: keep project data on D:. C: has limited free space on the current laptop.
+The command line needs only what the quick start lists. The rest of this README is for developing DevPilot itself:
 
-Configuration lives in `.env`. Copy [.env.example](.env.example) and fill in your values. **Never commit `.env`.**
+- Python 3.12, Git, Docker Desktop with WSL2, an OpenAI API key
+- Node.js LTS, for the dashboard in `frontend/`
+- A Google Cloud OAuth client for Google Drive (only for that integration)
 
-## Quickstart (Windows, PowerShell, backend only)
+The command line never reads `.env`: its settings live in `%LOCALAPPDATA%\DevPilot` (or `DEVPILOT_HOME`). The API server (`python -m app`) and the developer scripts read `.env`; copy [.env.example](.env.example) and fill in your values. **Never commit `.env`.**
+
+## Developer quickstart (Windows, PowerShell, backend only)
 
 Run from the repository root. The commands keep temp files and caches on D:.
 
@@ -73,7 +119,7 @@ Run from the repository root. The commands keep temp files and caches on D:.
 . .\scripts\dev-env.ps1
 
 # 2. One-time: create the venv and install pinned dependencies
-D:\python.exe -m venv backend\.venv
+py -3.12 -m venv backend\.venv
 & $env:DEVPILOT_PYTHON -m pip install -r backend\requirements.lock -e "backend[dev]"
 
 # 3. One-time: create .env from the template and set a long random API token

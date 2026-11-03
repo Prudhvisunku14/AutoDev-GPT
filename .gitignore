@@ -7,8 +7,20 @@
 *.p12
 *.pfx
 credentials*.json
+credentials.bin
 client_secret*.json
 token*.json
+
+# DevPilot CLI: what a user's own installation creates. These normally live in %LOCALAPPDATA%\DevPilot, outside this folder,
+# but DEVPILOT_HOME or --home may point inside it, so they are ignored here too.
+devpilot-output/
+approved-runtime.json
+build-ledger.jsonl
+/tools/
+/guard/
+/work/
+/checkpoints/
+config.toml
 
 # Python
 __pycache__/

@@ -201,6 +201,8 @@ def submit_plan(ctx: ToolContext, args: SubmitPlanArgs) -> dict[str, object]:
         problems.append(f"requirements not covered by any task: {', '.join(uncovered)}")
     if not any(t.capability == "code_generation" for t in args.tasks):
         problems.append("at least one task must have capability code_generation")
+    if ctx.project.stack is not None and stack is not None and stack.id != ctx.project.stack:
+        problems.append(f"the user selected stack {ctx.project.stack}, but the plan selected {stack.id}")
     rag = [event_payload(e) for e in list_events(ctx.session, run_id=ctx.run.id, limit=5_000) if e.type == "rag.blueprint"]
     if rag:  # a RAG application keeps its blueprint's components, stacks and dependencies
         problems += plan_problems([c.model_dump() for c in args.components or []], [(t.component, t.depends_on) for t in args.tasks], rag[-1])

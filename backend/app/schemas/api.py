@@ -34,6 +34,7 @@ class AcceptanceSuiteIn(StrictInput):
 class ProjectCreate(StrictInput):
     name: Annotated[NonBlank, StringConstraints(max_length=200)]
     requirement_text: Annotated[NonBlank, StringConstraints(max_length=20_000)]
+    stack: Annotated[str, StringConstraints(min_length=2, max_length=64)] | None = None
     acceptance: AcceptanceSuiteIn | None = None  # fixed at creation: there is no way to change it later
 
 
@@ -70,6 +71,125 @@ class RunOut(BaseModel):
     pause_reason: str | None
     status_detail: str | None
     acceptance_sha256: str | None = None  # the frozen acceptance suite this run is judged by
+
+
+class RunListItem(RunOut):
+    project_name: str
+
+
+class StartRunIn(StrictInput):
+    """A person's spending approval: the most this run may spend, which must be the limit the backend enforces."""
+
+    approved_max_usd: Annotated[float, Field(gt=0, le=1_000)]
+
+
+class ArtifactFileOut(BaseModel):
+    path: str
+    bytes: int
+
+
+class ArtifactLeftOut(BaseModel):
+    path: str
+    reason: str
+
+
+class ArtifactOut(BaseModel):
+    """What a download of this run would hold. `available` only for a COMPLETED run whose independent acceptance PASSED."""
+
+    available: bool
+    reason: str | None
+    verification: str | None = None  # "independent" or "generated-tests" when available
+    filename: str | None
+    files: list[ArtifactFileOut]
+    excluded: list[ArtifactLeftOut]
+    total_bytes: int
+    simulated: list[str]
+
+
+class SpendingOut(BaseModel):
+    total_usd: float  # what runs with a known cost have spent, on this backend's database
+    runs: int
+    unknown_cost_runs: int
+    active_runs: int
+    active_committed_usd: float  # runs not yet ended, each at its whole limit or what it has spent if more
+
+
+class ReferenceCostOut(BaseModel):
+    """What earlier finished runs on this backend cost. Earlier runs, not an estimate of the next one."""
+
+    finished_runs: int
+    min_usd: float | None
+    median_usd: float | None
+    max_usd: float | None
+
+
+class BudgetOut(BaseModel):
+    cost_known: bool
+    run_limit_usd: float
+    coding_attempt_limit_usd: float | None
+    model: str | None
+    price_input_per_mtok: float | None
+    price_output_per_mtok: float | None
+    max_turns: int
+    max_tool_calls: int
+    max_repair_attempts: int
+    run_wall_clock_seconds: float
+    approval_required: bool
+    session: dict[str, Any] | None  # a session-wide cap, when the server has one (scripts/live_server.py)
+    recorded: SpendingOut
+    reference: ReferenceCostOut
+    estimate: str
+
+
+class PartOut(BaseModel):
+    ready: bool
+    label: str
+    detail: str | None
+    simulated: bool
+
+
+class StackOut(BaseModel):
+    id: str
+    name: str
+    language: str
+    frameworks: list[str]
+    description: str
+    verifiable: bool
+    reason: str
+
+
+class CapabilitiesOut(BaseModel):
+    gpt: PartOut
+    coding: PartOut
+    sandbox: PartOut
+    prices: PartOut
+    stacks: list[StackOut]
+    can_build: bool
+    problems: list[str]
+    simulated: list[str]
+    acceptance_suites: bool  # projects may carry an evaluator's frozen suite (POST /projects with `acceptance`)
+    history: bool  # earlier terminal builds can be shown (GET /history/runs)
+
+
+class HistoryRunOut(BaseModel):
+    """A run recorded by scripts/live_demo.py or scripts/live_build.py, read from its folder's summary.json. Historical:
+    it ran in the terminal with its own database, not on this backend."""
+
+    id: str  # the run folder's name, a UTC timestamp
+    recorded_at: datetime
+    source: str
+    project_name: str | None
+    requirement: str | None
+    run_id: str | None
+    state: str | None
+    outcome: str | None
+    detail: str | None
+    cost_usd: float | None
+    tokens: int | None
+    seconds: float | None
+    turns: int | None
+    delivered: list[str]
+    report: dict[str, Any] | None
 
 
 class RequirementOut(BaseModel):
