@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
+
+from app.repos.evaluate import instruction_findings
 
 FOLDER = "application/vnd.google-apps.folder"
 GOOGLE_DOC = "application/vnd.google-apps.document"
@@ -20,6 +23,7 @@ READ_ONLY_SCOPES = frozenset({DRIVE_READONLY})
 # Drive IDs are letters, digits, - and _. Checked before an ID is put in a URL or a files.list query, so no quote or
 # operator can reach the query.
 FILE_ID = re.compile(r"^[A-Za-z0-9_-]{10,128}$")
+_UNSAFE = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})  # control, format (bidi overrides), surrogate, private, unassigned, separators
 _FOLDER_URL = re.compile(r"^https://drive\.google\.com/drive/(?:u/\d{1,2}/)?folders/([A-Za-z0-9_-]{10,128})(?:[/?#][^\s]*)?$")
 
 
@@ -48,6 +52,21 @@ def folder_id(value: str) -> str:
     if match:
         return match.group(1)
     raise DriveAccessRefused(f"{text[:80]!r} is not a Google Drive folder ID or folder link")
+
+
+def safe_label(name: str, limit: int = 120) -> tuple[str, list[str]]:
+    """An untrusted name as a short, printable label, with what was done to it. Control, format and bidirectional
+    characters are removed (so "doc\\u202eexe.pdf" cannot pose as another name), whitespace is collapsed, and text
+    addressed to AI agents is flagged. It stays a label: it is never followed and never authorizes anything."""
+    text = unicodedata.normalize("NFC", str(name))
+    unsafe = [ch for ch in text if unicodedata.category(ch) in _UNSAFE and ch != " "]
+    flags = ["control or invisible characters were removed"] if unsafe else []
+    label = " ".join("".join(" " if unicodedata.category(ch) in _UNSAFE else ch for ch in text).split())
+    if len(label) > limit:
+        label, flags = label[: limit - 1] + "…", [*flags, "shortened"]
+    if instruction_findings(label):
+        flags.append("the name contains text addressed to AI agents")
+    return label, flags
 
 
 def check_id(file_id: str) -> str:

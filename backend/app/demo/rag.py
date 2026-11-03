@@ -36,6 +36,7 @@ from app.orchestrator.fake_llm import FakeLLM, Step, call
 from app.rag.embeddings import HashingEmbedder
 from app.rag.extract import extract
 from app.rag.index import AccessScope
+from app.rag.parsers import FixtureParser
 from app.sandbox.replay import ReplaySandbox
 from app.selection.catalog import build_selector
 from app.tools.adapters.drive import DriveRuntime
@@ -239,9 +240,9 @@ def steps() -> list[Step]:
     return [
         call("submit_analysis", ANALYSIS),
         call("request_drive_authorization", {"folders": [fixtures.FOLDER_URL], "purpose": "Index the research documents for a question-answering chatbot."}),
-        call("discover_drive_documents", {"grant_id": GRANT}),
-        call("ingest_drive_documents", {"grant_id": GRANT, "file_ids": ["fxTxtTaxes00001"]}),  # outside the approved folder
-        call("ingest_drive_documents", {"grant_id": GRANT, "file_ids": INGEST}),
+        call("discover_drive_documents", {"grant_id": GRANT, "reason": "Find the documents the chatbot will answer from."}),
+        call("ingest_drive_documents", {"grant_id": GRANT, "file_ids": ["fxTxtTaxes00001"], "reason": "Index this file."}),  # outside the approved folder
+        call("ingest_drive_documents", {"grant_id": GRANT, "file_ids": INGEST, "reason": "Index the research documents for retrieval."}),
         call("build_rag_index", {"chunk_chars": 800, "chunk_overlap": 120}),
         call("configure_retrieval", {"top_k": 4, "min_score": 0.15, "check_questions": QUESTIONS}),
         call("prepare_rag_application", {"summary": "Answer questions from the research folder's documents, with citations."}),
@@ -254,7 +255,7 @@ def steps() -> list[Step]:
 def fixture_runtime(drive: fixtures.FixtureDrive, settings: Settings) -> tuple[DriveRuntime, GoogleDriveSource]:
     authorizer = FixtureAuthorizer(fixtures.TOKENS, fixtures.RESEARCHER)
     source = GoogleDriveSource(EgressPolicy.from_file(settings.egress_allowlist_file), authorizer, client=httpx.Client(transport=drive.transport()), sleep=lambda _s: None)
-    return DriveRuntime(source, authorizer, (HashingEmbedder(),), simulated=True), source
+    return DriveRuntime(source, authorizer, (HashingEmbedder(),), parser=FixtureParser(), simulated=True), source  # in-process parsing: fixture documents only
 
 
 def rehearse(data_dir: Path) -> dict[str, Any]:

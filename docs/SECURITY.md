@@ -97,6 +97,19 @@ Applies to Google Drive now and to any later OAuth provider.
 - **Revocation.** `DELETE /api/v1/integrations/google/credentials` revokes the token at Google and deletes the stored refresh token. The dashboard offers the same action.
 - **Approval.** Each Drive import batch needs approval. The approval request shows file names and Drive IDs, never tokens.
 
+**Implementation status (2026-11-03): offline only, never run against Google.**
+- **Implemented in `app/drive/oauth.py` and `app/api/integrations.py`:**
+  - the scope check;
+  - PKCE;
+  - a single-use `state` that expires after 10 minutes, bound to the project and to an HttpOnly browser cookie;
+  - a strictly validated redirect URI;
+  - the callback;
+  - refresh under a per-grant lock;
+  - deletion. It takes `?project_id=`, because each grant belongs to one project. It reports local deletion and Google's revocation separately.
+- **Fails closed:** `cryptography` (Fernet) is not installed, so consent completes nowhere, and no other cipher stands in for it.
+- **Storage:** encrypted refresh tokens are kept in memory; persistent storage is pending.
+- **Approvals** show sanitized names, types, folder paths, the operation and the reason. See docs/MILESTONE_2_GOOGLE_DRIVE_RAG.md §14.
+
 ## 8. Document ingestion (PDF, DOCX, text)
 
 - **Formats.** PDF, DOCX, Markdown and plain text. Other types are refused. The format is detected from the content, not only from the extension, and must match the extension.
@@ -105,6 +118,13 @@ Applies to Google Drive now and to any later OAuth provider.
 - **Refusals.** Macro-enabled files (`.docm`), encrypted PDFs and files that fail format validation are refused.
 - **Content handling.** PDF JavaScript and embedded files are ignored. Parsers do not fetch external references. Extracted text is untrusted data, and GPT receives it only as delimited data.
 - **Provenance.** Each document records its SHA-256, MIME type and parser version.
+
+**Implementation status (2026-11-03): interface only, not container-verified.**
+- **Routing:** `app/rag/parsers.py` sends every real document to the `document-parser` container through the sandbox, and validates the answer on the host.
+- **No in-process fallback:** a runtime that is not simulated refuses an in-process parser.
+- **The image is not built:** it is a specification (`backend/sandbox_images/document-parser/`), never built or run, and not approved. So every real document is refused as `parser_unavailable`.
+- **Output channel:** the parser answers on stdout, capped by `SANDBOX_MAX_OUTPUT_BYTES`, instead of a separate output mount.
+- **Formats:** only TXT, Google Docs and DOCX are accepted; Markdown files are not yet. PDF waits for an approved parser.
 
 ## 9. Network access policy
 

@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api import approvals, health, projects, runs
+from app.api import approvals, health, integrations, projects, runs
 from app.coding.attempt_store import SqlAttemptStore
 from app.coding.candidate import CandidateWorkspaces
 from app.config import Settings, get_settings
@@ -152,6 +152,7 @@ def create_app(
     app.state.run_manager = run_manager
     app.state.llm_problem = llm_problem
     app.state.sandbox = sandbox
+    app.state.drive = drive
     app.state.gpt_label = gpt_label
 
     app.add_middleware(
@@ -185,6 +186,7 @@ def create_app(
     app.include_router(projects.router, prefix=API_PREFIX)
     app.include_router(runs.router, prefix=API_PREFIX)
     app.include_router(approvals.router, prefix=API_PREFIX)
+    app.include_router(integrations.router)  # its own paths: the OAuth callback is not under the API prefix
     if UI_DIR.is_dir():
         app.mount("/ui", StaticFiles(directory=UI_DIR, html=True), name="ui")
     return app

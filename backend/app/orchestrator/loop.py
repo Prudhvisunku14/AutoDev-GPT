@@ -482,6 +482,13 @@ class Orchestrator:
     def _request_approval(self, s: Session, run: Run, inv: ToolInvocation, prepared: PreparedCall) -> None:
         kind = ApprovalKind.HUMAN_INPUT if prepared.decision is Decision.ASK_HUMAN else ApprovalKind.TOOL
         inv.status = InvocationStatus.AWAITING_APPROVAL
+        details = None
+        if prepared.spec.approval_details is not None:  # what the person should see; it never fetches anything
+            try:
+                details = self._redactor.redact(prepared.spec.approval_details(s, run, run.project, prepared.args))
+            except Exception:  # details help a person decide; they never block the approval itself
+                logger.exception("approval details for %s could not be prepared", inv.tool)
+                details = {"note": "details could not be prepared; the arguments are shown"}
         approval = Approval(
             run_id=run.id,
             invocation_id=inv.id,
@@ -489,6 +496,7 @@ class Orchestrator:
             tool=inv.tool,
             risk=prepared.spec.risk.value,
             payload_json=inv.arguments_json,
+            details_json=json.dumps(details, sort_keys=True, ensure_ascii=False) if details is not None else None,
         )
         s.add(approval)
         s.flush()
@@ -503,6 +511,7 @@ class Orchestrator:
                 "tool": inv.tool,
                 "risk": approval.risk,
                 "arguments": json.loads(inv.arguments_json) if _is_json(inv.arguments_json) else inv.arguments_json,
+                **({"details": details} if details is not None else {}),
             },
         )
 

@@ -21,25 +21,29 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Annotated, Any
 
-from pydantic import Field, StringConstraints
+from pydantic import Field, StringConstraints, model_validator
+from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.core.egress import EgressPolicy
 from app.core.events import event_payload, list_events
-from app.db.models import RunState
-from app.drive.access import Authorizer, Discovery, DiscoveryLimits, GoogleOAuthAuthorizer, Grant, GrantStatus, GrantStore, ScopedDrive
-from app.drive.model import READ_ONLY_SCOPES, DriveAccessRefused, DriveAuthorizationRequired, DriveError, DriveUnavailable, folder_id
+from app.db.models import Project, Run, RunState
+from app.drive.access import Authorizer, Discovery, DiscoveryLimits, Grant, GrantStatus, GrantStore, RevocationResult, ScopedDrive
+from app.drive.model import READ_ONLY_SCOPES, DriveAccessRefused, DriveAuthorizationRequired, DriveError, DriveUnavailable, folder_id, safe_label
+from app.drive.oauth import GoogleOAuthAuthorizer, GoogleOAuthProvider, build_cipher
 from app.drive.source import DriveSource, GoogleDriveSource
 from app.orchestrator.run_control import end_run
 from app.rag.blueprint import blueprint
 from app.rag.chunking import ChunkingError
 from app.rag.embeddings import Embedder, estimated_tokens
-from app.rag.extract import ExtractedDocument, ExtractionRefused, MissingPdfParser, ParserUnavailable, PdfTextExtractor, extract
+from app.rag.extract import ExtractedDocument, ExtractionRefused, ParserUnavailable
 from app.rag.index import AccessScope
+from app.rag.parsers import PARSER_IMAGE, DocumentParser, IsolatedParser
 from app.rag.knowledge import BudgetExceeded, KnowledgeBase
 from app.rag.selection import EMBEDDING, build_embedding_selector, chosen_embedder
 from app.recovery.diagnosis import classify_refusal
 from app.recovery.policy import RecoveryConfig, RecoveryState, decide
+from app.sandbox.runner import SandboxRunner
 from app.selection.model import SelectionContext
 from app.selection.selector import NoProvider, Selection
 from app.tools.base import ErrorClass, ExternalStep, Progress, RiskLevel, ToolArgs, ToolContext, ToolError, ToolSpec
@@ -55,20 +59,49 @@ Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max
 
 @dataclass
 class DriveRuntime:
-    """What the Drive tools need. `simulated` marks the fixture Drive and consent (tests, the offline demonstration)."""
+    """What the Drive tools need. `simulated` marks the fixture Drive and consent (tests, the offline demonstration).
+
+    Documents are parsed by `parser`: by default the isolated container parser, which refuses every document while no
+    approved parser image exists. An in-process parser is refused unless the runtime is simulated, so a real document is
+    never parsed inside the backend."""
 
     source: DriveSource
     authorizer: Authorizer
     embedders: tuple[Embedder, ...] = ()
-    pdf: PdfTextExtractor = field(default_factory=MissingPdfParser)
+    parser: DocumentParser = field(default_factory=IsolatedParser)
     grants: GrantStore = field(default_factory=GrantStore)
     simulated: bool = False
     discovered: dict[tuple[str, str], Discovery] = field(default_factory=dict)  # (project, grant) -> what discovery reached
     extracted: dict[tuple[str, str], dict[str, ExtractedDocument]] = field(default_factory=dict)
     bases: dict[str, KnowledgeBase] = field(default_factory=dict)  # project -> its knowledge base
 
+    def __post_init__(self) -> None:
+        if self.parser.in_process and not self.simulated:
+            raise ValueError("in-process parsing is allowed only for simulated fixture documents; real documents need the isolated parser")
+        if hasattr(self.authorizer, "on_invalidated"):  # a grant Google stops accepting is ended here too
+            self.authorizer.on_invalidated = self.invalidate
+
     def scope(self, project_id: str) -> AccessScope:
         return AccessScope(project_id, frozenset(g.id for g in self.grants.for_project(project_id) if g.status is GrantStatus.GRANTED))
+
+    def forget(self, project_id: str, grant_id: str) -> tuple[int, int]:
+        """Everything read under a grant: (documents, chunks) removed from the caches and the index."""
+        base = self.bases.get(project_id)
+        chunks = base.revoke(grant_id) if base is not None else 0
+        documents = len(self.extracted.pop((project_id, grant_id), {}))
+        self.discovered.pop((project_id, grant_id), None)
+        return documents, chunks
+
+    def revoke(self, grant_id: str, project_id: str) -> tuple[Grant, RevocationResult, tuple[int, int]]:
+        """End a grant: mark it revoked, delete its credential and ask the provider to revoke it, and remove what was read."""
+        grant = self.grants.revoke(grant_id, project_id)
+        return grant, self.authorizer.revoke(grant), self.forget(project_id, grant_id)
+
+    def invalidate(self, grant_id: str) -> None:
+        grant = self.grants.get(grant_id)
+        if grant is not None:
+            self.grants.revoke(grant_id, grant.project_id)
+            self.forget(grant.project_id, grant_id)
 
 
 # --- Arguments ------------------------------------------------------------------------------------------------------
@@ -81,13 +114,33 @@ class RequestDriveAuthorizationArgs(ToolArgs):
     purpose: Text = Field(description="Why the documents are needed, shown to the person who approves")
 
 
+_NO_REASON = "No reason was given."
+
+
+def _default_reason(data: Any) -> Any:
+    """A call written before `reason` existed omits it; the approval then says so."""
+    return {"reason": _NO_REASON, **data} if isinstance(data, dict) else data
+
+
 class GrantArgs(ToolArgs):
     grant_id: GrantId = Field(description="The grant_id request_drive_authorization returned")
+    reason: Text = Field(description="Why the files must be listed, shown to the person who approves")
+
+    @model_validator(mode="before")
+    @classmethod
+    def reason_by_default(cls, data: Any) -> Any:
+        return _default_reason(data)
 
 
 class IngestDriveDocumentsArgs(ToolArgs):
     grant_id: GrantId = Field(description="The grant_id request_drive_authorization returned")
     file_ids: list[Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{10,128}$")]] = Field(min_length=1, max_length=50, description="Supported files from discover_drive_documents")
+    reason: Text = Field(description="Why these documents must be read, shown to the person who approves")
+
+    @model_validator(mode="before")
+    @classmethod
+    def reason_by_default(cls, data: Any) -> Any:
+        return _default_reason(data)
 
 
 class BuildRagIndexArgs(ToolArgs):
@@ -147,7 +200,61 @@ def _drive_error(exc: DriveError) -> ToolError:
 
 
 def _title(name: str) -> str:
-    return " ".join(name.split())[:_TITLE_CHARS]
+    return safe_label(name, _TITLE_CHARS)[0]
+
+
+def _titled(name: str) -> dict[str, Any]:
+    label, flags = safe_label(name, _TITLE_CHARS)
+    return {"untrusted_title": label, **({"title_flags": flags} if flags else {})}
+
+
+# --- What a person sees before approving ----------------------------------------------------------------------------
+
+
+def _folder_path(discovery: Discovery, folder: str | None) -> str:
+    names: list[str] = []
+    while folder in discovery.folders and len(names) < 12:
+        meta = discovery.folders[folder]
+        names.append(safe_label(meta.name, 60)[0] or folder)
+        folder = next((p for p in meta.parents if p in discovery.folders and p != folder), None)
+    return " / ".join(reversed(names)) or "outside the approved folders"
+
+
+def _authorization_details(runtime: DriveRuntime, _session: Session, _run: Run, _project: Project, args: RequestDriveAuthorizationArgs) -> dict[str, Any]:
+    folders = []
+    for raw in args.folders:
+        try:
+            folders.append({"id": folder_id(raw), "given_as": "a Drive folder link" if raw.strip().startswith("https://") else "a folder ID", "name": "not known yet: nothing is read before approval"})
+        except DriveAccessRefused:
+            folders.append({"given_as": safe_label(raw, 80)[0], "status": "not a Drive folder ID or link: it will be refused"})
+    return {"operation": "Grant read-only Google Drive access (scope drive.readonly) to these folders and the folders inside them. Nothing outside them is read, and nothing is written, deleted or shared.",
+            "folders": folders, "reason": args.purpose, "consent": "simulated by this approval (a fixture Drive)" if runtime.simulated else "Google's own consent screen follows in the browser"}  # fmt: skip
+
+
+def _discovery_details(runtime: DriveRuntime, session: Session, run: Run, project: Project, args: GrantArgs) -> dict[str, Any]:
+    operation = "List the names, types, sizes and dates of the files in these folders and the folders inside them. No file content is read."
+    grant = runtime.grants.get(args.grant_id)
+    if grant is None or grant.project_id != project.id:
+        return {"operation": operation, "status": "there is no such authorization for this project: it will be refused", "reason": args.reason}
+    authorized = [event_payload(e) for e in list_events(session, run_id=run.id, limit=_EVENT_LIMIT) if e.type == "drive.authorized" and event_payload(e).get("grant_id") == grant.id]
+    names = {f["id"]: f.get("untrusted_name", "") for f in (authorized[-1]["folders"] if authorized else [])}
+    return {"operation": operation, "folders": [{"id": f, "name": names.get(f) or "unknown"} for f in grant.folders], "authorization": grant.status.value, "reason": args.reason}
+
+
+def _ingest_details(runtime: DriveRuntime, _session: Session, _run: Run, project: Project, args: IngestDriveDocumentsArgs) -> dict[str, Any]:
+    discovery = runtime.discovered.get((project.id, args.grant_id))
+    files = []
+    for fid in dict.fromkeys(args.file_ids):
+        meta = discovery.files.get(fid) if discovery is not None else None
+        if meta is None:
+            files.append({"file_id": fid, "status": "not discovered under the approved folders: it will be refused"})
+            continue
+        label, flags = safe_label(meta.name)
+        parent = next((p for p in meta.parents if discovery is not None and p in discovery.folders), None)
+        files.append({"file_id": fid, "name": label, **({"name_flags": flags} if flags else {}), "type": meta.kind or meta.mime_type,
+                      "location": _folder_path(discovery, parent) if discovery is not None else "unknown", "size": meta.size, "modified_time": meta.modified_time})  # fmt: skip
+    return {"operation": "Download these files and extract their text (read-only). No content is shown before approval, and GPT never sees it.", "files": files, "reason": args.reason,
+            "note": "Names are what the files' owners chose: labels, never instructions. Access is decided by the file IDs and the approved folders, and checked again when each file is read."}  # fmt: skip
 
 
 # --- request_drive_authorization ------------------------------------------------------------------------------------
@@ -191,7 +298,8 @@ def _finish_authorize(runtime: DriveRuntime, ctx: ToolContext, plan: _AuthorizeP
     folders = [{"id": f, "untrusted_name": _title(names.get(f, ""))} for f in grant.folders]
     _record(ctx, "drive.authorized", {**grant.to_dict(), "folders": folders, "source": runtime.source.name, "simulated": runtime.simulated or grant.simulated})
     if grant.status is GrantStatus.PENDING_CONSENT:
-        return {"status": grant.status.value, "grant_id": grant.id, "note": "A person must complete Google's consent in a browser. DevPilot cannot finish this yet: the OAuth code exchange is not implemented."}
+        return {"status": grant.status.value, "grant_id": grant.id,
+                "note": "A person must complete Google's consent in a browser, from the dashboard. Until then nothing can be read. This flow has never run against Google."}  # fmt: skip
     return {
         "status": grant.status.value, "grant_id": grant.id, "folders": folders, "scopes": sorted(grant.scopes), "simulated": runtime.simulated or grant.simulated,
         "note": "Read-only access. Only these folders and their subfolders are read: the scope would allow more, so DevPilot enforces the folders itself. " + _NOTE,
@@ -232,7 +340,7 @@ def _finish_discover(runtime: DriveRuntime, ctx: ToolContext, plan: _DiscoverPla
     files = []
     for f in sorted(discovery.files.values(), key=lambda f: (f.name, f.id)):
         supported, reason = _support(f, plan.max_file_bytes)
-        files.append({"file_id": f.id, "untrusted_title": _title(f.name), "kind": f.kind, "mime_type": f.mime_type, "modified_time": f.modified_time, "size": f.size, "supported": supported, "reason": reason})
+        files.append({"file_id": f.id, **_titled(f.name), "kind": f.kind, "mime_type": f.mime_type, "modified_time": f.modified_time, "size": f.size, "supported": supported, "reason": reason})
     payload = {"grant_id": plan.grant.id, "folders": len(discovery.folders), "pages": discovery.pages, "truncated": discovery.truncated, "notes": discovery.notes, "files": files}
     _record(ctx, "drive.discovered", payload)
     return {**payload, "supported": sum(f["supported"] for f in files), "note": _NOTE}
@@ -278,7 +386,7 @@ def _run_ingest(runtime: DriveRuntime, plan: _IngestPlan, _cancel: object, _prog
         try:
             meta, data = drive.fetch(file_id, plan.discovery, max_bytes=min(plan.max_file_bytes, left))
             read += len(data)
-            results.append((file_id, extract(meta, data, grant_id=plan.grant.id, pdf=runtime.pdf), "ingested", ""))
+            results.append((file_id, runtime.parser.parse(meta, data, grant_id=plan.grant.id), "ingested", ""))
         except DriveAuthorizationRequired as exc:
             raise ToolError(ErrorClass.POLICY_REFUSED, str(exc)) from exc
         except ParserUnavailable as exc:
@@ -295,7 +403,7 @@ def _finish_ingest(runtime: DriveRuntime, ctx: ToolContext, plan: _IngestPlan, r
     documents = []
     for file_id, doc, status, reason in results:
         known = plan.discovery.files[file_id]
-        entry: dict[str, Any] = {"file_id": file_id, "untrusted_title": _title(known.name), "kind": known.kind, "status": status, "reason": reason}
+        entry: dict[str, Any] = {"file_id": file_id, **_titled(known.name), "kind": known.kind, "status": status, "reason": reason}
         if doc is not None:
             store[file_id] = doc
             entry |= {"content_hash": doc.content_hash, "modified_time": doc.modified_time, "sections": len(doc.sections), "chars": doc.chars, "parser": doc.parser,
@@ -414,15 +522,10 @@ def prepare_rag_application(runtime: DriveRuntime, ctx: ToolContext, args: Prepa
 
 def revoke_drive_authorization(runtime: DriveRuntime, ctx: ToolContext, args: RevokeDriveAuthorizationArgs) -> dict[str, object]:
     try:
-        grant = runtime.grants.revoke(args.grant_id, ctx.project.id)
+        grant, revocation, (removed_documents, removed_chunks) = runtime.revoke(args.grant_id, ctx.project.id)
     except DriveAuthorizationRequired as exc:
         raise ToolError(ErrorClass.POLICY_REFUSED, str(exc)) from exc
-    runtime.authorizer.revoke(grant)
-    base = runtime.bases.get(ctx.project.id)
-    removed_chunks = base.revoke(grant.id) if base is not None else 0
-    removed_documents = len(runtime.extracted.pop((ctx.project.id, grant.id), {}))
-    runtime.discovered.pop((ctx.project.id, grant.id), None)
-    payload = {"grant_id": grant.id, "reason": args.reason, "removed_documents": removed_documents, "removed_chunks": removed_chunks}
+    payload = {"grant_id": grant.id, "reason": args.reason, "removed_documents": removed_documents, "removed_chunks": removed_chunks, **revocation.to_dict()}
     _record(ctx, "drive.revoked", payload)
     return {**payload, "status": grant.status.value}
 
@@ -431,15 +534,16 @@ def register_drive_tools(registry: ToolRegistry, runtime: DriveRuntime) -> None:
     planning = frozenset({RunState.PLANNING})
     external = (
         ("request_drive_authorization", "Ask for read-only access to the Google Drive folders the user named. Nothing outside them is ever read. Needs a person's approval.",
-         RequestDriveAuthorizationArgs, _begin_authorize, _run_authorize, _finish_authorize),
+         RequestDriveAuthorizationArgs, _begin_authorize, _run_authorize, _finish_authorize, _authorization_details),
         ("discover_drive_documents", "List the documents under the authorized folders: IDs, untrusted titles, types, sizes and dates. Needs a person's approval.",
-         GrantArgs, _begin_discover, _run_discover, _finish_discover),
-        ("ingest_drive_documents", "Read and parse discovered documents (Google Docs, TXT, DOCX, PDF) within limits. Returns metadata only. Needs a person's approval.",
-         IngestDriveDocumentsArgs, _begin_ingest, _run_ingest, _finish_ingest),
+         GrantArgs, _begin_discover, _run_discover, _finish_discover, _discovery_details),
+        ("ingest_drive_documents", "Read and parse discovered documents (Google Docs, TXT, DOCX) within limits, in the isolated parser. Returns metadata only. Needs a person's approval.",
+         IngestDriveDocumentsArgs, _begin_ingest, _run_ingest, _finish_ingest, _ingest_details),
     )  # fmt: skip
-    for name, description, model, begin, run, finish in external:
+    for name, description, model, begin, run, finish, details in external:
         registry.register(ToolSpec(name=name, description=description, args_model=model, risk=RiskLevel.EXTERNAL_NETWORK, states=planning, handler=None,
-                                   external=ExternalStep(begin=partial(begin, runtime), run=partial(run, runtime), finish=partial(finish, runtime))))  # fmt: skip
+                                   external=ExternalStep(begin=partial(begin, runtime), run=partial(run, runtime), finish=partial(finish, runtime)),
+                                   approval_details=partial(details, runtime)))  # fmt: skip
     registry.register(ToolSpec(name="build_rag_index", description="Chunk the ingested documents, embed them with the provider Python selects, and build the vector index.",
                                args_model=BuildRagIndexArgs, risk=RiskLevel.WORKSPACE_WRITE, states=planning, handler=None,
                                external=ExternalStep(begin=partial(_begin_index, runtime), run=_run_index, finish=partial(_finish_index, runtime))))  # fmt: skip
@@ -454,10 +558,14 @@ def register_drive_tools(registry: ToolRegistry, runtime: DriveRuntime) -> None:
         registry.register(ToolSpec(name=name, description=description, args_model=model, risk=risk, states=states, handler=partial(handler, runtime)))
 
 
-def build_drive_runtime(settings: Settings, egress: EgressPolicy) -> DriveRuntime | None:
-    """DRIVE_SOURCE=google wires the Drive v3 client and the real consent URL; off, the default, wires nothing. Consent
-    cannot complete yet (no code exchange), and no real embedding provider exists, so such a run stops safely."""
+def build_drive_runtime(settings: Settings, egress: EgressPolicy, sandbox: SandboxRunner | None = None) -> DriveRuntime | None:
+    """DRIVE_SOURCE=google wires the Drive v3 client, the OAuth flow and the isolated parser; off, the default, wires
+    nothing. It fails closed where anything is missing: with no approved cipher (cryptography is not installed) consent
+    cannot complete; with no approved parser image every document is refused; with no real embedding provider, indexing
+    stops the run."""
     if settings.drive_source != "google":
         return None
-    authorizer = GoogleOAuthAuthorizer(settings.google_oauth_client_id, settings.google_oauth_redirect_uri)
-    return DriveRuntime(GoogleDriveSource(egress, authorizer), authorizer)
+    cipher, why = build_cipher(settings.devpilot_token_key)
+    provider = GoogleOAuthProvider(egress, settings.google_oauth_client_id, settings.google_oauth_client_secret) if settings.google_oauth_client_id else None
+    authorizer = GoogleOAuthAuthorizer(settings.google_oauth_client_id, settings.google_oauth_redirect_uri, provider=provider, cipher=cipher, cipher_problem=why)
+    return DriveRuntime(GoogleDriveSource(egress, authorizer), authorizer, parser=IsolatedParser(sandbox, image=PARSER_IMAGE, settings=settings))

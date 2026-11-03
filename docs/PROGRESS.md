@@ -10,7 +10,9 @@
 
 **Real-World Milestone 1 (2026-11-02):** GitHub-assisted development: public repository discovery, evaluation and safe import, offline-tested with fixtures. No live GitHub request, real model or Docker run; the weather application was not generated. See [MILESTONE_1_GITHUB.md](MILESTONE_1_GITHUB.md).
 
-**Milestone 6 (2026-11-03, not committed):** Google Drive and a RAG chatbot builder, implemented and offline-tested with a simulated Drive, simulated consent and a test-double embedder. No Google server, real OAuth, paid call or Docker run; no chatbot was generated. See [MILESTONE_2_GOOGLE_DRIVE_RAG.md](MILESTONE_2_GOOGLE_DRIVE_RAG.md).
+**Milestone 6 (2026-11-03, committed as `829b9da`):** Google Drive and a RAG chatbot builder, implemented and offline-tested with a simulated Drive, simulated consent and a test-double embedder. No Google server, real OAuth, paid call or Docker run; no chatbot was generated, and there is no working live Google Drive RAG chatbot. See [MILESTONE_2_GOOGLE_DRIVE_RAG.md](MILESTONE_2_GOOGLE_DRIVE_RAG.md).
+
+**Milestone 6 hardening (2026-11-03, not committed):** OAuth security contracts, a fail-closed parser-isolation interface and detailed Drive approvals, offline only. Encryption is pending (`cryptography` is not installed), and the parser container is not built.
 
 Phase 4 (OpenCode) in progress. The foundation, the contract checks, the verified binary and the precedence experiment are committed (2026-10-30).
 
@@ -1001,7 +1003,7 @@ These figures describe a scenario mix in which the preferred tool is usually wro
 
 ### Milestone 6: Google Drive and the RAG chatbot builder (2026-11-03)
 
-**Implemented and offline-tested; not committed.** Details, security findings and what real use needs: [MILESTONE_2_GOOGLE_DRIVE_RAG.md](MILESTONE_2_GOOGLE_DRIVE_RAG.md).
+**Implemented and offline-tested; committed as `829b9da`.** The security hardening after it (OAuth contracts, parser isolation, approval details) is not committed. It is described in §14 of the milestone document. With the hardening, the whole offline suite gives 3,585 passed, 17 skipped and 0 failed. Details, security findings and what real use needs: [MILESTONE_2_GOOGLE_DRIVE_RAG.md](MILESTONE_2_GOOGLE_DRIVE_RAG.md).
 
 **Built:**
 - `app/drive/`: a read-only Drive v3 client behind the `google_drive` egress entry, grants owned by one project, DevPilot's own folder restriction, a consent URL with PKCE, and a simulated Drive for tests.

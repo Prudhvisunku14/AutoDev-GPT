@@ -1,20 +1,25 @@
 # Milestone 6: Google Drive and an autonomous RAG chatbot builder
 
-**Status (2026-11-03): implemented and offline-tested; not committed.**
-- No Google server was contacted, no real OAuth flow ran, and no paid embedding or model call was made.
+**Status (2026-11-03):**
+- The offline milestone is committed as `829b9da`.
+- The security hardening (§14) is implemented and offline-tested, and **not committed**.
+- No Google server was contacted, no real OAuth sign-in happened, and no paid embedding or model call was made.
 - No Docker container ran, and no package was installed.
-- **No chatbot was generated or executed.** Generation stops safely, naming its blockers.
+- **There is no working live Google Drive RAG chatbot:** none was generated or executed. Generation stops safely, naming its blockers.
 
 The request this milestone prepares: "Build a RAG chatbot using documents from my Google Drive folder. Use a React frontend, FastAPI backend, document processing, embeddings and a vector index. The chatbot must answer questions with accurate source citations." Nothing is specific to one folder or one collection. `app/demo/rag.py` is data for one request.
 
 | | Status |
 |---|---|
-| Drive connector, folder restriction, ingestion, chunking, index, retrieval, citation checks, the seven tools, blueprint and plan check | **Implemented and offline-tested** |
-| Google Drive itself (an in-process fixture serving Drive v3-shaped answers), Google consent (the approval stands for it), embeddings (a hashing test double), GPT (FakeLLM) | **Simulated only** |
-| Google consent and token exchange, encrypted refresh-token storage, revocation at Google, the credentials endpoint | **Real Google Drive authorization pending** |
-| An embedding provider (the OpenAI API or a local model): neither is implemented, both are listed as planned | **Real embeddings pending** |
-| Code for the chatbot's three components: blocked before any provider runs | **Real code generation pending** |
-| The FastAPI and React runtimes, the acceptance suite in the sandbox, document parsing in the no-network parser container | **Docker verification pending** |
+| Drive connector, folder restriction, ingestion, chunking, index, retrieval, citation checks, the seven tools, blueprint and plan check, approval details, the OAuth state, callback, refresh and revocation contracts, the credentials endpoint | **Implemented and offline-tested** |
+| Google Drive itself (an in-process fixture serving Drive v3-shaped answers), Google consent in the tool flow (the approval stands for it), the OAuth provider in tests, embeddings (a hashing test double), GPT (FakeLLM) | **Simulated only** |
+| The isolated parser interface and its host-side checks; the parser image is a specification | **Security interface implemented but not container-verified** |
+| Consent, code exchange, refresh and revocation against Google itself (`GoogleOAuthProvider` has only met an in-process transport) | **OAuth flow not tested against Google** |
+| Refresh-token encryption: Fernet is the approved mechanism, and `cryptography` is not installed, so consent fails closed | **Pending an approved install** |
+| The `document-parser` image: built, run on Docker, approved by ID | **Parser container pending** |
+| A PDF parser in that image | **PDF parsing pending** |
+| An embedding provider (the OpenAI API or a local model): neither is implemented | **Real semantic embeddings pending** |
+| Code for the chatbot's three components, the FastAPI and React runtimes, and the acceptance suite in the sandbox | **Real chatbot generation pending** |
 
 ## 1. What was reused
 
@@ -34,7 +39,7 @@ No OAuth, Google or vector code existed before. Nothing was found to duplicate.
 ## 2. Google Drive connector (`backend/app/drive/`)
 
 - **Feature flag:** `DRIVE_SOURCE` is `off` by default, and then no Drive tool exists.
-- **`google` mode:** wires the Drive v3 client and the real consent URL. Consent cannot complete yet, so such a run stops safely.
+- **`google` mode:** wires the Drive v3 client, the OAuth flow and the isolated parser. With no approved cipher, consent fails closed; with no approved parser image, every document is refused. So such a run stops safely (§14).
 - **Fixtures:** tests and the demonstration pass a fixture runtime to `create_app`. No setting selects fixtures or the test double.
 - **`GoogleDriveSource`** implements `files.list` (parents query, pages), `files.get`, `alt=media` and `files.export` (text/plain):
   - every URL passes the `google_drive` allowlist, redirects included; a redirect to another host is refused before it is followed;
@@ -60,13 +65,15 @@ No OAuth, Google or vector code existed before. Nothing was found to duplicate.
   - states are `PENDING_CONSENT`, `GRANTED` and `REVOKED`;
   - the token lives only inside the authorizer; events, tool results, reports and GPT get the grant ID.
 - **Explicit authorization:** `request_drive_authorization` waits for a person, and only the folders in the approved call are granted.
-- **Real flow (`GoogleOAuthAuthorizer`):** builds the consent URL with PKCE (S256), a random `state` and the read-only scope. Not built: the callback, the code exchange, encrypted refresh-token storage, refresh, and revocation at Google.
+- **Real flow (`GoogleOAuthAuthorizer`, app/drive/oauth.py):** the consent URL, the callback, the code exchange, encrypted refresh-token storage, refresh and revocation are implemented and tested against a simulated provider only (§14). It has never run against Google, and storage fails closed until `cryptography` is installed.
 - **Revocation (`revoke_drive_authorization`, no approval needed):**
   - the grant is marked revoked and the token forgotten;
   - every chunk and cached document read under it is removed;
   - later reads are refused.
 
-## 4. Document ingestion (`backend/app/rag/extract.py`)
+## 4. Document ingestion (`backend/app/rag/extract.py`, `parsing.py`, `parsers.py`)
+
+Real documents are parsed only by the isolated parser, which refuses them while no approved parser image exists (§14). The in-process path is for the simulated fixture documents only.
 
 | Format | How | Location kept |
 |---|---|---|
@@ -189,27 +196,35 @@ GPT never saw document text or a token. The report names every simulation.
 
 ## 11. Security findings
 
-**Open, before any real document**
-1. **Parsing runs in the backend process.** SECURITY.md §8 requires the no-network `document-parser` container, with limits enforced there and again on the host. The standard-library DOCX reader refuses DTDs and entities and limits archives, but a real collection needs the container.
-2. **SECURITY.md §7 is only partly met:**
-   - Met: the scope; PKCE and `state` in the URL; tokens kept from GPT, events and reports.
-   - Not built: the callback's `state` check, Fernet-encrypted refresh tokens, the `DELETE /api/v1/integrations/google/credentials` endpoint, and revocation at Google.
-3. **The approval shows only the arguments,** that is file IDs. SECURITY.md §7 asks for file names too.
+The first three findings from the offline milestone were addressed in the hardening round (§14).
 
-**Lower risk, or by design**
+1. **Parsing in the backend: closed by design, but not container-verified.**
+   - A runtime that is not simulated refuses an in-process parser.
+   - Every real document goes to `IsolatedParser`, which refuses it while no approved parser image exists.
+   - The image has never been built, so the isolation itself is unproven.
+2. **SECURITY.md §7: the contracts are implemented.** The state check, its expiry and single use, the browser binding, strict redirect URI validation, the callback, safe refresh, the credentials endpoint and separate revocation reporting are all in place. Still open:
+   - **Encrypted storage cannot run:** `cryptography` is not installed, so consent fails closed.
+   - **Credentials live in memory only:** a restart loses them, so consent must be repeated.
+   - **The flow has never met Google.**
+3. **Approvals now show names, types, locations, the operation and the reason**, as SECURITY.md §7 asks.
+
+**Still open**
 4. **Format detection** checks PDF magic, ZIP structure and UTF-8 text, but takes Drive's MIME type as the format.
 5. **Shared documents:** files shared with the account inside an approved folder are readable, as Google allows. Other DevPilot projects cannot use the grant.
 6. **The extractive answerer and the lexical embedder are test doubles.** A real chatbot needs a model and real embeddings, and their own evaluation.
+7. **The parser's output channel is stdout**, capped by `SANDBOX_MAX_OUTPUT_BYTES` (64 KB by default, at most 4 MB). A large document is refused, not cut short. SECURITY.md §8 describes a separate output mount, which the sandbox does not support yet.
+8. **Python cannot reliably erase secrets from memory.** Decrypted refresh tokens are short-lived variables, and are never logged or stored.
 
 ## 12. What real Google Drive access needs
 
-1. A Google OAuth client, its ID configured, and its secret set by the user in `.env`.
-2. The callback, with `state` validation, the code exchange and Fernet-encrypted refresh-token storage under `DEVPILOT_TOKEN_KEY`.
-3. Revocation at Google, and the credentials endpoint.
-4. Parsing moved into the no-network parser container.
-5. A PDF parser installed in that container, with approval.
-6. `DRIVE_SOURCE=google`.
-7. A person's consent in the browser.
+1. `cryptography` installed with approval, and a Fernet key set as `DEVPILOT_TOKEN_KEY` by the user.
+2. Persistent storage for the encrypted refresh tokens; today they are kept in memory only.
+3. A Google OAuth client, with its ID configured and its secret set by the user in `.env`.
+4. The `document-parser` image built, verified on Docker, and approved by ID; and, with approval, a larger output channel for big documents.
+5. A PDF parser added to that image, with approval.
+6. A dashboard button that starts consent (the endpoint exists).
+7. `DRIVE_SOURCE=google`.
+8. A person's consent in the browser, and a first test against Google.
 
 ## 13. What a genuinely generated and tested chatbot needs
 
@@ -219,3 +234,88 @@ GPT never saw document text or a token. The report names every simulation.
 4. A real embedding provider, with its cost approved.
 5. The frozen acceptance suite run in the sandbox.
 6. Docker, which needs the laptop's memory and C: headroom first.
+
+## 14. Security hardening (2026-11-03, not committed)
+
+### OAuth (`backend/app/drive/oauth.py`, `backend/app/api/integrations.py`)
+
+**State**
+- The value is random, single-use, bound to the project, and expires after 10 minutes.
+- It is removed on the first callback, whatever follows, so a refused or replayed answer cannot be retried.
+- Its browser binding is an HttpOnly cookie, SameSite=Lax, scoped to the callback path, and compared in constant time.
+
+**PKCE (S256):** the verifier lives only in the pending record, goes only to the code exchange, and never appears in a URL. A code issued for another verifier is refused.
+
+**Redirect URI:** validated when it is configured. It must be https, or http to a loopback address with a port, and the path must be exactly `/oauth/google/callback`. A user, query, fragment or wildcard is refused. Only that URI is ever used.
+
+**The callback refuses each of these, and none of them grants:**
+- a forged, expired or replayed state;
+- another browser;
+- a Google error;
+- a malformed code;
+- a scope beyond read-only;
+- a missing refresh token.
+
+Tokens that will not be kept are revoked at once.
+
+**Storage:** refresh tokens go through a `TokenCipher`.
+- The only product cipher is Fernet, keyed by `DEVPILOT_TOKEN_KEY`.
+- `cryptography` is not installed, so completing consent **fails closed before any code is exchanged** (503).
+- Nothing else stands in for Fernet; tests use a cipher double that lives only in the test file.
+- Access tokens stay in memory until they expire.
+
+**Refresh:** one refresh at a time per grant.
+- A rotated refresh token is stored encrypted again.
+- An outage changes nothing.
+- `invalid_grant` deletes the local credential, revokes the grant, and removes everything read under it.
+
+**Revocation:** local deletion comes first, and remote revocation is reported separately: `revoked`, `already_invalid`, `failed` (with what to do), `not_attempted` or `simulated`.
+
+**Routes**
+- `POST /api/v1/integrations/google/consent` and `DELETE /api/v1/integrations/google/credentials?project_id=` require the API token.
+- `GET /oauth/google/callback` is reached by the browser.
+- All of them answer 404 while Drive is off.
+- Deleting credentials affects only the named project.
+
+### Parser isolation (`backend/app/rag/parsing.py`, `backend/app/rag/parsers.py`, `backend/sandbox_images/document-parser/`)
+
+**The shared code:** the parsing code is standard library only. It is the same file in the backend's fixture path and in the container.
+
+**`IsolatedParser`**
+- It stages the bytes in the parser's own folder, read-only to the container.
+- It runs `document-parse` through the sandbox with the approved image: no network, all capabilities dropped, read-only root, user 65534, and 512 MB, 1 CPU, 32 processes and 60 s, capped again by the settings.
+- It removes the staged copy afterwards.
+- It accepts only `{"sections": [...]}` with valid locations and text, within the limits, or `{"refused": reason}`.
+- It checks the result again on the host, and computes the hash on the host.
+
+**Fail closed:** with no approved image, no sandbox or no settings, every document is `parser_unavailable`. PDF is always unavailable.
+
+**`FixtureParser`** is in-process, and is accepted only by a simulated runtime.
+
+**The entry point** `parse_main.py` is tested on the host over trusted fixtures. **The image has never been built or run.**
+
+### Approval details
+
+Each Drive approval now records what a person needs to decide:
+- the operation;
+- the reason (`discover` and `ingest` take one; an older call says "No reason was given.");
+- the folders, with their IDs and names (unknown before access is granted, because nothing is fetched before approval);
+- for ingestion, each file's sanitized name and its flags, type, folder path, size and date.
+
+**Names stay labels:**
+- control, format and bidirectional characters are removed, and the name is shortened;
+- text addressed to AI agents is flagged;
+- access is decided by ID and folder, checked again at execution.
+
+Tests show that a rename, a deletion, a move out of the folders, or a revocation between approval and execution cannot bypass these checks.
+
+### Tests
+
+- `test_drive_oauth.py` (28).
+- `test_drive_parsers.py` (19).
+- Five new tests in `test_drive_tools.py`, plus checks added to the revocation test.
+- One existing test was updated for the new consent API.
+
+**Focused regression:** 583 passed, 0 failed.
+
+**Whole offline suite** (run once memory allowed it, under the fenced runner): 3,585 passed, 17 skipped (opt-in Docker and live tests), 0 failed, in 169 s. Peak memory was 248 MB. Commit headroom never fell below 2.4 GB, against the 2 GB floor. The count is the 3,533 of `829b9da` plus the 52 new tests.

@@ -8,16 +8,14 @@ still in one. A file ID GPT invents, a file in another folder, or one moved out 
 Two authorizers:
 - `FixtureAuthorizer`: a **simulated** consent for an account of the fixture Drive (tests and the offline
   demonstration). It grants at once, because the person's approval in the approval queue stands for Google's consent.
-- `GoogleOAuthAuthorizer`: builds the real consent URL (PKCE, state, read-only scope) and stops there. **The code
-  exchange is not implemented in this round, so it never grants**: nothing logs in to Google.
+- `GoogleOAuthAuthorizer` (app/drive/oauth.py): the real flow's contracts (state, PKCE, callback, encrypted refresh
+  token, refresh, revocation), tested only against a simulated provider. **It has never run against Google.**
 
 A token lives only inside the authorizer. Grants, events and tool results hold its grant ID, never the token.
 """
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import itertools
 import secrets
 from collections.abc import Iterable, Mapping
@@ -25,7 +23,6 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol
-from urllib.parse import urlencode
 
 from app.drive.model import READ_ONLY_SCOPES, DriveAccessRefused, DriveAuthorizationRequired, DriveFile, DriveUnavailable, check_id
 from app.drive.source import DriveSource
@@ -89,8 +86,31 @@ class GrantStore:
         self._grants[grant_id] = revoked
         return revoked
 
+    def activate(self, grant_id: str, project_id: str) -> Grant:
+        """Consent completed: only a pending grant of this project becomes usable."""
+        grant = self._grants.get(grant_id)
+        if grant is None or grant.project_id != project_id or grant.status is not GrantStatus.PENDING_CONSENT:
+            raise DriveAuthorizationRequired("that authorization is not waiting for consent in this project")
+        self._grants[grant_id] = replace(grant, status=GrantStatus.GRANTED)
+        return self._grants[grant_id]
+
+    def get(self, grant_id: str) -> Grant | None:
+        return self._grants.get(grant_id)
+
     def for_project(self, project_id: str) -> list[Grant]:
         return [g for g in self._grants.values() if g.project_id == project_id]
+
+
+@dataclass(frozen=True)
+class RevocationResult:
+    """Local deletion and remote revocation are separate facts, and are reported separately."""
+
+    local_deleted: bool  # DevPilot no longer holds the credential
+    remote: str  # revoked | already_invalid | failed | not_attempted | simulated
+    detail: str = ""
+
+    def to_dict(self) -> dict[str, object]:
+        return {"local_deleted": self.local_deleted, "remote_revocation": self.remote, "detail": self.detail}
 
 
 class Authorizer(Protocol):
@@ -99,8 +119,9 @@ class Authorizer(Protocol):
 
     def authorize(self, project_id: str, folders: tuple[str, ...], scopes: frozenset[str]) -> Grant: ...
 
-    def revoke(self, grant: Grant) -> None:
-        """Forget the grant's token. After this, every call with the grant gets DriveAuthorizationRequired."""
+    def revoke(self, grant: Grant) -> RevocationResult:
+        """Forget the grant's credentials, then ask the provider to revoke them. After this, every call with the grant
+        gets DriveAuthorizationRequired, whatever the provider answered."""
         ...
 
     def token(self, grant_id: str) -> str: ...
@@ -123,61 +144,15 @@ class FixtureAuthorizer:
         self._tokens[grant.id] = self._account_tokens[self._account]
         return grant
 
-    def revoke(self, grant: Grant) -> None:
+    def revoke(self, grant: Grant) -> RevocationResult:
         self._tokens.pop(grant.id, None)
+        return RevocationResult(True, "simulated", "fixture consent: no real Google token exists")
 
     def token(self, grant_id: str) -> str:
         token = self._tokens.get(grant_id)
         if token is None:
             raise DriveAuthorizationRequired("the Google Drive authorization was revoked or never completed")
         return token
-
-
-@dataclass(frozen=True)
-class ConsentRequest:
-    """What a person would open to give consent. Kept by DevPilot; GPT is told only that consent is pending."""
-
-    url: str
-    state: str
-    code_verifier: str
-
-
-class GoogleOAuthAuthorizer:
-    """The real flow's first half: a consent URL with PKCE (S256), a state value and the read-only scope.
-
-    NOT IMPLEMENTED in this round: the redirect handler and the code exchange at oauth2.googleapis.com, token storage
-    and refresh, and the call to Google's revocation endpoint. So `authorize` always returns a pending grant."""
-
-    name = "google-oauth"
-    simulated = False
-    AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-
-    def __init__(self, client_id: str | None, redirect_uri: str) -> None:
-        self._client_id = client_id
-        self._redirect_uri = redirect_uri
-        self.pending: dict[str, ConsentRequest] = {}
-
-    def consent_request(self, scopes: frozenset[str]) -> ConsentRequest:
-        if not self._client_id:
-            raise DriveAuthorizationRequired("GOOGLE_OAUTH_CLIENT_ID is not configured")
-        verifier = secrets.token_urlsafe(48)
-        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
-        state = secrets.token_urlsafe(24)
-        query = {"client_id": self._client_id, "redirect_uri": self._redirect_uri, "response_type": "code", "scope": " ".join(sorted(check_scopes(scopes))), "state": state,
-                 "code_challenge": challenge, "code_challenge_method": "S256", "access_type": "offline", "prompt": "consent", "include_granted_scopes": "false"}  # fmt: skip
-        return ConsentRequest(f"{self.AUTH_URL}?{urlencode(query)}", state, verifier)
-
-    def authorize(self, project_id: str, folders: tuple[str, ...], scopes: frozenset[str]) -> Grant:
-        request = self.consent_request(scopes)
-        grant = Grant(f"grant-{secrets.token_hex(8)}", project_id, folders, scopes, GrantStatus.PENDING_CONSENT, False, "pending", _now())
-        self.pending[grant.id] = request
-        return grant
-
-    def revoke(self, grant: Grant) -> None:
-        self.pending.pop(grant.id, None)
-
-    def token(self, grant_id: str) -> str:
-        raise DriveAuthorizationRequired("Google consent was not completed: the real OAuth code exchange is not implemented yet")
 
 
 # --- DevPilot's own folder restriction ------------------------------------------------------------------------------

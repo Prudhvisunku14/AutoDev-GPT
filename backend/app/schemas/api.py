@@ -135,6 +135,7 @@ class ApprovalOut(BaseModel):
     tool: str
     risk: str
     payload: Any
+    details: Any = None  # names, types, locations, operation and reason, for a person deciding; never content
     status: str
     response_text: str | None
     created_at: datetime

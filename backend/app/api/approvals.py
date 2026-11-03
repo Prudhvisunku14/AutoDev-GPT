@@ -77,6 +77,7 @@ def _out(a: Approval) -> ApprovalOut:
         tool=a.tool,
         risk=a.risk,
         payload=payload,
+        details=json.loads(a.details_json) if a.details_json else None,
         status=a.status,
         response_text=a.response_text,
         created_at=a.created_at,

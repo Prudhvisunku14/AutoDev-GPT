@@ -288,6 +288,7 @@ class Approval(Base):
     tool: Mapped[str] = mapped_column(String(64))
     risk: Mapped[str] = mapped_column(String(32))
     payload_json: Mapped[str] = mapped_column(Text)  # redacted arguments or the question
+    details_json: Mapped[str | None] = mapped_column(Text, default=None)  # what the tool says a person should see, redacted
     status: Mapped[ApprovalStatus] = mapped_column(
         Enum(ApprovalStatus, native_enum=False, length=16), default=ApprovalStatus.PENDING
     )

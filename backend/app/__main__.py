@@ -31,7 +31,7 @@ def main() -> None:
         # REPOSITORY_SOURCE=github wires the GitHub client; each search and import still waits for approval.
         # DRIVE_SOURCE=google wires the Drive tools; consent cannot complete yet, so they stop safely.
         create_app(settings, sandbox=sandbox, coding=coding, repositories=build_repository_source(settings, EgressPolicy.from_file(settings.egress_allowlist_file)),
-                   drive=build_drive_runtime(settings, EgressPolicy.from_file(settings.egress_allowlist_file))),
+                   drive=build_drive_runtime(settings, EgressPolicy.from_file(settings.egress_allowlist_file), sandbox)),
         host=settings.devpilot_host,
         port=settings.devpilot_port,
         log_config=None,

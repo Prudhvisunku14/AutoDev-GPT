@@ -9,9 +9,12 @@ bin a file, so changed and deleted documents can be tested.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import io
 import json
 import re
+import secrets
 import zipfile
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -20,7 +23,8 @@ from xml.sax.saxutils import escape
 
 import httpx
 
-from app.drive.model import DOCX, FOLDER, GOOGLE_DOC, PDF, TXT
+from app.drive.model import DOCX, DRIVE_READONLY, FOLDER, GOOGLE_DOC, PDF, TXT
+from app.drive.oauth import InvalidGrant, OAuthError, ProviderUnavailable, TokenSet
 
 RESEARCHER, COLLEAGUE = "researcher@example.test", "colleague@example.test"
 TOKENS = {RESEARCHER: "fixture-token-researcher", COLLEAGUE: "fixture-token-colleague"}
@@ -148,6 +152,9 @@ class FixtureDrive:
     def trash(self, file_id: str) -> None:
         self.items[file_id] = replace(self.items[file_id], trashed=True)
 
+    def rename(self, file_id: str, name: str) -> None:
+        self.items[file_id] = replace(self.items[file_id], name=name)
+
     def move(self, file_id: str, parent: str) -> None:
         self.items[file_id] = replace(self.items[file_id], parent=parent)
 
@@ -211,3 +218,60 @@ class FixtureDrive:
 
 def _error(status: int, reason: str) -> httpx.Response:
     return httpx.Response(status, content=json.dumps({"error": {"code": status, "errors": [{"reason": reason}], "message": reason}}).encode())
+
+
+@dataclass
+class SimulatedOAuthProvider:
+    """SIMULATED Google token and revocation endpoints, for tests only. **Never Google**: every code and token is an
+    invented string. It checks the PKCE challenge as Google would, and can fail on demand."""
+
+    simulated: bool = True
+    scope: str = DRIVE_READONLY
+    give_refresh: bool = True
+    refresh_error: str | None = None  # "invalid_grant" or "unavailable"
+    revoke_error: str | None = None  # "failed" or "already_invalid"
+    rotate: bool = False
+    expires_in: int = 3600
+    codes: dict[str, str] = field(default_factory=dict)  # code -> the PKCE challenge it was issued for
+    live: set[str] = field(default_factory=set)
+    exchanges: int = 0
+    refreshes: int = 0
+    revoked: list[str] = field(default_factory=list)
+
+    def issue_code(self, challenge: str) -> str:
+        code = f"sim-code-{secrets.token_hex(16)}"
+        self.codes[code] = challenge
+        return code
+
+    def _issue(self, refresh: bool) -> TokenSet:
+        access = f"sim-access-{secrets.token_hex(12)}"
+        new_refresh = f"sim-refresh-{secrets.token_hex(12)}" if refresh else None
+        self.live |= {access} | ({new_refresh} if new_refresh else set())
+        return TokenSet(access, self.expires_in, self.scope, new_refresh)
+
+    def exchange(self, code: str, verifier: str, redirect_uri: str) -> TokenSet:
+        self.exchanges += 1
+        challenge = self.codes.pop(code, None)  # a code works once
+        expected = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+        if challenge is None or not secrets.compare_digest(challenge, expected):
+            raise InvalidGrant("simulated: invalid_grant")
+        return self._issue(self.give_refresh)
+
+    def refresh(self, refresh_token: str) -> TokenSet:
+        self.refreshes += 1
+        if self.refresh_error == "unavailable":
+            raise ProviderUnavailable("simulated: the token endpoint did not answer")
+        if self.refresh_error == "invalid_grant" or refresh_token not in self.live:
+            raise InvalidGrant("simulated: invalid_grant")
+        tokens = self._issue(self.rotate)
+        if self.rotate:
+            self.live.discard(refresh_token)
+        return tokens
+
+    def revoke(self, token: str) -> None:
+        if self.revoke_error == "failed":
+            raise OAuthError("simulated: the revocation endpoint did not answer")
+        if self.revoke_error == "already_invalid" or token not in self.live:
+            raise InvalidGrant("simulated: invalid_token")
+        self.live.discard(token)
+        self.revoked.append(token)

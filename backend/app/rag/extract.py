@@ -1,9 +1,12 @@
 """Text extraction: a document's bytes become located sections of text. Every document is untrusted data.
 
-Supported: TXT and Google Docs (exported as plain text) by paragraph; DOCX with the standard library (zipfile and
-ElementTree), by heading, with limits on the archive and a refusal of any DTD or entity; PDF through a
-`PdfTextExtractor`, by page. **No PDF parser is installed**, so the default `MissingPdfParser` refuses every PDF and says
-so; a parser such as pypdf would plug in behind the same interface, and is not installed here.
+The parsing itself is in app/rag/parsing.py, standard library only, so the same code runs in the no-network
+`document-parser` container. **This in-process path is for the simulated fixture documents only**: a real document is
+parsed through `app/rag/parsers.py`, which refuses it while no approved parser environment exists.
+
+Supported: TXT and Google Docs (exported as plain text) by paragraph; DOCX by heading, with limits on the archive and a
+refusal of any DTD or entity; PDF through a `PdfTextExtractor`, by page. **No PDF parser is installed**, so the default
+`MissingPdfParser` refuses every PDF and says so.
 
 A malformed, empty, oversized or unsupported document is refused with a reason that holds none of its text. Text that
 tries to instruct an AI agent is reported (`instructions`), and stays data: nothing in a document reaches GPT's
@@ -13,18 +16,12 @@ instructions, tool permissions or network policy.
 from __future__ import annotations
 
 import hashlib
-import re
-import zipfile
 from dataclasses import dataclass
-from io import BytesIO
 from typing import Protocol
-from xml.etree import ElementTree
 
 from app.drive.model import DriveFile
+from app.rag import parsing
 from app.repos.evaluate import instruction_findings
-
-_W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-_PARAGRAPHS = re.compile(r"\n\s*\n")
 
 
 class ExtractionRefused(Exception):
@@ -32,7 +29,7 @@ class ExtractionRefused(Exception):
 
 
 class ParserUnavailable(ExtractionRefused):
-    """The format is supported, but the parser it needs is not installed."""
+    """The format is supported, but the parser it needs, or its isolated environment, is not available."""
 
 
 @dataclass(frozen=True)
@@ -85,17 +82,25 @@ class MissingPdfParser:
 def extract(file: DriveFile, data: bytes, *, grant_id: str, pdf: PdfTextExtractor | None = None, limits: ExtractionLimits | None = None) -> ExtractedDocument:
     limits = limits or ExtractionLimits()
     kind = file.kind
-    if kind in ("txt", "google-doc"):
-        sections, parser = _paragraphs(_text(data)), "text-paragraphs/1"
-    elif kind == "docx":
-        sections, parser = _docx(data, limits), "stdlib-docx/1"
-    elif kind == "pdf":
-        if not data.startswith(b"%PDF-"):
-            raise ExtractionRefused("the file is not a PDF")
-        reader = pdf or MissingPdfParser()
-        sections, parser = [Section(f"page {n}", text.strip()) for n, text in enumerate(reader.pages(data), start=1) if text.strip()], f"pdf:{reader.name}"
-    else:
-        raise ExtractionRefused(f"{file.mime_type} is not a supported document type")
+    try:
+        if kind in parsing.KINDS:
+            parts = parsing.parse_document(kind, data, {"max_archive_entries": limits.max_archive_entries, "max_uncompressed_bytes": limits.max_uncompressed_bytes,
+                                                        "max_xml_bytes": limits.max_xml_bytes})  # fmt: skip
+            parser = "stdlib-docx/1" if kind == "docx" else "text-paragraphs/1"
+        elif kind == "pdf":
+            if not data.startswith(b"%PDF-"):
+                raise ExtractionRefused("the file is not a PDF")
+            reader = pdf or MissingPdfParser()
+            parts, parser = [(f"page {n}", t.strip()) for n, t in enumerate(reader.pages(data), start=1) if t.strip()], f"pdf:{reader.name}"
+        else:
+            raise ExtractionRefused(f"{file.mime_type} is not a supported document type")
+    except parsing.ParseRefused as exc:
+        raise ExtractionRefused(str(exc)) from exc
+    return document(file, data, grant_id=grant_id, sections=[Section(location, text) for location, text in parts], parser=parser, limits=limits)
+
+
+def document(file: DriveFile, data: bytes, *, grant_id: str, sections: list[Section], parser: str, limits: ExtractionLimits) -> ExtractedDocument:
+    """The checks every parser's output passes on the host, wherever it was parsed."""
     if not sections:
         raise ExtractionRefused("no text could be extracted")
     if len(sections) > limits.max_sections:
@@ -104,70 +109,4 @@ def extract(file: DriveFile, data: bytes, *, grant_id: str, pdf: PdfTextExtracto
     if total > limits.max_chars:
         raise ExtractionRefused(f"the document has {total} characters, over the {limits.max_chars} limit")
     findings = tuple(dict.fromkeys(f for s in sections for f in instruction_findings(s.text)))
-    return ExtractedDocument(file.id, file.name, kind, file.modified_time, grant_id, hashlib.sha256(data).hexdigest(), tuple(sections), findings, parser)
-
-
-def _text(data: bytes) -> str:
-    if b"\x00" in data:
-        raise ExtractionRefused("the file holds binary data, not text")
-    try:
-        return data.decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise ExtractionRefused("the file is not UTF-8 text") from exc
-
-
-def _paragraphs(text: str) -> list[Section]:
-    parts = [" ".join(p.split()) for p in _PARAGRAPHS.split(text.replace("\r\n", "\n"))]
-    return [Section(f"paragraph {n}", p) for n, p in enumerate((p for p in parts if p), start=1)]
-
-
-def _docx(data: bytes, limits: ExtractionLimits) -> list[Section]:
-    try:
-        archive = zipfile.ZipFile(BytesIO(data))
-    except zipfile.BadZipFile as exc:
-        raise ExtractionRefused("the DOCX file is not a valid archive") from exc
-    with archive:
-        entries = archive.infolist()
-        if len(entries) > limits.max_archive_entries:
-            raise ExtractionRefused(f"the DOCX archive has more than {limits.max_archive_entries} entries")
-        if sum(e.file_size for e in entries) > limits.max_uncompressed_bytes:
-            raise ExtractionRefused("the DOCX archive expands beyond the size limit")
-        try:
-            info = archive.getinfo("word/document.xml")
-        except KeyError as exc:
-            raise ExtractionRefused("the DOCX archive has no document body") from exc
-        if info.file_size > limits.max_xml_bytes:
-            raise ExtractionRefused("the DOCX document body is over the size limit")
-        try:
-            xml = archive.read(info)
-        except (zipfile.BadZipFile, OSError, RuntimeError) as exc:
-            raise ExtractionRefused("the DOCX document body cannot be read") from exc
-    if b"<!DOCTYPE" in xml or b"<!ENTITY" in xml:
-        raise ExtractionRefused("the DOCX document declares a DTD or entities, which are refused")
-    try:
-        root = ElementTree.fromstring(xml)
-    except ElementTree.ParseError as exc:
-        raise ExtractionRefused("the DOCX document body is not well-formed XML") from exc
-    sections: list[Section] = []
-    heading, buffer, loose = None, [], 0
-
-    def flush() -> None:
-        nonlocal loose
-        if buffer:
-            if heading is None:
-                loose += 1
-            sections.append(Section(f"section '{heading[:80]}'" if heading else f"paragraph {loose}", " ".join(buffer)))
-            buffer.clear()
-
-    for paragraph in root.iter(f"{_W}p"):
-        text = " ".join("".join(t.text or "" for t in paragraph.iter(f"{_W}t")).split())
-        style = paragraph.find(f"{_W}pPr/{_W}pStyle")
-        if style is not None and str(style.get(f"{_W}val", "")).lower().startswith("heading"):
-            flush()
-            heading = text or heading
-        elif text:
-            buffer.append(text)
-            if heading is None:
-                flush()
-    flush()
-    return sections
+    return ExtractedDocument(file.id, file.name, file.kind or "", file.modified_time, grant_id, hashlib.sha256(data).hexdigest(), tuple(sections), findings, parser)

@@ -158,3 +158,6 @@ class ToolSpec:
     asks_human: bool = False
     # Set for tools that call slow external systems; `handler` is then None.
     external: ExternalStep | None = None
+    # What a person sees before approving, beyond the arguments: (session, run, project, args) -> details. It reads
+    # only what DevPilot already holds; it may not fetch anything, since nothing is approved yet.
+    approval_details: Callable[[Session, Run, Project, Any], dict[str, Any]] | None = None

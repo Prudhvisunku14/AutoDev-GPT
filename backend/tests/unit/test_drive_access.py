@@ -11,7 +11,8 @@ import pytest
 from app.config import REPO_ROOT
 from app.core.egress import EgressPolicy
 from app.drive import fixtures
-from app.drive.access import DiscoveryLimits, FixtureAuthorizer, GoogleOAuthAuthorizer, GrantStatus, GrantStore, ScopedDrive, check_scopes
+from app.drive.access import DiscoveryLimits, FixtureAuthorizer, GrantStatus, GrantStore, ScopedDrive, check_scopes
+from app.drive.oauth import GoogleOAuthAuthorizer
 from app.drive.model import DRIVE_READONLY, READ_ONLY_SCOPES, DriveAccessRefused, DriveAuthorizationRequired, DriveUnavailable, folder_id
 from app.drive.source import GoogleDriveSource
 
@@ -72,17 +73,18 @@ def test_a_grant_belongs_to_one_project_and_ends_when_revoked(drive: fixtures.Fi
         source.get(grant.id, fixtures.RESEARCH)  # the token is gone too
 
 
-def test_the_real_consent_flow_builds_a_safe_url_and_never_grants() -> None:
+def test_the_real_consent_flow_builds_a_safe_url_and_grants_nothing_by_itself() -> None:
     oauth = GoogleOAuthAuthorizer("client-123.apps.googleusercontent.com", "http://127.0.0.1:8000/oauth/google/callback")
     grant = oauth.authorize("p1", (fixtures.RESEARCH,), READ_ONLY_SCOPES)
-    query = parse_qs(urlsplit(oauth.pending[grant.id].url).query)
+    consent = oauth.consent(grant.id, "p1")
+    query = parse_qs(urlsplit(consent.url).query)
     assert grant.status is GrantStatus.PENDING_CONSENT and not grant.simulated
     assert query["scope"] == [DRIVE_READONLY] and query["code_challenge_method"] == ["S256"] and query["state"][0] and query["response_type"] == ["code"]
-    assert "client_secret" not in query and oauth.pending[grant.id].code_verifier not in oauth.pending[grant.id].url
-    with pytest.raises(DriveAuthorizationRequired, match="not implemented"):
+    assert "client_secret" not in query and consent.binding not in consent.url and "verifier" not in consent.url
+    with pytest.raises(DriveAuthorizationRequired, match="consent must be given"):
         oauth.token(grant.id)
     with pytest.raises(DriveAuthorizationRequired, match="GOOGLE_OAUTH_CLIENT_ID"):
-        GoogleOAuthAuthorizer(None, "http://127.0.0.1:8000/cb").authorize("p1", (fixtures.RESEARCH,), READ_ONLY_SCOPES)
+        GoogleOAuthAuthorizer(None, "http://127.0.0.1:8000/oauth/google/callback").authorize("p1", (fixtures.RESEARCH,), READ_ONLY_SCOPES)
 
 
 # --- DevPilot's folder restriction ----------------------------------------------------------------------------------
