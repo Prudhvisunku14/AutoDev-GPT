@@ -130,8 +130,9 @@ def _web_readiness(stack: str) -> tuple[bool, str]:
     if not approved_image_ids():
         return False, "the website verifier (devpilot/verify-web) has not been built and self-tested on this computer: run `devpilot setup --web`"
     if not WEB_ENGINE_WIRED:
-        return False, ("the website verifier is self-tested here, but the build engine cannot yet run it as its verification step (it runs one no-network test job "
-                       "per component), so generated websites could not be verified. Existing sites can be checked with `devpilot verify-site`")  # fmt: skip
+        return False, ("the website verifier is self-tested here, but the build engine cannot yet run it as a complete verified build: "
+                       "independent browser acceptance, component integration and a real approved build remain unverified. "
+                       "Existing sites can be checked with `devpilot verify-site`")  # fmt: skip
     return True, f"website verification for {stack} runs in the self-tested devpilot/verify-web image"
 
 

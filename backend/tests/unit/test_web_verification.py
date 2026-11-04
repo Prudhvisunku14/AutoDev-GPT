@@ -237,8 +237,9 @@ def test_an_image_that_has_not_passed_its_self_test_is_refused(tmp_path: Path) -
 
 
 def test_without_the_registry_on_the_allowlist_nothing_is_installed(tmp_path: Path, approved: None) -> None:
-    with pytest.raises(web.WebVerificationError, match="registry.npmjs.org"):
-        web.WebVerifier(EgressPolicy({"sandbox_install": []}), run=FakeDocker(verify_out=""), work_dir=tmp_path).verify(web_fixtures.files(web_fixtures._REACT_OK), "react-vite")
+    result = web.WebVerifier(EgressPolicy({"sandbox_install": []}), run=FakeDocker(verify_out=""), work_dir=tmp_path).verify(web_fixtures.files(web_fixtures._REACT_OK), "react-vite")
+    assert result.verdict == "NOT_RUN" and "registry.npmjs.org" in result.reason
+    assert result.cleanup == "removed"
 
 
 def test_unknown_kinds_are_refused(tmp_path: Path) -> None:

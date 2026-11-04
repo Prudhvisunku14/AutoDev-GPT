@@ -25,12 +25,16 @@ import re
 import secrets
 import shutil
 import subprocess
+import threading
+import time
+import copy as copying
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from app.core.egress import EgressPolicy
+from app.sandbox.process import SubprocessRunner
 
 WEB_IMAGE_TAG = "devpilot/verify-web:1"
 PROXY_IMAGE = "python:3.12-alpine"  # the approved sandbox image; the proxy is standard-library Python
@@ -67,6 +71,11 @@ class WebVerificationError(Exception):
     pass
 
 
+class _Interrupted(Exception):
+    def __init__(self, status: str) -> None:
+        self.status = status
+
+
 @dataclass(frozen=True)
 class Stage:
     name: str
@@ -88,6 +97,9 @@ class WebResult:
     image_id: str | None = None
     output_tail: str = ""
     evidence: dict[str, Any] = field(default_factory=dict)
+    exec_status: str = "SUCCEEDED"
+    cleanup: str = "not_needed"
+    duration_ms: int = 0
 
     @property
     def passed(self) -> bool:
@@ -98,6 +110,7 @@ class WebResult:
             "verdict": self.verdict, "reason": self.reason, "kind": self.kind, "image_id": self.image_id,
             "stages": [{"name": s.name, "ok": s.ok, "detail": s.detail, "skipped": s.skipped} for s in self.stages],
             "pages": list(self.pages), "blocked_external": list(self.blocked_external), "install": self.install, "proxy_audit": list(self.proxy_audit),
+            "evidence": self.evidence, "exec_status": self.exec_status, "cleanup": self.cleanup, "duration_ms": self.duration_ms,
         }  # fmt: skip
 
     def describe(self) -> str:
@@ -113,7 +126,7 @@ class WebResult:
 def judge(kind: str, stdout: str, *, install: dict[str, Any] | None = None, image_id: str | None = None) -> WebResult:
     """The verifier's own report, checked again here. PASSED needs every mandatory stage present and passed, and the browser run."""
     tail = stdout[-4_000:]
-    if install is not None and not install.get("ok"):
+    if install is not None and install.get("ok") is not True:
         return WebResult("FAILED", f"dependency install failed: {str(install.get('detail', ''))[-600:]}", kind, install=install, image_id=image_id, output_tail=tail)
     match = list(_REPORT.finditer(stdout))
     if not match:
@@ -122,20 +135,22 @@ def judge(kind: str, stdout: str, *, install: dict[str, Any] | None = None, imag
         data = json.loads(match[-1].group(1))
     except ValueError:
         return WebResult("NOT_RUN", "the verifier's report could not be read", kind, install=install, image_id=image_id, output_tail=tail)
-    stages = tuple(Stage(str(s.get("name")), bool(s.get("ok")), str(s.get("detail", "")), bool(s.get("skipped"))) for s in data.get("stages", []) if isinstance(s, dict))
+    if not isinstance(data, dict) or not isinstance(data.get("stages"), list) or not isinstance(data.get("pages", []), list):
+        return WebResult("NOT_RUN", "the verifier's report has an invalid shape", kind, image_id=image_id, output_tail=tail)
+    stages = tuple(Stage(str(s.get("name")), s.get("ok") is True, str(s.get("detail", "")), bool(s.get("skipped"))) for s in data.get("stages", []) if isinstance(s, dict))
     by_name = {s.name: s for s in stages}
     common = {"kind": kind, "stages": stages, "pages": tuple(p for p in data.get("pages", []) if isinstance(p, dict)), "blocked_external": tuple(str(u) for u in data.get("blocked_external", [])),
               "install": install, "image_id": image_id, "output_tail": tail}  # fmt: skip
     failed = next((s for s in stages if not s.ok), None)
     if failed:
         return WebResult("FAILED", f"{failed.name}: {failed.detail.splitlines()[0] if failed.detail else 'failed'}", **common)
-    missing = [name for name in MANDATORY.get(kind, ()) if name not in by_name]
+    missing = [name for name in MANDATORY.get(kind, ()) if name not in by_name or by_name[name].skipped]
     if missing:
         return WebResult("FAILED", f"stages did not run: {', '.join(missing)}", **common)
     browser = next((s for s in data.get("stages", []) if isinstance(s, dict) and s.get("name") == "browser"), {})
-    if not browser.get("ran") or not common["pages"]:
+    if browser.get("ran") is not True or not common["pages"]:
         return WebResult("FAILED", "the browser did not run, so the pages were not seen", **common)
-    if kind == "react-vite" and (install is None or not install.get("ok")):
+    if kind == "react-vite" and (install is None or install.get("ok") is not True):
         return WebResult("FAILED", "dependencies were not installed by DevPilot's installer", **common)
     if data.get("verdict") != "PASSED":
         return WebResult("FAILED", str(data.get("reason") or "the verifier did not report a pass"), **common)
@@ -207,15 +222,32 @@ class WebVerifier:
     """Runs the stages on Docker. `run` is subprocess.run-like, so the tests drive it without Docker."""
 
     def __init__(self, egress: EgressPolicy, *, docker: str = "docker", run: Runner = subprocess.run, work_dir: Path, image: str = WEB_IMAGE_TAG,
-                 memory: str = "2g", cpus: float = 2.0, timeout: float = 900.0) -> None:  # fmt: skip
+                 memory: str = "2g", cpus: float = 2.0, timeout: float = 900.0, pids: int = 512, capture_bytes: int = 65_536) -> None:  # fmt: skip
         self._egress = egress
         self._docker = docker
         self._run = run
         self._work = work_dir
         self._image = image
         self._memory, self._cpus, self._timeout = memory, cpus, timeout
+        self._pids, self._capture_bytes = pids, capture_bytes
+        self._cancel: threading.Event | None = None
+        self._deadline: float | None = None
+        self._cleaning = False
 
     def _docker_call(self, args: list[str], *, timeout: float = 120.0) -> subprocess.CompletedProcess[str]:
+        if not self._cleaning:
+            if self._cancel is not None and self._cancel.is_set():
+                raise _Interrupted("CANCELLED")
+            if self._deadline is not None:
+                timeout = min(timeout, self._deadline - time.monotonic())
+                if timeout <= 0:
+                    raise _Interrupted("TIMEOUT")
+        if self._run is subprocess.run:
+            result = SubprocessRunner().run([self._docker, *args], timeout=timeout, cancel=None if self._cleaning else self._cancel, capture_bytes=self._capture_bytes)
+            for stopped, status in ((result.cancelled, "CANCELLED"), (result.timed_out, "TIMEOUT"), (result.output_limit or result.stdout_truncated or result.stderr_truncated, "OUTPUT_LIMIT")):
+                if stopped:
+                    raise _Interrupted(status)
+            return subprocess.CompletedProcess([self._docker, *args], result.returncode, result.stdout.decode("utf-8", errors="replace"), result.stderr.decode("utf-8", errors="replace"))
         return self._run([self._docker, *args], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
 
     def install_hosts(self) -> list[str]:
@@ -231,7 +263,19 @@ class WebVerifier:
             raise WebVerificationError(f"the website verification image {self._image} is not present: run `devpilot setup --web`")
         return value
 
-    def verify(self, files: Mapping[str, bytes], kind: str, *, component: str = "", expect: Mapping[str, Any] | None = None, require_approval: bool = True) -> WebResult:
+    def verify(self, files: Mapping[str, bytes], kind: str, *, component: str = "", expect: Mapping[str, Any] | None = None, require_approval: bool = True, cancel: threading.Event | None = None) -> WebResult:
+        # Per-attempt state: concurrent runs must never share a cancel event or deadline.
+        attempt = copying.copy(self)
+        attempt._cancel, attempt._deadline = cancel, time.monotonic() + self._timeout
+        started = time.monotonic()
+        try:
+            result = attempt._verify(files, kind, component=component, expect=expect, require_approval=require_approval)
+        except (_Interrupted, subprocess.TimeoutExpired) as exc:
+            status = exc.status if isinstance(exc, _Interrupted) else "TIMEOUT"
+            result = WebResult("NOT_RUN", f"website verification ended with {status}", kind, exec_status=status)
+        return replace(result, duration_ms=int((time.monotonic() - started) * 1000))
+
+    def _verify(self, files: Mapping[str, bytes], kind: str, *, component: str, expect: Mapping[str, Any] | None, require_approval: bool) -> WebResult:
         if kind not in WEB_KINDS:
             raise WebVerificationError(f"no website verification exists for {kind}; it covers {', '.join(WEB_KINDS)}")
         image_id = self.image_id()
@@ -242,24 +286,42 @@ class WebVerifier:
         copy, spec, ledger, edge = folder / "work", folder / "spec", folder / "ledger", folder / "edge"
         for f in (spec, ledger, edge):
             f.mkdir(parents=True, exist_ok=True)
-        skipped = prepare_copy(files, copy, component=component)
-        if expect is not None:
-            (spec / "expect.json").write_text(json.dumps(expect), encoding="utf-8")
         install: dict[str, Any] | None = None
         audit: tuple[dict[str, Any], ...] = ()
+        result = WebResult("NOT_RUN", "verification did not finish", kind, image_id=image_id)
+        phase = "prepare"
         try:
+            skipped = prepare_copy(files, copy, component=component)
+            if expect is not None:
+                (spec / "expect.json").write_text(json.dumps(expect), encoding="utf-8")
             if kind == "react-vite":
                 if not (copy / "package.json").is_file():
-                    return WebResult("FAILED", "a React + Vite component needs package.json", kind, image_id=image_id)
+                    raise WebVerificationError("a React + Vite component needs package.json")
+                phase = "install"
                 install, audit = self._install(run_id, copy, ledger, edge, image_id)
-                if not install.get("ok"):
-                    return judge(kind, "", install=install, image_id=image_id)
-            done = self._verify_container(run_id, copy, spec if expect is not None else None, kind, image_id)
-            result = judge(kind, done.stdout + "\n" + done.stderr, install=install, image_id=image_id)
-            return WebResult(result.verdict, result.reason, result.kind, result.stages, result.pages, result.blocked_external, result.install, audit, image_id, result.output_tail,
-                             {"skipped_files": skipped, "copy": str(copy)})  # fmt: skip
+            if install is not None and install.get("ok") is not True:
+                result = judge(kind, "", install=install, image_id=image_id)
+            else:
+                phase = "verify"
+                done = self._verify_container(run_id, copy, spec if expect is not None else None, kind, image_id)
+                if self._cancel is not None and self._cancel.is_set():
+                    raise _Interrupted("CANCELLED")
+                result = judge(kind, done.stdout + "\n" + done.stderr, install=install, image_id=image_id)
+                if done.returncode != 0 and result.verdict != "FAILED":
+                    result = replace(result, verdict="FAILED", reason=f"verification container exited with {done.returncode}", exec_status="FAILED")
+            result = replace(result, proxy_audit=audit, evidence={"skipped_files": skipped, "files": sorted(files), "phase": phase}, exec_status="SUCCEEDED" if result.passed else "FAILED")
+        except (_Interrupted, subprocess.TimeoutExpired) as exc:
+            status = exc.status if isinstance(exc, _Interrupted) else "TIMEOUT"
+            result = WebResult("NOT_RUN" if status == "CANCELLED" else "FAILED", f"{phase}: {status}", kind, install=install, proxy_audit=audit, image_id=image_id, evidence={"phase": phase}, exec_status=status)
+        except WebVerificationError as exc:
+            result = WebResult("NOT_RUN", f"{phase}: {exc}", kind, install=install, proxy_audit=audit, image_id=image_id, evidence={"phase": phase}, exec_status="ERROR")
+        except OSError as exc:
+            result = WebResult("NOT_RUN", f"{phase}: Docker unavailable ({type(exc).__name__})", kind, image_id=image_id, exec_status="UNAVAILABLE")
         finally:
-            self._cleanup(run_id)
+            cleaned = self._cleanup(run_id)
+        if not cleaned:
+            return replace(result, verdict="NOT_RUN", reason="website resources could not be confirmed removed", cleanup="failed", exec_status="ERROR")
+        return replace(result, cleanup="removed")
 
     # --- the containers ------------------------------------------------------------------------------------
 
@@ -287,13 +349,18 @@ class WebVerifier:
             raise WebVerificationError(f"the install proxy could not join the install network: {joined.stderr.strip()[-300:]}")
         proxy = "http://installproxy:3128"
         done = self._docker_call([
-            "run", "--rm", "--name", n["install"], "--label", LABEL, "--network", n["internal"], *_hardening(memory=self._memory, pids=512), "--cpus", str(self._cpus),
+            "run", "--rm", "--name", n["install"], "--label", LABEL, "--network", n["internal"], *_hardening(memory=self._memory, pids=self._pids), "--cpus", str(self._cpus),
             "--tmpfs", "/tmp:rw,exec,size=1536m", "-e", "HOME=/tmp", "-e", f"HTTPS_PROXY={proxy}", "-e", f"https_proxy={proxy}", "-e", f"npm_config_https_proxy={proxy}",
             "-e", f"npm_config_proxy={proxy}", "-e", "NO_PROXY=", "-v", f"{copy}:/work", image_id, "node", "/opt/verify/install-deps.mjs",
         ], timeout=self._timeout)  # fmt: skip
         report = _report_json(_INSTALL, done.stdout) or {"ok": False, "detail": (done.stdout + done.stderr)[-1_500:] or f"the installer exited with {done.returncode}"}
+        if done.returncode != 0:
+            report = {"ok": False, "detail": f"the installer exited with {done.returncode}"}
         audit_file = ledger / "install-proxy.jsonl"
-        rows = tuple(json.loads(line) for line in audit_file.read_text(encoding="utf-8").splitlines() if line.strip()) if audit_file.is_file() else ()
+        try:
+            rows = tuple(json.loads(line) for line in audit_file.read_text(encoding="utf-8").splitlines() if line.strip()) if audit_file.is_file() else ()
+        except ValueError as exc:
+            raise WebVerificationError("the install proxy audit could not be read") from exc
         return report, rows
 
     def _verify_container(self, run_id: str, copy: Path, spec: Path | None, kind: str, image_id: str) -> subprocess.CompletedProcess[str]:
@@ -301,13 +368,22 @@ class WebVerifier:
         mounts = ["-v", f"{copy}:/work"] + (["-v", f"{spec}:/spec:ro"] if spec else [])
         argv = ["node", "/opt/verify/verify-web.mjs", "--kind", kind] + (["--expect", "/spec/expect.json"] if spec else [])
         return self._docker_call([
-            "run", "--rm", "--name", n["verify"], "--label", LABEL, "--network", "none", *_hardening(memory=self._memory, pids=512), "--cpus", str(self._cpus),
+            "run", "--rm", "--name", n["verify"], "--label", LABEL, "--network", "none", *_hardening(memory=self._memory, pids=self._pids), "--cpus", str(self._cpus),
             "--tmpfs", "/tmp:rw,exec,size=1536m", "--shm-size", "512m", "-e", "HOME=/tmp", *mounts, image_id, *argv,
         ], timeout=self._timeout)  # fmt: skip
 
-    def _cleanup(self, run_id: str) -> None:
+    def _cleanup(self, run_id: str) -> bool:
         n = self._names(run_id)
-        for container in (n["install"], n["verify"], n["proxy"]):
-            self._docker_call(["rm", "-f", container], timeout=60)
-        for network in (n["internal"], n["egress"]):
-            self._docker_call(["network", "rm", network], timeout=60)
+        self._cleaning = True
+        clean = True
+        for resource, remove, inspect in (
+            *((n[key], ["rm", "-f"], ["ps", "-aq"]) for key in ("install", "verify", "proxy")),
+            *((n[key], ["network", "rm"], ["network", "ls", "-q"]) for key in ("internal", "egress")),
+        ):
+            try:
+                self._docker_call([*remove, resource], timeout=10)
+                check = self._docker_call([*inspect, "--filter", f"name=^/?{resource}$"], timeout=10)
+                clean = clean and check.returncode == 0 and not check.stdout.strip()
+            except (OSError, subprocess.TimeoutExpired, _Interrupted):
+                clean = False
+        return clean

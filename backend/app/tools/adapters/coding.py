@@ -57,6 +57,8 @@ from app.tools.base import ErrorClass, ExternalStep, RecoveryInfo, RiskLevel, To
 from app.tools.gates import MAX_TASKS
 from app.tools.registry import ToolRegistry
 from app.verification import acceptance
+from app.verification.backends import BackendResult, SingleStageBackend, VerificationBackend, WebsiteBackend, judge_website
+from app.verification.web import WEB_KINDS, WebVerifier
 from app.verification.recipes import VITEST_JSON, RecipeError, acceptance_spec, dependency_problems, judge_recipe, readiness, recipe_for, recipe_spec
 from app.verification.report import build_report
 from app.verification.results import Criterion, CriterionStatus, TestCounts, Verdict, VerificationResult, failure_kind, judge, judge_criteria
@@ -80,6 +82,7 @@ class CodingRuntime:
     sandbox: SandboxRunner
     gpt_label: str = "OpenAI Responses API"
     stop_policy: StopPolicy = field(default_factory=StopPolicy)
+    web: WebVerifier | None = None
 
 
 # --- Arguments ------------------------------------------------------------------------------------
@@ -598,11 +601,12 @@ class _AcceptancePlan:
 @dataclass(frozen=True)
 class _VerifyPlan:
     sandbox: SandboxRunner
-    spec: ExecSpec
+    spec: ExecSpec | None
     criteria: tuple[Criterion, ...]
     digest: str
     independent: _AcceptancePlan | None = None  # the evaluator's frozen suite, when the project has one
     components: tuple[tuple[str, Any, ExecSpec], ...] = ()  # (name, recipe, spec) per component of a multi-stack plan
+    backend: VerificationBackend | None = None
 
 
 @dataclass(frozen=True)
@@ -611,11 +615,14 @@ class _Verified:
     independent: ExecResult | None  # the frozen acceptance suite; None when it did not run
     components: dict[str, ExecResult] = field(default_factory=dict)  # per component of a multi-stack plan
     independent_components: dict[str, ExecResult] = field(default_factory=dict)  # each front-end component's frozen files
+    backend: BackendResult | None = None
 
 
 def _begin_submit(runtime: CodingRuntime, ctx: ToolContext, args: SubmitImplementationArgs) -> _VerifyPlan:
     if any(c["name"] for c in _components(ctx)):
         return _begin_components_submit(runtime, ctx, args)
+    if ctx.project.stack in WEB_KINDS:
+        return _begin_website_submit(runtime, ctx, args)
     run = ctx.run
     stack = ctx.catalog.get(ctx.project.stack or "")
     problems = [f"task {t.order} ({t.title}) is {t.status}" for t in _unfinished_tasks(ctx)]
@@ -637,6 +644,28 @@ def _begin_submit(runtime: CodingRuntime, ctx: ToolContext, args: SubmitImplemen
     _record(ctx, "verification.started", {"command": spec.command, "image": spec.image, "container": spec.container_name, "repairs_so_far": run.repairs, "summary": args.summary,
                                           "independent_acceptance": independent is not None})  # fmt: skip
     return _VerifyPlan(runtime.sandbox, spec, criteria, runtime.candidates.digest(run.id), independent)
+
+
+def _begin_website_submit(runtime: CodingRuntime, ctx: ToolContext, args: SubmitImplementationArgs) -> _VerifyPlan:
+    """Prepare the website path without weakening the stack release/readiness gate."""
+    blocked = _verification_blocked(ctx)
+    if blocked:
+        raise ToolError(ErrorClass.POLICY_REFUSED, "verification is blocked", [b["reason"] for b in blocked],
+                        after_rollback=partial(_stop_blocked, runtime, ctx, blocked))
+    if runtime.web is None:
+        raise ToolError(ErrorClass.POLICY_REFUSED, "the website verification backend is not configured")
+    if _unfinished_tasks(ctx) or not runtime.candidates.exists(ctx.run.id):
+        raise ToolError(ErrorClass.VALIDATION_FAILED, "the implementation is not ready to verify")
+    if _frozen_suite(runtime, ctx) is not None:
+        raise ToolError(ErrorClass.POLICY_REFUSED, "the existing Python/Vitest acceptance suite cannot be replaced by website smoke checks")
+    criteria = tuple(Criterion(c.code, c.priority) for c in ctx.session.scalars(
+        select(AcceptanceCriterion).where(AcceptanceCriterion.run_id == ctx.run.id).order_by(AcceptanceCriterion.code)))
+    backend = WebsiteBackend(runtime.web, acceptance.read_tree(runtime.candidates.path(ctx.run.id)), ctx.project.stack)
+    if ctx.run.state is not RunState.VERIFYING:
+        _change_state(ctx, RunState.VERIFYING, "submit_implementation accepted")
+    _record(ctx, "verification.started", {"backend": "website", "stack": ctx.project.stack, "summary": args.summary,
+                                        "repairs_so_far": ctx.run.repairs, "independent_acceptance": False})
+    return _VerifyPlan(runtime.sandbox, None, criteria, runtime.candidates.digest(ctx.run.id), backend=backend)
 
 
 def _acceptance_fs(settings: Settings) -> WorkspaceFS:
@@ -719,6 +748,9 @@ def _plan_component_acceptance(runtime: CodingRuntime, ctx: ToolContext, suite: 
 
 
 def _run_verification(plan: _VerifyPlan, cancel: threading.Event | None, progress: Progress) -> _Verified:
+    if plan.backend is not None:
+        result = plan.backend.run(cancel)
+        return _Verified(result.execution, None, backend=result)
     if plan.components:  # each component in its own recipe's runtime
         results = {name: _in_sandbox(plan.sandbox, spec, cancel) for name, _recipe, spec in plan.components}
         independent, fronts = None, {}
@@ -727,6 +759,7 @@ def _run_verification(plan: _VerifyPlan, cancel: threading.Event | None, progres
             independent = _in_sandbox(plan.sandbox, suite.spec, cancel) if suite.spec is not None else None
             fronts = {name: _in_sandbox(plan.sandbox, spec, cancel) for name, _recipe, spec in suite.components}
         return _Verified(next(iter(results.values())), independent, results, fronts)
+    assert plan.spec is not None
     tests = _in_sandbox(plan.sandbox, plan.spec, cancel)
     independent = None
     if plan.independent is not None and plan.independent.spec is not None and tests.status is ExecStatus.SUCCEEDED:  # the evaluator's tests judge only code whose own tests passed
@@ -736,7 +769,7 @@ def _run_verification(plan: _VerifyPlan, cancel: threading.Event | None, progres
 
 def _in_sandbox(sandbox: SandboxRunner, spec: ExecSpec, cancel: threading.Event | None) -> ExecResult:
     try:
-        return sandbox.run(spec, cancel=cancel)
+        return SingleStageBackend(sandbox, spec).run(cancel).execution
     except SandboxUnavailable as exc:
         return ExecResult.unavailable(spec, str(exc))
     except SandboxError as exc:
@@ -748,7 +781,12 @@ def _finish_submit(runtime: CodingRuntime, ctx: ToolContext, plan: _VerifyPlan, 
     result = verified.tests
     if plan.independent is not None:
         acceptance.discard(_acceptance_fs(ctx.settings), run.id)
-    verification = _judge_components(ctx, plan, verified) if plan.components else replace(judge(result, plan.criteria), fingerprint=plan.digest)
+    if verified.backend is not None and verified.backend.website is not None:
+        website = verified.backend.website
+        _record(ctx, "verification.website", website.to_dict())
+        verification = judge_website(website, plan.criteria, plan.digest)
+    else:
+        verification = _judge_components(ctx, plan, verified) if plan.components else replace(judge(result, plan.criteria), fingerprint=plan.digest)
     run.verification_json = json.dumps(verification.to_dict())
     for row in ctx.session.scalars(select(AcceptanceCriterion).where(AcceptanceCriterion.run_id == run.id)):
         judged = next((c for c in verification.criteria if c.code == row.code), None)

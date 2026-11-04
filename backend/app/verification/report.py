@@ -64,6 +64,7 @@ def build_report(session: Session, run: Run, project: Project, *, gpt: str, sand
         "coding_attempts": [{k: a.get(k) for k in ("task_order", "provider", "status", "kept", "restored", "quarantined", "phase", "detail", "changes", "violations")}
                             for a in by_type.get("coding.finished", [])],
         "verifications": by_type.get("verification.finished", []),
+        "website_verifications": by_type.get("verification.website", []),
         "repositories": {"searches": searches, "evaluated": by_type.get("repository.evaluated", []), "decision": (by_type.get("repository.decision") or [None])[-1],
                          "decisions": by_type.get("repository.decision", []), "imported": (by_type.get("repository.imported") or [None])[-1], "imports": by_type.get("repository.imported", [])},
         "acceptance": independent,
@@ -95,6 +96,11 @@ def render_markdown(report: dict[str, Any]) -> str:
     for number, check in enumerate(report["verifications"], start=1):
         lines.append(f"- Run {number}: {check['verdict']}, {check['passed']} passed of {check['ran']}, exit code {check['exit_code']}, container {check['container']}. {check['reason']}")
         lines += [f"  - failed: {name}" for name in check["failed_names"]]
+    if report.get("website_verifications"):
+        lines += ["", "## Website smoke checks (not independent acceptance)"]
+        for check in report["website_verifications"]:
+            lines.append(f"- {check['kind']}: {check['verdict']}. {check['reason']} Cleanup: {check['cleanup']}.")
+            lines += [f"  - {s['name']}: {'passed' if s['ok'] else 'failed'}; {s['detail']}" for s in check["stages"]]
     lines += ["", "## Acceptance criteria (proved by the provider's own tests)", *[f"- {c['code']} [{c['priority']}]: {c['status']}" for c in report["criteria"]], ""]
     independent = report.get("acceptance", _NOT_CONFIGURED)
     lines += ["## Independent acceptance (the evaluator's frozen suite)"]

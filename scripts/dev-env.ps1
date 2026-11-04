@@ -5,13 +5,15 @@
 # Nothing here changes Windows settings or persists after the session ends.
 
 $cacheRoot = 'D:\DevPilotCache'
-foreach ($dir in "$cacheRoot\temp", "$cacheRoot\pip") {
+foreach ($dir in "$cacheRoot\temp", "$cacheRoot\pip", "$cacheRoot\uv", "$cacheRoot\npm") {
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
 }
 
 $env:TEMP = "$cacheRoot\temp"
 $env:TMP = "$cacheRoot\temp"
 $env:PIP_CACHE_DIR = "$cacheRoot\pip"
+$env:UV_CACHE_DIR = "$cacheRoot\uv"
+$env:npm_config_cache = "$cacheRoot\npm"
 $env:PIP_DISABLE_PIP_VERSION_CHECK = '1'
 $env:PIP_REQUIRE_VIRTUALENV = '1'   # refuse accidental global installs
 $env:PYTHONUTF8 = '1'

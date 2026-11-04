@@ -42,6 +42,7 @@ from app.tools.executor import ToolExecutor
 from app.tools.gates import register_phase2_tools
 from app.tools.policy import PolicyEngine
 from app.tools.registry import ToolRegistry
+from app.verification.web import WebVerifier
 
 API_PREFIX = "/api/v1"
 UI_DIR = Path(__file__).resolve().parent / "ui"  # the read-only dashboard: static files that call the API with the user's token
@@ -59,6 +60,7 @@ def create_app(
     drive: DriveRuntime | None = None,
     gpt_label: str | None = None,
     start_policy: StartPolicy | None = None,
+    web_verifier: WebVerifier | None = None,
 ) -> FastAPI:
     """Build the app. `llm` replaces the OpenAI client (tests and the offline demo use FakeLLM). `gpt_label` names
     what `llm` really is in reports, for a real client wrapped in a guard (app/plan_cli.py). `start_policy` may refuse
@@ -98,7 +100,10 @@ def create_app(
         if sandbox is None:
             raise ValueError("a coding provider needs the sandbox: nothing could verify its work")
         candidates = WorkspaceFS(settings.coding_work_dir, max_file_bytes=settings.workspace_max_file_bytes, max_files=settings.workspace_max_files)
-        runtime = CodingRuntime(selector=coding, store=SqlAttemptStore(session_factory, redactor), candidates=CandidateWorkspaces(candidates), sandbox=sandbox, gpt_label=gpt_label)
+        web = web_verifier or WebVerifier(egress, docker=settings.docker_cli, work_dir=settings.coding_work_dir / "web-verification",
+                                         memory=settings.sandbox_memory, cpus=settings.sandbox_cpus, pids=settings.sandbox_pids_limit,
+                                         timeout=settings.sandbox_timeout_seconds, capture_bytes=settings.sandbox_max_output_bytes)
+        runtime = CodingRuntime(selector=coding, store=SqlAttemptStore(session_factory, redactor), candidates=CandidateWorkspaces(candidates), sandbox=sandbox, gpt_label=gpt_label, web=web)
         register_coding_tools(registry, runtime)
     if repositories is not None:
         register_repository_tools(registry, RepositoryRuntime(repositories))
