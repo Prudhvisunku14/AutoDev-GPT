@@ -145,6 +145,8 @@ def run_demo(emit: Callable[[str], None] = print, data_dir: Path | None = None) 
         devpilot_api_token=secrets.token_urlsafe(32),
         database_url=f"sqlite:///{(data_dir / 'demo.db').as_posix()}",
         workspaces_dir=data_dir / "workspaces",
+        openai_price_input_per_mtok=1.0,
+        openai_price_output_per_mtok=1.0,
         log_level="WARNING",
     )
     llm = calculator_llm()

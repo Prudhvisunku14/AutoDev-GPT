@@ -5,7 +5,8 @@ acceptance suite, that suite must have PASSED, and a failed one blocks the downl
 suite; its delivery is then offered only when the project's own tests passed in the sandbox, and it is labelled as
 verified by the generated tests only (`verification_level`). What may never leave the workspace is left out by name (environment
 files, keys, version-control and tool folders, caches, local databases) and by content (a configured secret or a
-credential format, `Redactor.contains_secret`), and the archive's manifest lists every file left out and why.
+credential format, `Redactor.contains_secret`). If that would omit source or project configuration, delivery is blocked
+instead of claiming the incomplete archive is the verified project. The manifest lists excluded files when delivery is safe.
 
 Pure functions over (path, bytes) pairs: the callers read the files through WorkspaceFS, which keeps every path jailed.
 """
@@ -19,6 +20,7 @@ import zipfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import PurePosixPath
 from typing import Any
 
 from app.core.redaction import Redactor
@@ -28,12 +30,17 @@ MAX_ARCHIVE_BYTES = 50_000_000  # the project's files together, before compressi
 REPORT_FOLDER = "devpilot-verification"
 
 _EXCLUDED_DIRS = frozenset({
-    ".git", ".hg", ".svn", ".opencode", ".devpilot", ".venv", "venv", "env", "node_modules", "__pycache__", ".pytest_cache",
-    ".mypy_cache", ".ruff_cache", ".tox", ".idea", ".vscode", ".cache", "dist", "build", "coverage", ".next",
+    ".git", ".hg", ".svn", ".opencode", ".devpilot", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache", ".tox", ".idea", ".vscode", ".cache", "dist", ".next",
 })  # fmt: skip
 _EXCLUDED_NAMES = frozenset({".npmrc", ".pypirc", ".netrc", ".git-credentials", "opencode.json", "opencode.jsonc", ".DS_Store", "Thumbs.db"})
 _EXCLUDED_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".pyc", ".pyo", ".db", ".sqlite", ".sqlite3", ".db-wal", ".db-shm", ".sqlite-wal", ".sqlite-shm", ".log")
 _KEY_FILE = re.compile(r"^id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$")
+_SOURCE_SUFFIXES = frozenset({
+    ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".html", ".htm", ".css", ".scss", ".sass",
+    ".json", ".toml", ".yaml", ".yml", ".sh", ".ps1", ".bat", ".cmd", ".go", ".rs", ".java", ".cs", ".php",
+    ".md", ".txt", ".lock", ".ini", ".cfg", ".xml",
+})  # fmt: skip
 
 
 @dataclass(frozen=True)
@@ -112,6 +119,20 @@ def name_rule(path: str) -> str | None:
         return "a key file"
     if lowered.endswith(_EXCLUDED_SUFFIXES):
         return "a key, compiled, log or local database file"
+    return None
+
+
+def omitted_source_reason(selection: Selection) -> str | None:
+    """Do not offer a verified archive if a source/config file was removed by packaging safeguards."""
+    omitted = [
+        item.path for item in selection.excluded
+        if PurePosixPath(item.path).suffix.lower() in _SOURCE_SUFFIXES
+        and item.reason.startswith(("it contains", "could not be read", "the archive would pass"))
+    ]
+    if omitted:
+        names = ", ".join(omitted[:3])
+        more = f" and {len(omitted) - 3} more" if len(omitted) > 3 else ""
+        return f"verified source file(s) {names}{more} could not be included safely; refusing to deliver an incomplete verified project"
     return None
 
 

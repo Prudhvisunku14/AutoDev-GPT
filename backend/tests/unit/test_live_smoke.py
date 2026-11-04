@@ -31,6 +31,7 @@ def env_file(tmp_path: Path) -> Path:
     path = tmp_path / ".env"
     path.write_text(
         f"OPENAI_API_KEY={FAKE_OPENAI_KEY}\nOPENAI_MODEL=test-model\n"
+        "OPENAI_PRICE_INPUT_PER_MTOK=1.0\nOPENAI_PRICE_OUTPUT_PER_MTOK=1.0\n"
         "MAX_TURNS=50\nRUN_MAX_TOKENS=1000000\nOPENAI_MAX_RETRIES=5\nOPENAI_MAX_OUTPUT_TOKENS=99999\n",
         encoding="utf-8",
     )

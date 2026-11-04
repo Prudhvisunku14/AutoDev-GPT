@@ -92,6 +92,19 @@ def test_budget_and_capabilities_report_enforced_backend_state(client: TestClien
     assert capabilities.json()["can_build"] is False
 
 
+def test_unknown_prices_block_a_start_even_when_the_legacy_approval_setting_is_off(
+    client: TestClient, auth: dict[str, str]
+) -> None:
+    project = _create_project(client, auth)
+    run = client.post(f"{API}/projects/{project['id']}/runs", headers=auth).json()
+
+    response = client.post(f"{API}/runs/{run['id']}/start", headers=auth)
+
+    assert response.status_code == 409
+    assert "No spending limit can be enforced" in response.json()["detail"]
+    assert client.get(f"{API}/runs/{run['id']}", headers=auth).json()["state"] == "CREATED"
+
+
 def test_dashboard_selected_stack_requires_explicit_spend_approval(client: TestClient, auth: dict[str, str]) -> None:
     project = _create_project(client, auth, stack="python-cli")
     run = client.post(f"{API}/projects/{project['id']}/runs", headers=auth).json()

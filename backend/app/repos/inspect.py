@@ -142,10 +142,14 @@ def inspect_project(files: Mapping[str, int], read: Callable[[str], str | None],
         py_folders[_folder(manifest_path)] += (read(manifest_path) or "") + "\n"
     for folder, text in sorted(py_folders.items()):
         components.append(_py_component(folder, text))
-    if not py_folders and any(p.endswith(".py") for p in names) and not components:
+    html = sorted(p for p in names if p.lower().endswith((".html", ".htm")))
+    has_site_entry = any(
+        _depth(_folder(path)) <= MAX_COMPONENT_DEPTH and PurePosixPath(path).name.lower() == "index.html"
+        for path in html
+    )
+    if not py_folders and any(p.endswith(".py") for p in names) and not components and not has_site_entry:
         components.append(Component("", "python", "Python"))
 
-    html = sorted(p for p in names if p.lower().endswith((".html", ".htm")))
     if not components and html:
         roots = [p for p in html if _depth(_folder(p)) <= MAX_COMPONENT_DEPTH and PurePosixPath(p).name.lower() == "index.html"]
         folder = _folder(roots[0]) if roots else ""

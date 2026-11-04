@@ -30,7 +30,8 @@ def _passed(spec: ExecSpec) -> ExecResult:
 
 def _client(tmp_path: Path, llm: FakeLLM, coding: list[ScriptedAttempt] | None = None) -> TestClient:
     selector = ProviderSelector([ProviderOption(PROVIDER_NAME, SimulatedLauncher(coding or []), frozenset({"code_generation", "test_generation"}), simulated=True)])
-    return TestClient(create_app(make_settings(tmp_path), llm=llm, sandbox=FakeSandbox(_passed), coding=selector))
+    settings = make_settings(tmp_path, openai_price_input_per_mtok=1.0, openai_price_output_per_mtok=1.0)
+    return TestClient(create_app(settings, llm=llm, sandbox=FakeSandbox(_passed), coding=selector))
 
 
 def _run(client: TestClient) -> dict:

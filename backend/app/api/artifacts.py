@@ -48,6 +48,8 @@ def _files(fs: Any, project_id: str) -> tuple[list[str], Callable[[str], bytes]]
 def describe(report: dict[str, Any] | None, paths: list[str], read: Callable[[str], bytes], redactor: Redactor, *, note: str | None = None) -> ArtifactOut:
     reason = artifact.unavailable_reason(report)
     selection, _ = artifact.select(paths, read, redactor) if reason is None else (artifact.Selection((), ()), {})
+    if reason is None:
+        reason = artifact.omitted_source_reason(selection)
     if reason is None and not selection.included:
         reason = "no file of the project can be packaged"
     simulated = list(((report or {}).get("provenance") or {}).get("simulated") or [])
@@ -68,6 +70,9 @@ def send(report: dict[str, Any] | None, paths: list[str], read: Callable[[str], 
     if reason is not None or report is None:
         raise HTTPException(status.HTTP_409_CONFLICT, f"Nothing to download: {reason}")
     selection, data = artifact.select(paths, read, redactor)
+    reason = artifact.omitted_source_reason(selection)
+    if reason is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Nothing to download: {reason}")
     if not selection.included:
         raise HTTPException(status.HTTP_409_CONFLICT, "Nothing to download: no file of the project can be packaged")
     body = artifact.build_zip(report, selection, data, redactor, when=when, provenance_note=note)

@@ -25,11 +25,12 @@ STACK_NAMES = {
 
 _W = r"(?<![\w-])"  # a word start that a hyphen does not count as
 _MOBILE = re.compile(_W + r"(mobile app|android|ios app|iphone app|swift|kotlin|flutter|react native|expo app)\b", re.IGNORECASE)
-_OTHER_FRAMEWORKS = re.compile(_W + r"(vue(?:\.js)?|angular|svelte(?:kit)?|next\.?js|nuxt|django|flask|express(?:\.js)?|laravel|rails|ruby on rails|spring boot|asp\.net|php|wordpress|gatsby|astro|remix)\b", re.IGNORECASE)
+_OTHER_FRAMEWORKS = re.compile(_W + r"(vue(?:\.js)?|angular|svelte(?:kit)?|next\.?js|nuxt|django|flask|express\.js|express(?:\s+(?:app|server|api|backend))|laravel|ruby on rails|rails(?:\s+(?:app|server|api|backend))|spring boot|asp\.net|php|wordpress|gatsby|astro|remix)\b", re.IGNORECASE)
 _FULLSTACK = re.compile(_W + r"(fastapi|full[- ]?stack|back[- ]?end|rest api|api server|database|login|sign[- ]?up|authentication|rag|retrieval[- ]augmented|vector (?:store|search|database)|chatbot with documents)\b", re.IGNORECASE)
 _REACT = re.compile(_W + r"(react|vite|typescript|tsx|single[- ]page|spa|dashboard|web app(?:lication)?|interactive)\b", re.IGNORECASE)
 _STATIC = re.compile(_W + r"(static|plain html|html(?:/| and | )css|landing page|homepage|home page|portfolio|brochure|one[- ]page)\b", re.IGNORECASE)
 _WEBSITE = re.compile(_W + r"(website|web ?site|web ?page|webpage|homepage|home page|landing page|pages?|front[- ]?end|site|html|css|dashboard|portfolio|web app(?:lication)?|react|vite)\b", re.IGNORECASE)
+_EXPLICIT_WEB = re.compile(_W + r"(website|web ?site|web ?page|webpage|homepage|home page|landing page|front[- ]?end|html|css|react|vite|single[- ]page|spa|web app(?:lication)?)\b", re.IGNORECASE)
 _CLI = re.compile(_W + r"(command[- ]line|cli|terminal|console app|python (?:tool|script|program)|script)\b", re.IGNORECASE)
 _REBUILD = re.compile(_W + r"(rebuild|re-build|recreate|re-create|redesign|rewrite|from scratch|start over|clone)\b", re.IGNORECASE)
 _MODIFY = re.compile(_W + r"(modify|update|change|fix|add|extend|improve|edit|refactor|upgrade|enhance|replace|remove)\b", re.IGNORECASE)
@@ -54,6 +55,8 @@ def classify(text: str) -> BuildRequest:
     unsupported = mobile.group(1) if mobile else other.group(1) if other else None
     if mobile:
         kind, hint = "mobile", None
+    elif _CLI.search(words) and not _EXPLICIT_WEB.search(words):
+        kind, hint = "cli", "python-cli"
     elif _FULLSTACK.search(words) and (_WEBSITE.search(words) or _REACT.search(words)):
         kind, hint = "fullstack", "react-fastapi"
     elif _WEBSITE.search(words) or _REACT.search(words):

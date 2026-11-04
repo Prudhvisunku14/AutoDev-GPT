@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     openai_timeout_seconds: float = Field(default=120.0, gt=0)
     openai_max_retries: int = Field(default=2, ge=0, le=10)
     openai_max_output_tokens: int | None = Field(default=None, gt=0)
-    # USD per 1M tokens. Unset means "cost unknown": the token cap is enforced instead.
+    # USD per 1M tokens. Unset means "cost unknown"; the API refuses to start runs without an enforceable USD cap.
     openai_price_input_per_mtok: float | None = Field(default=None, ge=0)
     openai_price_output_per_mtok: float | None = Field(default=None, ge=0)
 

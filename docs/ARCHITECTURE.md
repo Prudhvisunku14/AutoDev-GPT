@@ -153,7 +153,7 @@ while not run.is_terminal:
 4. Outputs are marked `delivered` only after GPT accepted the request that carried them. An interrupted or failed LLM call is therefore repeated with identical input and the same `previous_response_id`.
 5. No database transaction is open while GPT is being called.
 
-**Loop protection (in code):** `MAX_TURNS`, `MAX_TOOL_CALLS`, `RUN_MAX_TOKENS`, `RUN_BUDGET_USD` (enforced when prices are configured), `RUN_WALL_CLOCK_SECONDS` of *active* time (time spent waiting for approval does not count), `MAX_REPEATED_TOOL_CALLS` identical consecutive calls, and `MAX_NUDGES`. When `OPENAI_PRICE_*` is not set, the run records `cost_known = false`, cost stays unreported rather than guessed, and `RUN_MAX_TOKENS` is the hard cap.
+**Loop protection (in code):** `MAX_TURNS`, `MAX_TOOL_CALLS`, `RUN_MAX_TOKENS`, `RUN_BUDGET_USD`, `RUN_WALL_CLOCK_SECONDS` of *active* time (time spent waiting for approval does not count), `MAX_REPEATED_TOOL_CALLS` identical consecutive calls, and `MAX_NUDGES`. The API refuses to start a run unless both `OPENAI_PRICE_*` values are set, so the dollar cap can be enforced. An already-running or directly invoked orchestrator records `cost_known = false` if prices are absent; costs are never guessed and `RUN_MAX_TOKENS` remains a separate limit.
 
 ### 5.2 `ToolExecutor.execute` pipeline
 

@@ -163,7 +163,9 @@ Offline demo. It uses a scripted FakeLLM, with no key and no cost:
 
 To use real GPT, edit `.env` yourself:
 - set `OPENAI_API_KEY` and `OPENAI_MODEL`
-- optionally set `OPENAI_PRICE_INPUT_PER_MTOK` and `OPENAI_PRICE_OUTPUT_PER_MTOK`, so spend is tracked against `RUN_BUDGET_USD`
+- set `OPENAI_PRICE_INPUT_PER_MTOK` and `OPENAI_PRICE_OUTPUT_PER_MTOK`, so the backend can enforce `RUN_BUDGET_USD`
+
+The API refuses to start a run while either price is unknown; a token limit alone is not represented as a dollar spending cap.
 
 Then check that the key can see the model. This uses no tokens:
 

@@ -43,6 +43,7 @@ def test_a_react_vite_typescript_site_is_profiled_with_pages_routes_components_a
 
 def test_a_static_site_and_a_react_fastapi_project_are_recognised() -> None:
     assert profile({"index.html": "<h1>", "about.html": "", "css/site.css": "", "img/a.png": ""}).stack == "static-html"
+    assert profile({"index.html": "<h1>", "scripts/build.py": "print('prepare assets')"}).stack == "static-html"
     full = profile({"frontend/package.json": pkg({"react": "1", "react-dom": "1"}, {"vite": "5"}), "backend/requirements.txt": "fastapi==0.110\nuvicorn\n", "backend/main.py": ""})
     assert full.stack == "react-fastapi" and {c.kind for c in full.components} == {"react-vite", "fastapi"}
 
@@ -81,6 +82,25 @@ def test_the_example_request_names_the_repository_a_website_and_an_adapt_intent(
 def test_requests_are_classified_without_hardcoding_any_project(text: str, kind: str, hint: str, intent: str) -> None:
     request = classify(text)
     assert (request.kind, request.stack_hint, request.intent) == (kind, hint, intent)
+
+
+@pytest.mark.parametrize("text", [
+    "Build a Python command-line dashboard with pages for each report",
+    "Create a CLI script that prints TypeScript package pages as a report",
+])
+def test_explicit_cli_intent_is_not_overridden_by_ambiguous_web_words(text: str) -> None:
+    request = classify(text)
+
+    assert request.kind == "cli"
+    assert request.stack_hint == "python-cli"
+
+
+@pytest.mark.parametrize("text", [
+    "Use express delivery to create a Python command-line tool",
+    "Create a Python CLI report about railway rails",
+])
+def test_common_words_are_not_mistaken_for_unsupported_web_frameworks(text: str) -> None:
+    assert classify(text).unsupported is None
 
 
 def test_a_repository_url_that_is_unsafe_is_refused_at_classification() -> None:

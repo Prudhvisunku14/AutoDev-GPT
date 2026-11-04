@@ -28,7 +28,10 @@ def fake_llm() -> FakeLLM:
 
 @pytest.fixture
 def app(tmp_path: Path, fake_llm: FakeLLM) -> FastAPI:
-    return create_app(make_settings(tmp_path, sse_poll_seconds=0.02, sse_max_stream_seconds=5), llm=fake_llm)
+    return create_app(make_settings(
+        tmp_path, sse_poll_seconds=0.02, sse_max_stream_seconds=5,
+        openai_price_input_per_mtok=1.0, openai_price_output_per_mtok=1.0,
+    ), llm=fake_llm)
 
 
 def _new_run(client: TestClient, auth: dict[str, str], requirement: str = "Create a Python calculator application.") -> str:
@@ -51,7 +54,10 @@ def _settled(run: dict[str, Any]) -> bool:
 
 
 def test_start_without_openai_config_is_503_and_safe(tmp_path: Path, auth: dict[str, str]) -> None:
-    app = create_app(make_settings(tmp_path, openai_api_key=FAKE_OPENAI_KEY, openai_model=None))
+    app = create_app(make_settings(
+        tmp_path, openai_api_key=FAKE_OPENAI_KEY, openai_model=None,
+        openai_price_input_per_mtok=1.0, openai_price_output_per_mtok=1.0,
+    ))
     with TestClient(app) as client:
         run_id = _new_run(client, auth)
         response = client.post(f"{API}/runs/{run_id}/start", headers=auth)

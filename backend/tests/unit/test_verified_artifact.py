@@ -3,7 +3,12 @@ from __future__ import annotations
 import io
 import zipfile
 
+import pytest
+from fastapi import HTTPException
+
+from app.api.artifacts import describe, send
 from app.core.redaction import Redactor
+from app.verification import artifact
 from app.verification.artifact import build_zip, select, unavailable_reason, verification_level
 
 
@@ -95,3 +100,24 @@ def test_archive_excludes_secrets_and_includes_project_and_verification_files() 
         assert any(name.endswith("/devpilot-verification/report.json") for name in names)
         assert not any(name.endswith("/.env") for name in names)
         assert b"configured-secret-value" not in bundle.read(next(name for name in names if name.endswith("/devpilot-verification/report.json")))
+
+
+@pytest.mark.parametrize("path", ["env/lib.py", "build/generated.py", "coverage/acceptance.py"])
+def test_source_directories_are_not_dropped_from_verified_downloads(path: str) -> None:
+    selection, data = select({path}, {path: b"print('verified')" }.__getitem__, Redactor([]))
+
+    assert [entry.path for entry in selection.included] == [path]
+    assert data[path] == b"print('verified')"
+
+
+def test_secret_shaped_verified_tests_block_the_archive_instead_of_being_silently_removed() -> None:
+    source = {"tests/test_auth.py": b"assert token.startswith('sk-" + b"a" * 24 + b"')"}
+    selection, _ = select(source, source.__getitem__, Redactor([]))
+
+    assert selection.excluded
+    assert "verified source" in (artifact.omitted_source_reason(selection) or "")
+    available = describe(report(), list(source), source.__getitem__, Redactor([]))
+    assert not available.available and "verified source" in (available.reason or "")
+    with pytest.raises(HTTPException) as error:
+        send(report(), list(source), source.__getitem__, Redactor([]))
+    assert error.value.status_code == 409

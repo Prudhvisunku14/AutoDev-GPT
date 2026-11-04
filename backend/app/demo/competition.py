@@ -211,7 +211,8 @@ def demo_settings(data_dir: Path, token: str) -> Settings:
     return Settings(
         _env_file=None,  # never the real .env: no real key is involved
         devpilot_api_token=token, database_url=f"sqlite:///{(data_dir / 'demo.db').as_posix()}", workspaces_dir=data_dir / "workspaces",
-        coding_checkpoints_dir=data_dir / "checkpoints", coding_work_dir=data_dir / "work", log_level="WARNING",
+        coding_checkpoints_dir=data_dir / "checkpoints", coding_work_dir=data_dir / "work",
+        openai_price_input_per_mtok=1.0, openai_price_output_per_mtok=1.0, log_level="WARNING",
     )  # type: ignore[call-arg]  # fmt: skip
 
 

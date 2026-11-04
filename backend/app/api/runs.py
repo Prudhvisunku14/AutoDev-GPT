@@ -94,9 +94,12 @@ def start_run(
     limit = settings.run_budget_usd
     if approval is None and (settings.require_spend_approval or (project.stack is not None and run.started_at is None)):
         raise HTTPException(status.HTTP_409_CONFLICT, f"This backend starts a run only with a spending approval: approve its limit of ${limit:.2f}")
+    if not settings.cost_known:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "No spending limit can be enforced: OPENAI_PRICE_INPUT_PER_MTOK and OPENAI_PRICE_OUTPUT_PER_MTOK are not set",
+        )
     if approval is not None:
-        if not settings.cost_known:
-            raise HTTPException(status.HTTP_409_CONFLICT, "No spending limit can be enforced: OPENAI_PRICE_INPUT_PER_MTOK and OPENAI_PRICE_OUTPUT_PER_MTOK are not set")
         if abs(approval.approved_max_usd - limit) > _SAME_DOLLARS:
             raise HTTPException(status.HTTP_409_CONFLICT, f"The approval is for ${approval.approved_max_usd:.2f}, but this run's enforced limit is ${limit:.2f}: approve that limit")
     if project.stack is not None and run.started_at is None:
