@@ -151,7 +151,7 @@ def test_without_a_history_folder_there_is_no_history(tmp_path: Path) -> None:
 
 
 def test_capabilities_name_every_setting_the_coding_engine_still_needs(tmp_path: Path) -> None:
-    with TestClient(create_app(make_settings(tmp_path), llm=FakeLLM())) as client:
+    with TestClient(create_app(make_settings(tmp_path, openai_max_retries=2), llm=FakeLLM())) as client:  # the default before retries were required off
         coding = client.get(f"{API_PREFIX}/capabilities", headers=HEADERS).json()["coding"]
     assert coding["ready"] is False
     for name in ("OPENCODE_ENABLED is false", "CODING_LIVE_APPROVED is false", "OPENCODE_MANIFEST_FILE is not set", "OPENCODE_MODEL", "OPENAI_PRICE_INPUT_PER_MTOK", "OPENAI_MAX_RETRIES must be 0"):

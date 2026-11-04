@@ -190,7 +190,8 @@ def run_demo(settings: Settings, *, llm: Any, coding: ProviderSelector, sandbox:
         project.raise_for_status()  # a suite the API refuses must stop the run before it starts, not be skipped
         project = project.json()
         run = client.post(f"{API}/projects/{project['id']}/runs", headers=headers).json()
-        client.post(f"{API}/runs/{run['id']}/start", headers=headers).raise_for_status()
+        # Reached only after --approve-spend matched the limit; the API requires the approval to name it.
+        client.post(f"{API}/runs/{run['id']}/start", json={"approved_max_usd": settings.run_budget_usd}, headers=headers).raise_for_status()
         while True:
             run = client.get(f"{API}/runs/{run['id']}", headers=headers).json()
             if run["ended_at"]:

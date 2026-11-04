@@ -125,7 +125,7 @@ def run_smoke(
             f"{api}/projects", json={"name": PROJECT_NAME, "requirement_text": REQUIREMENT}, headers=headers
         ).json()
         run = client.post(f"{api}/projects/{project['id']}/runs", headers=headers).json()
-        client.post(f"{api}/runs/{run['id']}/start", headers=headers).raise_for_status()
+        client.post(f"{api}/runs/{run['id']}/start", json={"approved_max_usd": settings.run_budget_usd}, headers=headers).raise_for_status()
         deadline = time.monotonic() + TIMEOUT_SECONDS * MAX_CALLS + 30
         while time.monotonic() < deadline:
             run = client.get(f"{api}/runs/{run['id']}", headers=headers).json()

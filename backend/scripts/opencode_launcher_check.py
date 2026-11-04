@@ -980,7 +980,7 @@ def _run_stack(world: World, name: str, gpt: list[Step], *, launcher_args: dict[
         original = app.state.workspace_fs.project_dir(project["id"])
         before = mvp._hashes(original)
         run = client.post(f"{API}/projects/{project['id']}/runs", headers=headers).json()
-        client.post(f"{API}/runs/{run['id']}/start", headers=headers).raise_for_status()
+        client.post(f"{API}/runs/{run['id']}/start", json={"approved_max_usd": config.run_budget_usd}, headers=headers).raise_for_status()
         deadline = time.monotonic() + wait
         while time.monotonic() < deadline:
             run = client.get(f"{API}/runs/{run['id']}", headers=headers).json()

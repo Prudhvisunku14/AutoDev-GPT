@@ -41,7 +41,7 @@ class ToolRegistry:
             raise ToolRegistrationError(f"tool {spec.name!r} has no handler")
         if spec.handler is not None and spec.external is not None:
             raise ToolRegistrationError(f"tool {spec.name!r} has both a handler and an external step")
-        if spec.auto_approved and spec.risk is not RiskLevel.EXTERNAL_NETWORK:
+        if spec.auto_approve is not None and spec.risk is not RiskLevel.EXTERNAL_NETWORK:
             raise ToolRegistrationError(f"tool {spec.name!r}: only EXTERNAL_NETWORK tools may skip approval, never {spec.risk}")
         _require_all_fields(spec.args_model, spec.name)
         self._schemas[spec.name] = {

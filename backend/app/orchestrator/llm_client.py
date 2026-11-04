@@ -113,6 +113,20 @@ class LLMClient(Protocol):
     def create(self, request: LLMRequest) -> LLMResponse: ...
 
 
+def spend_bound_problem(settings: Settings) -> str | None:
+    """Why a real GPT call's cost could not be bounded before it is sent, or None.
+
+    The budget reserves each call's worst case: its input, plus at most OPENAI_MAX_OUTPUT_TOKENS of output, sent with the
+    call so OpenAI enforces it. Without that cap the output, and so the cost, is unbounded. The SDK's own retries would
+    resend a call that may already have been billed while the budget counts one, so they must be off (rate limits are
+    still waited out by `rate_wait`, which only resends a refusal that was never processed)."""
+    if settings.openai_max_output_tokens is None:
+        return "OPENAI_MAX_OUTPUT_TOKENS is not set, so no GPT call's cost can be bounded before it is sent"
+    if settings.openai_max_retries != 0:
+        return f"OPENAI_MAX_RETRIES={settings.openai_max_retries}: a retried call may be billed twice but is counted once; set it to 0"
+    return None
+
+
 def llm_config_problem(settings: Settings, egress: EgressPolicy) -> str | None:
     """Why the real client cannot be used, or None. Never includes secret values."""
     if settings.openai_api_key is None:
@@ -125,7 +139,7 @@ def llm_config_problem(settings: Settings, egress: EgressPolicy) -> str | None:
     decision = egress.check("backend", base_url)
     if not decision.allowed:
         return f"OPENAI_BASE_URL is refused by the egress allowlist: {decision.reason}"
-    return None
+    return spend_bound_problem(settings)
 
 
 # A 429 whose code says "rate_limit_exceeded" is temporary and was never processed, so it is not billed. It may be waited out, a
@@ -151,6 +165,9 @@ class OpenAIResponsesClient:
     def __init__(self, settings: Settings, *, http_client: httpx.Client | None = None, sleep: Callable[[float], None] = time.sleep) -> None:
         if settings.openai_api_key is None or not settings.openai_model:
             raise LLMError(LLMErrorKind.CONFIG, "OPENAI_API_KEY and OPENAI_MODEL must be set")
+        unbounded = spend_bound_problem(settings)
+        if unbounded is not None:  # the same rule as llm_config_problem, here too, so no caller can build an uncapped client
+            raise LLMError(LLMErrorKind.CONFIG, unbounded)
         self._sleep = sleep
         self._model = settings.openai_model
         self._max_output_tokens = settings.openai_max_output_tokens
@@ -176,8 +193,7 @@ class OpenAIResponsesClient:
             kwargs["tool_choice"] = "required"
         if request.previous_response_id:
             kwargs["previous_response_id"] = request.previous_response_id
-        if self._max_output_tokens:
-            kwargs["max_output_tokens"] = self._max_output_tokens
+        kwargs["max_output_tokens"] = self._max_output_tokens  # always set: the constructor refuses a client without it
         tries, waited = 0, 0.0
         while True:
             try:

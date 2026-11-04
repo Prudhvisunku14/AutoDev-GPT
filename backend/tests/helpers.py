@@ -31,6 +31,9 @@ def make_settings(tmp_path: Path, **overrides: object) -> Settings:
         "egress_allowlist_file": ALLOWLIST_FILE,
         "openai_api_key": FAKE_OPENAI_KEY,
         "github_token": FAKE_GITHUB_TOKEN,
+        # What a real backend must set (llm_client.spend_bound_problem): an output cap the budget reserves, and no SDK retries.
+        "openai_max_output_tokens": 4_000,
+        "openai_max_retries": 0,
     }
     values.update(overrides)
     return Settings(_env_file=None, **values)  # type: ignore[arg-type]

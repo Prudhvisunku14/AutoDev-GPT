@@ -63,11 +63,11 @@ describe("Composer", () => {
     expect(within(details as HTMLElement).getByText(/OPENCODE_ENABLED is false/)).toBeInTheDocument();
   });
 
-  it("explains in one sentence that other kinds of application cannot be built yet, and does not open the approval", async () => {
+  it("declines a stack the backend cannot verify with the backend's own reason, and does not open the approval", async () => {
     const api = stubApi();
     renderWithProviders(<Composer />, { api });
     await userEvent.type(screen.getByLabelText(BOX), "Create a React dashboard for my sales data");
-    expect(await screen.findByRole("alert")).toHaveTextContent("cannot be built yet");
+    expect(await screen.findByRole("alert")).toHaveTextContent("React single-page app with Vite builds are not available on this backend yet: runtime is not approved.");
     await userEvent.click(screen.getByRole("button", { name: "Build Application" }));
     expect(screen.queryByRole("dialog", { name: "Review build spending" })).not.toBeInTheDocument();
     expect(api.createProject).not.toHaveBeenCalled();
@@ -107,6 +107,38 @@ describe("Composer", () => {
     expect(api.startRun).toHaveBeenCalledWith("r9", 2);
     expect(api.getCapabilities).toHaveBeenCalledTimes(2); // asked again at the moment of approval
     expect(api.getBudget).toHaveBeenCalledTimes(2);
+  });
+
+  it("builds a website as a static site when the backend can verify static sites, and says so in the dialog", async () => {
+    const SITE_READY: Capabilities = {
+      ...DEFAULT_CAPABILITIES,
+      stacks: [...DEFAULT_CAPABILITIES.stacks, { id: "static-html", name: "Static website", language: "html", frameworks: [], description: "HTML, CSS and JavaScript.", verifiable: true, reason: "verified in the self-tested image" }],
+    };
+    const project = makeProject({ id: "p-site", stack: "static-html" });
+    const run = makeRun({ id: "r-site", project_id: "p-site" });
+    const api = stubApi({
+      getCapabilities: async () => SITE_READY,
+      createProject: vi.fn(() => Promise.resolve(project)),
+      createRun: vi.fn(() => Promise.resolve(run)),
+      startRun: vi.fn(() => Promise.resolve(makeRun({ ...run, state: "ANALYZING" }))),
+    });
+    renderWithProviders(<Composer />, { api });
+    const dialog = await openDialog("Create a homepage for my bakery with opening hours");
+    expect(within(dialog).getByText("Static website")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("checkbox", { name: APPROVE }));
+    await userEvent.click(screen.getByRole("button", { name: "Approve and start build" }));
+    await waitFor(() => expect(api.createProject).toHaveBeenCalled());
+    expect(vi.mocked(api.createProject).mock.calls[0]?.[0]).toMatchObject({ stack: "static-html" });
+  });
+
+  it("declines a website when this backend has no verifiable static-site stack, instead of building a Python app", async () => {
+    const api = stubApi();
+    renderWithProviders(<Composer />, { api });
+    await userEvent.type(screen.getByLabelText(BOX), "Create a homepage for my bakery with opening hours");
+    expect(await screen.findByRole("alert")).toHaveTextContent("no static-html stack");
+    await userEvent.click(screen.getByRole("button", { name: "Build Application" }));
+    expect(screen.queryByRole("dialog", { name: "Review build spending" })).not.toBeInTheDocument();
+    expect(api.createProject).not.toHaveBeenCalled();
   });
 
   it("shows only the application, the limit, the approval and two buttons in the dialog", async () => {

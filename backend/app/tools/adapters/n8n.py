@@ -78,7 +78,7 @@ def _begin_trigger(runtime: N8nRuntime, ctx: ToolContext, args: TriggerWorkflowA
     body = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     # Committed before the webhook is posted, so the callback can be matched even if n8n answers at once.
     _record(ctx, "n8n.trigger_started", {"trigger_id": trigger_id, "workflow": spec.key, "path": spec.path, "inputs": sorted(inputs), "callback": spec.callback,
-                                          "auto_approved": runtime.auto_approve, "source": runtime.client.name, "simulated": runtime.client.simulated})  # fmt: skip
+                                          "effect": spec.effect, "auto_approved": runtime.auto_approve and spec.auto_approvable, "source": runtime.client.name, "simulated": runtime.client.simulated})  # fmt: skip
     return _TriggerPlan(runtime, spec, trigger_id, body)
 
 
@@ -105,7 +105,7 @@ def _approval_details(runtime: N8nRuntime, _session: Any, _run: Run, _project: P
     spec = runtime.catalog.get(args.workflow)
     if spec is None:
         return {"workflow": args.workflow, "registered": False}
-    return {"workflow": spec.key, "registered": True, "what_it_does": spec.description, "webhook_path": spec.path, "reports_back": spec.callback,
+    return {"workflow": spec.key, "registered": True, "what_it_does": spec.description, "effect": spec.effect, "webhook_path": spec.path, "reports_back": spec.callback,
             "inputs": {i.name: i.value[:300] for i in args.inputs}, "simulated": runtime.client.simulated}  # fmt: skip
 
 
@@ -130,9 +130,16 @@ def _record(ctx: ToolContext, event_type: str, payload: dict[str, Any]) -> None:
     ctx.events.record(ctx.session, project_id=ctx.project.id, run_id=ctx.run.id, type=event_type, payload=payload)
 
 
+def _may_skip_approval(runtime: N8nRuntime, args: TriggerWorkflowArgs) -> bool:
+    """N8N_AUTO_APPROVE applies only to a registered workflow declared read_only or notify; anything else asks a person."""
+    spec = runtime.catalog.get(args.workflow)
+    return spec is not None and spec.auto_approvable
+
+
 def _describe(runtime: N8nRuntime) -> str:
-    listed = "; ".join(f"{s.key}({', '.join(s.inputs)}): {s.description}" for s in runtime.catalog) or "none"
-    asks = "Runs without approval (N8N_AUTO_APPROVE)." if runtime.auto_approve else "Needs a person's approval."
+    listed = "; ".join(f"{s.key}({', '.join(s.inputs)}) [{s.effect}]: {s.description}" for s in runtime.catalog) or "none"
+    asks = ("Read-only and notification workflows run without approval (N8N_AUTO_APPROVE); the others need a person's approval."
+            if runtime.auto_approve else "Needs a person's approval.")  # fmt: skip
     return f"Trigger a registered n8n workflow with exactly its inputs. {asks} Workflows: {listed}"
 
 
@@ -141,7 +148,7 @@ def register_n8n_tools(registry: ToolRegistry, runtime: N8nRuntime) -> None:
         ToolSpec(
             name="trigger_workflow", description=_describe(runtime)[:1_000], args_model=TriggerWorkflowArgs, risk=RiskLevel.EXTERNAL_NETWORK, states=None, handler=None,
             external=ExternalStep(begin=partial(_begin_trigger, runtime), run=_run_trigger, finish=_finish_trigger),
-            approval_details=partial(_approval_details, runtime), auto_approved=runtime.auto_approve,
+            approval_details=partial(_approval_details, runtime), auto_approve=partial(_may_skip_approval, runtime) if runtime.auto_approve else None,
         )
     )  # fmt: skip
     registry.register(

@@ -323,13 +323,14 @@ def package(session: Session, run: dict[str, Any], output: Path, io: IO) -> Buil
     state = session.app.state
     report = _json(session.client.get(f"{API}/runs/{run['id']}/report", headers=session.headers), "reading the report")
     cost = report.get("run", {}).get("cost_usd")
-    reason = artifact.unavailable_reason(report)
-    if reason is not None:
-        return BuildResult(run["state"], cost, reason=reason)
-    fs, project_id, redactor = state.workspace_fs, report["project"]["id"], state.redactor
-    selection, data = artifact.select(fs.list_files(project_id), lambda p: fs.read_bytes(project_id, p), redactor)
-    if not selection.included:
-        return BuildResult(run["state"], cost, reason="no file of the project can be packaged")
+    fs, redactor = state.workspace_fs, state.redactor
+    project_id = (report.get("project") or {}).get("id")
+    # The same decision as the dashboard's download (artifact.decide): a verified run, and no source or configuration
+    # file dropped by a safeguard, so a ZIP is never an incomplete copy presented as the verified project.
+    delivery = artifact.decide(report, fs.list_files(project_id) if project_id else [], lambda p: fs.read_bytes(project_id, p), redactor)
+    if delivery.reason is not None:
+        return BuildResult(run["state"], cost, reason=delivery.reason)
+    selection, data = delivery.selection, delivery.data
     name = artifact.archive_name(report)
     zip_bytes = artifact.build_zip(report, selection, data, redactor, when=datetime.now(UTC), extra={HOW_TO_RUN: how_to_run(report, [e.path for e in selection.included])})
     output.mkdir(parents=True, exist_ok=True)

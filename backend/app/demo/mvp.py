@@ -274,7 +274,7 @@ def run_scenario(scenario: Scenario, data_dir: Path, sandbox_factory: Callable[[
         original = app.state.workspace_fs.project_dir(project["id"])
         before = _hashes(original)
         run = client.post(f"{API}/projects/{project['id']}/runs", headers=headers).json()
-        client.post(f"{API}/runs/{run['id']}/start", headers=headers).raise_for_status()
+        client.post(f"{API}/runs/{run['id']}/start", json={"approved_max_usd": settings.run_budget_usd}, headers=headers).raise_for_status()
         deadline = time.monotonic() + _DEADLINE_SECONDS
         while time.monotonic() < deadline:
             run = client.get(f"{API}/runs/{run['id']}", headers=headers).json()

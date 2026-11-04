@@ -166,6 +166,7 @@ class LiveEngine(AbstractContextManager[Session]):
         from app.coding.launcher import NETWORKS, LaunchRefused, LaunchRequest, OpenCodeLauncher
         from app.core.egress import EgressPolicy
         from app.main import create_app
+        from app.integrations import integrations_for
         from app.orchestrator.start_policy import SessionBudget
         from app.sandbox.docker_cli import DockerCli
         from app.sandbox.process import SubprocessRunner
@@ -209,7 +210,8 @@ class LiveEngine(AbstractContextManager[Session]):
 
         selector = ProviderSelector([ProviderOption("opencode_server", launcher, CAPABILITIES, simulated=False)])
         budget = SessionBudget(cap, cap, run_seconds=settings.run_wall_clock_seconds + GUARD_MARGIN_SECONDS, ends_at=time.monotonic() + settings.run_wall_clock_seconds + 2 * GUARD_MARGIN_SECONDS)
-        app = create_app(settings, sandbox=DockerSandbox.from_settings(settings), coding=selector, start_policy=budget)
+        sandbox = DockerSandbox.from_settings(settings)
+        app = create_app(settings, sandbox=sandbox, coding=selector, start_policy=budget, **integrations_for(settings, sandbox))
         self._client = TestClient(app)
         self._client.__enter__()  # starts the app's lifespan: the run manager, and recovery of any attempt an earlier process left
         return Session(self._client, {"Authorization": f"Bearer {settings.devpilot_api_token.get_secret_value()}"}, app, settings)

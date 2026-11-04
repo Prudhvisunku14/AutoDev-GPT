@@ -161,6 +161,7 @@ class ToolSpec:
     # What a person sees before approving, beyond the arguments: (session, run, project, args) -> details. It reads
     # only what DevPilot already holds; it may not fetch anything, since nothing is approved yet.
     approval_details: Callable[[Session, Run, Project, Any], dict[str, Any]] | None = None
-    # True only for an EXTERNAL_NETWORK tool the operator chose to run without asking (N8N_AUTO_APPROVE=true). The registry
+    # Set only on an EXTERNAL_NETWORK tool the operator chose to run without asking (N8N_AUTO_APPROVE=true): given the parsed
+    # arguments, True when this particular call may skip approval (an n8n workflow declared read_only or notify). The registry
     # refuses it on any other risk, so GIT_PUSH and DESTRUCTIVE always wait for a person.
-    auto_approved: bool = False
+    auto_approve: Callable[[Any], bool] | None = None

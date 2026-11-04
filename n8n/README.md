@@ -1,6 +1,6 @@
 # n8n workflows for DevPilot
 
-DevPilot triggers only the workflows registered in [`config/n8n_workflows.yaml`](../config/n8n_workflows.yaml). Every trigger is signed, waits for approval unless `N8N_AUTO_APPROVE=true`, and posts to `<N8N_BASE_URL>/webhook/<path>`. Workflows that report back post a signed result to `POST /integrations/n8n/callback`. Design: [ARCHITECTURE.md §8.1](../docs/ARCHITECTURE.md).
+DevPilot triggers only the workflows registered in [`config/n8n_workflows.yaml`](../config/n8n_workflows.yaml). Every trigger is signed, waits for a person's approval, and posts to `<N8N_BASE_URL>/webhook/<path>`. Each registered workflow declares its `effect` (`read_only`, `notify`, `write` or `destructive`); `N8N_AUTO_APPROVE=true` skips approval only for `read_only` and `notify`. Workflows that report back post a signed result to `POST /integrations/n8n/callback`. Design: [ARCHITECTURE.md §8.1](../docs/ARCHITECTURE.md).
 
 **Status:** the adapter, the callback and the health check are tested offline against a simulated n8n. The templates' signing code has been run in Node.js and agrees with DevPilot byte for byte. **Neither template has been imported into a real n8n instance yet.**
 

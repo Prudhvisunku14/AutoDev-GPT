@@ -22,7 +22,7 @@ export function Home() {
         <h1 className="text-3xl font-extrabold tracking-tight text-balance sm:text-[42px] sm:leading-[1.15]">
           What would you like to <span className="bg-gradient-to-r from-violet-600 to-indigo-600 bg-clip-text text-transparent">build</span> today?
         </h1>
-        <p className="mx-auto mt-3 max-w-2xl text-[15px] text-muted sm:text-base">Turn your idea into a working application with AI — from plan to code, test, and deploy.</p>
+        <p className="mx-auto mt-3 max-w-2xl text-[15px] text-muted sm:text-base">Turn your idea into a working application with AI — from plan to code, tests, and a verified download.</p>
       </div>
 
       <div className="mt-10 grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px] xl:items-start">

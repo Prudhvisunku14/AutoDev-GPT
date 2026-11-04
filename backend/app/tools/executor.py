@@ -62,6 +62,8 @@ class ToolExecutor:
             return ToolResult.failure(
                 name, ErrorClass.INVALID_ARGS, f"arguments do not match the {name} schema", _validation_details(exc)
             )
+        if policy.decision is Decision.REQUIRE_APPROVAL:  # an exemption can depend on the arguments, so it is decided once they are valid
+            policy = self._policy.decide(spec, state, approved=approved, args=args)
         return PreparedCall(spec, args, policy.decision, policy.reason)
 
     def invoke(self, ctx: ToolContext, call: PreparedCall) -> ToolResult:

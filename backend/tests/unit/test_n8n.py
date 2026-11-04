@@ -57,8 +57,8 @@ def test_the_shipped_workflow_file_registers_notify_and_echo() -> None:
     catalog = WorkflowCatalog.from_file(REPO_ROOT / "config" / "n8n_workflows.yaml")
     assert catalog.keys == ["echo", "notify"]
     notify, echo = catalog.get("notify"), catalog.get("echo")
-    assert notify is not None and notify.inputs == ("title", "message") and not notify.callback
-    assert echo is not None and echo.inputs == ("text",) and echo.callback and echo.path == "devpilot-echo"
+    assert notify is not None and notify.inputs == ("title", "message") and not notify.callback and notify.effect == "notify"
+    assert echo is not None and echo.inputs == ("text",) and echo.callback and echo.path == "devpilot-echo" and echo.effect == "read_only"
 
 
 @pytest.mark.parametrize(
@@ -66,7 +66,9 @@ def test_the_shipped_workflow_file_registers_notify_and_echo() -> None:
     [
         ("workflows:\n  a:\n    path: ../admin\n    description: x\n", "one URL segment"),
         ("workflows:\n  a:\n    path: a/b\n    description: x\n", "one URL segment"),
-        ("workflows:\n  a:\n    path: p\n    description: x\n  b:\n    path: p\n    description: y\n", "listed twice"),
+        ("workflows:\n  a:\n    path: p\n    description: x\n    effect: notify\n  b:\n    path: p\n    description: y\n    effect: notify\n", "listed twice"),
+        ("workflows:\n  a:\n    path: p\n    description: x\n", "effect must be one of"),
+        ("workflows:\n  a:\n    path: p\n    description: x\n    effect: harmless\n", "effect must be one of"),
         ("workflows:\n  a:\n    path: p\n    description: x\n    url: http://evil\n", "unknown fields"),
         ("workflows:\n  a:\n    path: p\n    description: x\n    inputs: [Bad-Name]\n", "inputs must be"),
         ("workflows:\n  a:\n    path: p\n    description: x\n    inputs: [a, a]\n", "listed twice"),
@@ -248,19 +250,26 @@ class _Args(ToolArgs):
     pass
 
 
-def _spec(risk: RiskLevel, *, auto: bool) -> ToolSpec:
-    return ToolSpec(name="t", description="d", args_model=_Args, risk=risk, states=None, handler=lambda _c, _a: {}, auto_approved=auto)
+def _spec(risk: RiskLevel, *, auto: bool, exempt: Any = lambda _args: True) -> ToolSpec:
+    return ToolSpec(name="t", description="d", args_model=_Args, risk=risk, states=None, handler=lambda _c, _a: {}, auto_approve=exempt if auto else None)
 
 
 def test_only_external_network_tools_can_skip_approval() -> None:
     for risk in (RiskLevel.GIT_PUSH, RiskLevel.DESTRUCTIVE, RiskLevel.READ, RiskLevel.WORKSPACE_WRITE):
         with pytest.raises(ToolRegistrationError, match="only EXTERNAL_NETWORK"):
             ToolRegistry().register(_spec(risk, auto=True))
-    engine = PolicyEngine()
-    assert engine.decide(_spec(RiskLevel.EXTERNAL_NETWORK, auto=False), RunState.ANALYZING).decision is Decision.REQUIRE_APPROVAL
-    assert engine.decide(_spec(RiskLevel.EXTERNAL_NETWORK, auto=True), RunState.ANALYZING).decision is Decision.ALLOW
-    assert engine.decide(_spec(RiskLevel.GIT_PUSH, auto=True), RunState.ANALYZING).decision is Decision.REQUIRE_APPROVAL  # even if built without the registry
-    assert engine.decide(_spec(RiskLevel.EXTERNAL_NETWORK, auto=True), RunState.COMPLETED).decision is Decision.DENY
+    engine, args = PolicyEngine(), _Args()
+    assert engine.decide(_spec(RiskLevel.EXTERNAL_NETWORK, auto=False), RunState.ANALYZING, args=args).decision is Decision.REQUIRE_APPROVAL
+    assert engine.decide(_spec(RiskLevel.EXTERNAL_NETWORK, auto=True), RunState.ANALYZING, args=args).decision is Decision.ALLOW
+    assert engine.decide(_spec(RiskLevel.EXTERNAL_NETWORK, auto=True), RunState.ANALYZING).decision is Decision.REQUIRE_APPROVAL  # no arguments, no exemption
+    assert engine.decide(_spec(RiskLevel.EXTERNAL_NETWORK, auto=True, exempt=lambda _a: False), RunState.ANALYZING, args=args).decision is Decision.REQUIRE_APPROVAL
+
+    def broken(_args: Any) -> bool:
+        raise RuntimeError("boom")
+
+    assert engine.decide(_spec(RiskLevel.EXTERNAL_NETWORK, auto=True, exempt=broken), RunState.ANALYZING, args=args).decision is Decision.REQUIRE_APPROVAL  # fails closed
+    assert engine.decide(_spec(RiskLevel.GIT_PUSH, auto=True), RunState.ANALYZING, args=args).decision is Decision.REQUIRE_APPROVAL  # even if built without the registry
+    assert engine.decide(_spec(RiskLevel.EXTERNAL_NETWORK, auto=True), RunState.COMPLETED, args=args).decision is Decision.DENY
 
 
 # --- GPT's tools, through the real orchestrator and approval queue ------------------------------------------------------
@@ -342,7 +351,10 @@ def test_a_denied_trigger_sends_nothing(tmp_path: Path) -> None:
 )
 def test_an_unregistered_workflow_or_wrong_inputs_are_refused_without_sending(tmp_path: Path, step: Step, error: str, message: str) -> None:
     h, run_id, _runtime, fake = rig(tmp_path, step, pause(), n8n_auto_approve=True)
-    h.advance(run_id)
+    if h.advance(run_id).state is RunState.AWAITING_APPROVAL:  # an unregistered key is never exempt from approval: it asks, then is refused
+        assert error == "POLICY_REFUSED"
+        h.decide(pending_approval(h, run_id).id, "approve")
+        h.advance(run_id)
     result = output(h, run_id, "trigger_workflow")
     assert fake.triggered == [] and result["error"]["class"] == error and message in result["error"]["summary"]
     assert h.events_of(run_id, "n8n.trigger_started") == []  # a refused call leaves no trigger behind
@@ -366,6 +378,22 @@ def test_auto_approve_triggers_without_asking_and_an_outage_is_reported(tmp_path
     h2.advance(run2)
     result = output(h2, run2, "trigger_workflow")
     assert result["error"]["class"] == "TOOL_ERROR" and "ConnectError" in result["error"]["summary"] and h2.events_of(run2, "n8n.triggered") == []
+
+
+@pytest.mark.parametrize("effect", ["write", "destructive"])
+def test_auto_approve_never_covers_a_workflow_with_side_effects(tmp_path: Path, effect: str) -> None:
+    """N8N_AUTO_APPROVE=true: a workflow declared write or destructive still waits for a person, and nothing is sent before."""
+    workflows = write(tmp_path, f"workflows:\n  deploy:\n    path: devpilot-deploy\n    description: Deploy the site.\n    inputs: [target]\n    effect: {effect}\n"
+                                "  notify:\n    path: devpilot-notify\n    description: Notify.\n    inputs: [title, message]\n    effect: notify\n")  # fmt: skip
+    fake = FakeN8n.with_active("devpilot-deploy", "devpilot-notify")
+    h, run_id, _runtime, _fake = rig(tmp_path, trigger("deploy", target="prod"), pause(), fake=fake, n8n_auto_approve=True, n8n_workflows_file=workflows)
+    assert h.advance(run_id).state is RunState.AWAITING_APPROVAL and fake.triggered == []
+    approval = pending_approval(h, run_id)
+    assert approval.tool == "trigger_workflow" and effect in (approval.details_json or "")
+    h.decide(approval.id, "approve")
+    h.advance(run_id)
+    assert [p for p, _b, _h in fake.triggered] == ["devpilot-deploy"]
+    assert h.events_of(run_id, "n8n.trigger_started")[0] | {"effect": effect, "auto_approved": False} == h.events_of(run_id, "n8n.trigger_started")[0]
 
 
 def test_a_result_is_pending_until_n8n_reports_and_a_foreign_trigger_is_refused(tmp_path: Path) -> None:

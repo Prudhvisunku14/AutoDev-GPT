@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { UnauthorizedError } from "../../lib/api";
-import { getToken } from "../../lib/token";
+import { clearToken, getToken, isRemembered, setToken } from "../../lib/token";
 import type { Approval } from "../../lib/types";
 import { makeProject } from "../../test/fixtures";
 import { renderApp, stubApi } from "../../test/render";
@@ -19,7 +19,7 @@ describe("navigation and layout", () => {
     renderApp({ api, token: null });
     await userEvent.type(screen.getByLabelText("API token"), "wrong");
     await userEvent.click(screen.getByRole("button", { name: "Connect" }));
-    expect(await screen.findByText("The backend did not accept this token.")).toBeInTheDocument();
+    expect(await screen.findByText(/The backend did not accept this token\. Use DEVPILOT_API_TOKEN from the \.env in the folder the running backend was started from/)).toBeInTheDocument();
     expect(api.checkToken).toHaveBeenCalledWith("wrong");
     expect(getToken()).toBeNull();
     expect(api.listProjects).not.toHaveBeenCalled(); // no page asked anything with the wrong token
@@ -31,6 +31,29 @@ describe("navigation and layout", () => {
     await userEvent.click(screen.getByRole("button", { name: "Connect" }));
     expect(await screen.findByRole("heading", { name: /What would you like to build today\?/ })).toBeInTheDocument();
     expect(getToken()).toBe("right");
+    expect(isRemembered()).toBe(true); // a new tab or a browser restart does not ask again
+    expect(localStorage.getItem("devpilot-token")).toBe("right");
+  });
+
+  it("keeps the token in this tab only when remembering is unticked, and strips quotes copied from .env", async () => {
+    const api = stubApi();
+    renderApp({ api, token: null });
+    await userEvent.type(screen.getByLabelText("API token"), '  "right"  ');
+    await userEvent.click(screen.getByRole("checkbox", { name: /Remember on this computer/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Connect" }));
+    expect(await screen.findByRole("heading", { name: /What would you like to build today\?/ })).toBeInTheDocument();
+    expect(api.checkToken).toHaveBeenCalledWith("right");
+    expect(getToken()).toBe("right");
+    expect(isRemembered()).toBe(false);
+    expect(localStorage.getItem("devpilot-token")).toBeNull();
+  });
+
+  it("forgets a remembered token everywhere once the backend refuses it", () => {
+    setToken("stale", { remember: true });
+    expect(isRemembered()).toBe(true);
+    clearToken(); // what a 401 does (queries.ts)
+    expect(getToken()).toBeNull();
+    expect(localStorage.getItem("devpilot-token")).toBeNull();
   });
 
   it("marks the current page in the sidebar and navigates between pages", async () => {

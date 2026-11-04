@@ -38,6 +38,7 @@ from app.coding.guard_process import QUARANTINE_FILE, keep_awake, start_guard  #
 from app.coding.launcher import NETWORKS, OpenCodeLauncher  # noqa: E402
 from app.config import REPO_ROOT, Settings  # noqa: E402
 from app.core.egress import EgressPolicy  # noqa: E402
+from app.integrations import integrations_for  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.orchestrator.start_policy import SessionBudget  # noqa: E402
 from app.sandbox.docker_cli import DockerCli  # noqa: E402
@@ -136,7 +137,8 @@ def main(argv: list[str] | None = None, *, settings_for: Callable[..., Settings]
     selector = ProviderSelector([ProviderOption("opencode_server", launcher, CAPABILITIES, simulated=False)])
     if serve is None:  # really serving: static websites are buildable only if this computer's verifier image passed its self-test
         print(f"Website builds: {_load_web_approval(settings)}")
-    app = create_app(settings, sandbox=DockerSandbox.from_settings(settings), coding=selector, start_policy=budget)
+    sandbox = DockerSandbox.from_settings(settings)
+    app = create_app(settings, sandbox=sandbox, coding=selector, start_policy=budget, **integrations_for(settings, sandbox))
     print(f"\nServing on http://{settings.devpilot_host}:{settings.devpilot_port} until {args.hours:g} hours have passed. Open the dashboard at "
           "http://localhost:5173 and connect with DEVPILOT_API_TOKEN from .env. Stop with Ctrl-C.")  # fmt: skip
     (serve or _serve)(app, settings)

@@ -67,7 +67,7 @@ REQUEST = LLMRequest(
 
 
 def _client(tmp_path: Path, handler: Callable[[httpx.Request], httpx.Response], **overrides: Any) -> OpenAIResponsesClient:
-    settings = make_settings(tmp_path, **{"openai_model": MODEL, "openai_max_retries": 0, **overrides})
+    settings = make_settings(tmp_path, **{"openai_model": MODEL, "openai_max_retries": 0, "openai_max_output_tokens": 1_000, **overrides})
     return OpenAIResponsesClient(settings, http_client=httpx.Client(transport=httpx.MockTransport(handler)), sleep=lambda _seconds: None)  # a wait is never really waited here
 
 
@@ -122,7 +122,7 @@ def test_first_turn_omits_previous_response_id_and_tool_choice_without_tools(tmp
     _client(tmp_path, handler).create(LLMRequest(instructions="i", input=[], tools=[], previous_response_id=None))
     assert "previous_response_id" not in seen[0]
     assert "tool_choice" not in seen[0]
-    assert "max_output_tokens" not in seen[0]
+    assert seen[0]["max_output_tokens"] == 1_000  # every call carries the cap the budget reserved
 
 
 def test_incomplete_response_is_reported(tmp_path: Path) -> None:
@@ -176,18 +176,27 @@ def test_connection_error_maps_to_transient(tmp_path: Path) -> None:
     assert info.value.kind is LLMErrorKind.TRANSIENT
 
 
-def test_sdk_retries_transient_errors(tmp_path: Path) -> None:
+def test_a_transient_server_error_is_sent_once_and_never_retried_by_the_sdk(tmp_path: Path) -> None:
+    """A 500 may come after the call was processed and billed; resending it would be counted once but billed twice."""
     attempts: list[int] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         attempts.append(1)
-        if len(attempts) == 1:
-            return httpx.Response(500, json={"error": {"message": "flaky"}}, headers={"retry-after-ms": "1"})
-        return httpx.Response(200, json=RESPONSE_BODY)
+        return httpx.Response(500, json={"error": {"message": "flaky"}}, headers={"retry-after-ms": "1"})
 
-    response = _client(tmp_path, handler, openai_max_retries=2).create(REQUEST)
-    assert response.id == "resp_123"
-    assert len(attempts) == 2
+    with pytest.raises(LLMError):
+        _client(tmp_path, handler).create(REQUEST)
+    assert len(attempts) == 1
+
+
+@pytest.mark.parametrize(("overrides", "problem"), [({"openai_max_output_tokens": None}, "OPENAI_MAX_OUTPUT_TOKENS is not set"), ({"openai_max_retries": 2}, "OPENAI_MAX_RETRIES=2")])
+def test_a_client_whose_cost_cannot_be_bounded_is_never_built(tmp_path: Path, overrides: dict[str, Any], problem: str) -> None:
+    sent: list[httpx.Request] = []
+    with pytest.raises(LLMError) as info:
+        _client(tmp_path, lambda r: (sent.append(r), httpx.Response(200, json=RESPONSE_BODY))[1], **overrides)
+    assert info.value.kind is LLMErrorKind.CONFIG and problem in str(info.value) and sent == []
+    full = {"openai_model": MODEL, "openai_max_retries": 0, "openai_max_output_tokens": 1_000, **overrides}
+    assert problem in (llm_config_problem(make_settings(tmp_path, **full), EgressPolicy.from_file(ALLOWLIST_FILE)) or "")
 
 
 def test_client_requires_key_and_model(tmp_path: Path) -> None:
@@ -215,5 +224,5 @@ def test_config_problems_are_reported_without_secrets(tmp_path: Path, overrides:
 
 
 def test_complete_config_has_no_problem(tmp_path: Path) -> None:
-    settings = make_settings(tmp_path, openai_model=MODEL, openai_base_url="https://api.openai.com/v1")
+    settings = make_settings(tmp_path, openai_model=MODEL, openai_base_url="https://api.openai.com/v1", openai_max_output_tokens=4_000, openai_max_retries=0)
     assert llm_config_problem(settings, EgressPolicy.from_file(ALLOWLIST_FILE)) is None

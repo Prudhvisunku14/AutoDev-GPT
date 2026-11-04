@@ -13,6 +13,9 @@ from pathlib import Path
 
 import yaml
 
+# What a workflow does beyond receiving the trigger. The operator declares it; only read_only and notify may skip approval.
+EFFECTS = ("read_only", "notify", "write", "destructive")
+AUTO_APPROVABLE = frozenset({"read_only", "notify"})
 KEY_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,39}$")
 PATH_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")  # one segment: no slash, no dot, so no traversal
 INPUT_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
@@ -30,9 +33,14 @@ class WorkflowSpec:
     description: str
     inputs: tuple[str, ...]
     callback: bool
+    effect: str = "write"
+
+    @property
+    def auto_approvable(self) -> bool:
+        return self.effect in AUTO_APPROVABLE
 
     def to_dict(self) -> dict[str, object]:
-        return {"key": self.key, "path": self.path, "description": self.description, "inputs": list(self.inputs), "callback": self.callback}
+        return {"key": self.key, "path": self.path, "description": self.description, "inputs": list(self.inputs), "callback": self.callback, "effect": self.effect}
 
 
 class WorkflowCatalog:
@@ -82,7 +90,7 @@ def _parse(key: str, raw: object) -> WorkflowSpec:
         raise WorkflowConfigError(f"workflow key {key!r} must match {KEY_PATTERN.pattern}")
     if not isinstance(raw, dict):
         raise WorkflowConfigError(f"workflow {key!r} must be a mapping")
-    unknown = set(raw) - {"path", "description", "inputs", "callback"}
+    unknown = set(raw) - {"path", "description", "inputs", "callback", "effect"}
     if unknown:
         raise WorkflowConfigError(f"workflow {key!r} has unknown fields: {', '.join(sorted(unknown))}")
     path, description, inputs, callback = raw.get("path"), raw.get("description"), raw.get("inputs", []), raw.get("callback", False)
@@ -96,4 +104,7 @@ def _parse(key: str, raw: object) -> WorkflowSpec:
         raise WorkflowConfigError(f"workflow {key!r}: an input is listed twice")
     if not isinstance(callback, bool):
         raise WorkflowConfigError(f"workflow {key!r}: callback must be true or false")
-    return WorkflowSpec(key, path, description.strip(), tuple(inputs), callback)
+    effect = raw.get("effect")
+    if effect not in EFFECTS:  # required: nothing is assumed harmless
+        raise WorkflowConfigError(f"workflow {key!r}: effect must be one of {', '.join(EFFECTS)}")
+    return WorkflowSpec(key, path, description.strip(), tuple(inputs), callback, effect)

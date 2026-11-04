@@ -161,7 +161,7 @@ def run_demo(emit: Callable[[str], None] = print, data_dir: Path | None = None) 
         run = client.post(f"{api}/projects/{project['id']}/runs", headers=headers).json()
         emit(f'User: "{REQUIREMENT}"')
         emit(f"Project {project['id']}  run {run['id']}  state {run['state']}")
-        client.post(f"{api}/runs/{run['id']}/start", headers=headers).raise_for_status()
+        client.post(f"{api}/runs/{run['id']}/start", json={"approved_max_usd": settings.run_budget_usd}, headers=headers).raise_for_status()
 
         deadline = time.monotonic() + 30
         while True:

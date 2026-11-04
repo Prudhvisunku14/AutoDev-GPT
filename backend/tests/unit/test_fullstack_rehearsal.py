@@ -42,7 +42,7 @@ def test_the_repository_client_is_off_unless_configured(tmp_path: Path) -> None:
     egress = EgressPolicy({"github": ["api.github.com"]})
     assert build_repository_source(make_settings(tmp_path), egress) is None
     assert isinstance(build_repository_source(make_settings(tmp_path, repository_source="github"), egress), GitHubSource)
-    assert "repositories=build_repository_source(" in (Path(fullstack.__file__).resolve().parents[1] / "__main__.py").read_text(encoding="utf-8")
+    assert "**integrations_for(settings, sandbox)" in (Path(fullstack.__file__).resolve().parents[1] / "__main__.py").read_text(encoding="utf-8")
 
 
 def test_the_github_client_works_through_the_tools_and_its_archive_host_stays_refused(tmp_path: Path) -> None:

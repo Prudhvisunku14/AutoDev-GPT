@@ -1,7 +1,7 @@
 import { QueryCache, QueryClient, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, UnauthorizedError } from "./api";
 import { useApi } from "./apiContext";
-import { clearToken, useToken } from "./token";
+import { clearToken, getToken, onTokenChange, useToken } from "./token";
 import type { NewProject, Project, Run, RunEvent } from "./types";
 import { TERMINAL_STATES } from "./types";
 
@@ -24,7 +24,7 @@ export function pollFor(run: Run | null | undefined): number | false {
 }
 
 export function createQueryClient(): QueryClient {
-  return new QueryClient({
+  const client = new QueryClient({
     queryCache: new QueryCache({
       onError: (error) => {
         if (error instanceof UnauthorizedError) clearToken(); // the page asks for the token again
@@ -38,6 +38,17 @@ export function createQueryClient(): QueryClient {
       },
     },
   });
+  // Whatever was read with one token is never shown under another: a changed or cleared token empties the cache. This
+  // listener was registered before any component's, so the cache is empty before the page renders with the new token.
+  let current = getToken();
+  onTokenChange(() => {
+    const next = getToken();
+    if (next !== current) {
+      current = next;
+      client.clear();
+    }
+  });
+  return client;
 }
 
 export const keys = {

@@ -105,7 +105,15 @@ def test_unknown_prices_block_a_start_even_when_the_legacy_approval_setting_is_o
     assert client.get(f"{API}/runs/{run['id']}", headers=auth).json()["state"] == "CREATED"
 
 
-def test_dashboard_selected_stack_requires_explicit_spend_approval(client: TestClient, auth: dict[str, str]) -> None:
+def _configured(app: FastAPI) -> None:
+    """A real GPT backend that could spend: known prices and a model (the key is the fake one from make_settings)."""
+    app.state.settings.openai_price_input_per_mtok = 1
+    app.state.settings.openai_price_output_per_mtok = 1
+    app.state.settings.openai_model = "gpt-test"
+
+
+def test_dashboard_selected_stack_requires_explicit_spend_approval(client: TestClient, app: FastAPI, auth: dict[str, str]) -> None:
+    _configured(app)
     project = _create_project(client, auth, stack="python-cli")
     run = client.post(f"{API}/projects/{project['id']}/runs", headers=auth).json()
     response = client.post(f"{API}/runs/{run['id']}/start", headers=auth)
@@ -115,8 +123,7 @@ def test_dashboard_selected_stack_requires_explicit_spend_approval(client: TestC
 
 
 def test_backend_rejects_an_approval_above_its_enforced_limit(client: TestClient, app: FastAPI, auth: dict[str, str]) -> None:
-    app.state.settings.openai_price_input_per_mtok = 1
-    app.state.settings.openai_price_output_per_mtok = 1
+    _configured(app)
     project = _create_project(client, auth, stack="python-cli")
     run = client.post(f"{API}/projects/{project['id']}/runs", headers=auth).json()
     limit = app.state.settings.run_budget_usd
@@ -125,6 +132,18 @@ def test_backend_rejects_an_approval_above_its_enforced_limit(client: TestClient
 
     assert response.status_code == 409
     assert "but this run's enforced limit is" in response.json()["detail"]
+    assert client.get(f"{API}/runs/{run['id']}", headers=auth).json()["state"] == "CREATED"
+
+
+def test_a_paid_run_without_a_stack_still_needs_a_spending_approval(client: TestClient, app: FastAPI, auth: dict[str, str]) -> None:
+    """REQUIRE_SPEND_APPROVAL=false and no stack used to start a real, paid run with no approval at all."""
+    _configured(app)
+    assert app.state.settings.require_spend_approval is False and not app.state.scripted_llm
+    project = _create_project(client, auth)
+    assert project["stack"] is None
+    run = client.post(f"{API}/projects/{project['id']}/runs", headers=auth).json()
+    response = client.post(f"{API}/runs/{run['id']}/start", headers=auth)
+    assert response.status_code == 409 and "spending approval" in response.json()["detail"]
     assert client.get(f"{API}/runs/{run['id']}", headers=auth).json()["state"] == "CREATED"
 
 
@@ -257,3 +276,14 @@ def test_status_reports_components(client: TestClient, auth: dict[str, str]) -> 
 
 def test_responses_carry_a_request_id(client: TestClient) -> None:
     assert len(client.get(f"{API}/health").headers["X-Request-ID"]) == 12
+
+
+def test_a_paid_start_is_refused_before_anything_is_sent_without_an_output_cap(client: TestClient, app: FastAPI, auth: dict[str, str]) -> None:
+    """Prices known, no OPENAI_MAX_OUTPUT_TOKENS: no call's cost could be bounded, so even an approved start is refused."""
+    _configured(app)
+    app.state.settings.openai_max_output_tokens = None
+    project = _create_project(client, auth)
+    run = client.post(f"{API}/projects/{project['id']}/runs", headers=auth).json()
+    response = client.post(f"{API}/runs/{run['id']}/start", json={"approved_max_usd": app.state.settings.run_budget_usd}, headers=auth)
+    assert response.status_code == 503 and "OPENAI_MAX_OUTPUT_TOKENS is not set" in response.json()["detail"]
+    assert client.get(f"{API}/runs/{run['id']}", headers=auth).json()["state"] == "CREATED"

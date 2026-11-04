@@ -205,8 +205,7 @@ def packaging_session(tmp_path: Path, report: dict[str, Any], secret: str = "con
     fs.write_text(project_id, "convert.py", "def convert(rows):\n    return rows\n")
     fs.write_text(project_id, "test_convert.py", "import unittest\n")
     fs.write_text(project_id, "README.md", "# CSV to JSON\n")
-    fs.write_text(project_id, ".env", f"OPENAI_API_KEY={secret}\n")
-    fs.write_text(project_id, "notes.txt", f"the key is {secret}\n")
+    fs.write_text(project_id, ".env", f"OPENAI_API_KEY={secret}\n")  # excluded by name: never project source
     fs.write_text(project_id, "__pycache__/convert.cpython-312.pyc", "compiled")
     client = StubClient([("GET", r"/report$", lambda params, body: (200, report))])
     app = SimpleNamespace(state=SimpleNamespace(workspace_fs=fs, redactor=Redactor([secret])))
@@ -226,7 +225,7 @@ def test_a_verified_delivery_becomes_a_folder_and_a_zip_with_everything_but_the_
         assert root + expected in names, expected
     assert not any(n.endswith((".env", ".pyc")) for n in names)  # secrets and caches stay out
     archive = zipfile.ZipFile(result.zip_path)  # type: ignore[arg-type]
-    assert not any(b"configured-secret-value" in archive.read(n) for n in names)  # nor a file that merely contains the key
+    assert not any(b"configured-secret-value" in archive.read(n) for n in names)
     assert "Verified by the generated tests only" in archive.read(root + "devpilot-verification/MANIFEST.txt").decode()
     assert "python -m unittest discover" in archive.read(root + build.HOW_TO_RUN).decode()
     on_disk = sorted(f.relative_to(result.folder).as_posix() for f in result.folder.rglob("*") if f.is_file())  # type: ignore[union-attr]
@@ -239,6 +238,23 @@ def test_nothing_is_packaged_when_the_tests_failed_or_the_independent_suite_did(
         out = tmp_path / f"out-{expected[:5]}"
         result = build.package(session, {"id": "r", "state": "COMPLETED"}, out, ScriptedIO())
         assert not result.ok and expected in (result.reason or "") and not out.exists()
+
+
+@pytest.mark.parametrize("leaked", ["tests/test_auth.py", "app.js", "config.json", "index.html", "notes.txt"])
+def test_the_cli_refuses_a_zip_when_a_safeguard_drops_a_source_file_exactly_like_the_download(tmp_path: Path, leaked: str) -> None:
+    """A source or configuration file holding a credential cannot be packaged, so the project is incomplete: the CLI
+    refuses with the same reason as the dashboard's download, and writes nothing."""
+    from app.api.artifacts import describe
+
+    report = real_shaped_report("x")
+    session, project_id = packaging_session(tmp_path, report)
+    fs = session.app.state.workspace_fs
+    fs.write_text(project_id, leaked, "TOKEN = 'configured-secret-value'\n")
+    out = tmp_path / "out"
+    result = build.package(session, {"id": "r", "state": "COMPLETED"}, out, ScriptedIO())
+    assert not result.ok and "could not be included safely" in (result.reason or "") and leaked in (result.reason or "") and not out.exists()
+    http = describe(report, fs.list_files(project_id), lambda p: fs.read_bytes(project_id, p), session.app.state.redactor)
+    assert not http.available and http.reason == result.reason
 
 
 def test_a_simulated_run_is_never_packaged(tmp_path: Path) -> None:

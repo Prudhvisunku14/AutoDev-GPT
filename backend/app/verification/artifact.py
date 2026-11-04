@@ -164,6 +164,28 @@ def select(paths: Iterable[str], read: Callable[[str], bytes], redactor: Redacto
     return Selection(tuple(included), tuple(excluded)), data
 
 
+@dataclass(frozen=True)
+class Delivery:
+    """Whether a run may be packaged, and what: the one decision behind the dashboard's download and `devpilot build`."""
+
+    reason: str | None  # None: a verified delivery that may be packaged
+    selection: Selection
+    data: dict[str, bytes]
+
+
+def decide(report: dict[str, Any] | None, paths: Iterable[str], read: Callable[[str], bytes], redactor: Redactor) -> Delivery:
+    """Every packaging rule, in order: a verified run, no source or configuration dropped by a safeguard, and something to package.
+    Nothing is read when the run itself is not a verified delivery."""
+    reason = unavailable_reason(report)
+    if reason is not None:
+        return Delivery(reason, Selection((), ()), {})
+    selection, data = select(paths, read, redactor)
+    reason = omitted_source_reason(selection)
+    if reason is None and not selection.included:
+        reason = "no file of the project can be packaged"
+    return Delivery(reason, selection, data)
+
+
 def archive_name(report: dict[str, Any]) -> str:
     project = (report.get("project") or {}).get("name") or "project"
     slug = re.sub(r"[^a-z0-9]+", "-", str(project).lower()).strip("-")[:48] or "project"

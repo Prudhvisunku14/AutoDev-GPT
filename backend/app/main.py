@@ -23,6 +23,7 @@ from app.core.events import EventRecorder
 from app.core.logging import configure_logging
 from app.core.redaction import Redactor
 from app.db.session import create_db_engine, create_session_factory, init_db
+from app.orchestrator.fake_llm import FakeLLM
 from app.orchestrator.llm_client import LLMClient, OpenAIResponsesClient, llm_config_problem
 from app.orchestrator.loop import Orchestrator
 from app.orchestrator.run_manager import RunManager
@@ -171,6 +172,7 @@ def create_app(
     app.state.drive = drive
     app.state.n8n = n8n_runtime
     app.state.gpt_label = gpt_label
+    app.state.scripted_llm = isinstance(llm, FakeLLM)  # scripted GPT spends nothing; any other client may, so its starts need approval
     app.state.coding_selector = coding if runtime is not None else None
     app.state.start_policy = start_policy
 

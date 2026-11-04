@@ -39,7 +39,10 @@ function Branch({ nodes, depth, selected, onSelect }: { nodes: TreeNode[]; depth
 /** The project's files on the backend, with a read-only viewer. Content is shown as text, never rendered. */
 export function FileBrowser({ projectId, paths }: { projectId: string; paths: string[] }) {
   const tree = useMemo(() => buildTree(paths), [paths]);
-  const [selected, setSelected] = useState<string | null>(null);
+  // A selection belongs to one project and one existing file: switching projects, or the file disappearing, drops it.
+  const [choice, setChoice] = useState<{ projectId: string; path: string } | null>(null);
+  const selected = choice && choice.projectId === projectId && paths.includes(choice.path) ? choice.path : null;
+  const setSelected = (path: string) => setChoice({ projectId, path });
   const content = useFileContent(projectId, selected);
 
   if (!paths.length) return <p className="text-[13px] text-muted">No files in the project yet. Files appear here once a verified build delivers them.</p>;

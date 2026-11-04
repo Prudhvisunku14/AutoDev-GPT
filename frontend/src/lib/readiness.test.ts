@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_BUDGET, DEFAULT_CAPABILITIES } from "../test/render";
-import { unsupportedRequest } from "./prompt";
+import { decideStack } from "./prompt";
 import { assessReadiness } from "./readiness";
 
 const STATUS = { status: "ok" as const, version: "1", phase: "t", database: "ok" as const, workspaces_writable: true, egress_components: [], projects: 0, runs: 0 };
@@ -39,16 +39,18 @@ describe("assessReadiness", () => {
   });
 });
 
-describe("unsupportedRequest", () => {
+describe("decideStack against the backend's capabilities", () => {
   it("lets Python command-line requests through, the weather forecast one included", () => {
     for (const text of ["Create a weather forecast application", "Create a Python habit tracker with unit tests", "Create a web scraper command-line tool in Python"]) {
-      expect(unsupportedRequest(text)).toBeNull();
+      expect(decideStack(text, DEFAULT_CAPABILITIES.stacks)).toMatchObject({ refusal: null, stack: { id: "python-cli" } });
     }
   });
 
-  it("refuses other kinds of application with one plain sentence", () => {
+  it("declines what this backend cannot verify with one plain sentence, never as a Python app", () => {
     for (const text of ["Create a React dashboard", "Build a FastAPI service", "I need a website for my shop", "Make an Android app", "A web application for bookings"]) {
-      expect(unsupportedRequest(text)).toMatch(/cannot be built yet.*Python command-line/);
+      const decision = decideStack(text, DEFAULT_CAPABILITIES.stacks);
+      expect(decision.refusal).toMatch(/not available on this backend yet|no static-html stack|no stack for mobile apps/);
+      expect(decision.stack?.id).not.toBe("python-cli");
     }
   });
 });

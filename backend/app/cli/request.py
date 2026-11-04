@@ -53,10 +53,12 @@ def classify(text: str) -> BuildRequest:
     mobile = _MOBILE.search(words)
     other = _OTHER_FRAMEWORKS.search(words)
     unsupported = mobile.group(1) if mobile else other.group(1) if other else None
-    if mobile:
+    if _CLI.search(words) and not _EXPLICIT_WEB.search(words):
+        # Explicit command-line wording decides the kind. Frameworks or platforms it mentions are what the program works on
+        # ("a CLI that compares Django and Flask releases", "a terminal tool that backs up my Android phone"), not its stack.
+        kind, hint, unsupported = "cli", "python-cli", None
+    elif mobile:
         kind, hint = "mobile", None
-    elif _CLI.search(words) and not _EXPLICIT_WEB.search(words):
-        kind, hint = "cli", "python-cli"
     elif _FULLSTACK.search(words) and (_WEBSITE.search(words) or _REACT.search(words)):
         kind, hint = "fullstack", "react-fastapi"
     elif _WEBSITE.search(words) or _REACT.search(words):
@@ -91,8 +93,9 @@ class Decision:
 
 
 def decide(request: BuildRequest, profile: ProjectProfile | None = None, *, chosen_stack: str | None = None) -> Decision:
-    """Whether to build, on which stack. A repository's own files outrank the words; the words outrank the default."""
-    if request.unsupported and not (profile and profile.stack):
+    """Whether to build, on which stack. A repository's own files outrank the words; a stack the person chose (--stack)
+    outranks incidental words; the words outrank the default."""
+    if request.unsupported and not (profile and profile.stack) and chosen_stack is None:
         return Decision(None, False, f"“{request.unsupported}” cannot be built: DevPilot has no way to build or verify it (it supports Python command-line applications, static HTML and React + Vite, each only once its verification is ready)")
     if profile is not None:
         if profile.unsupported:

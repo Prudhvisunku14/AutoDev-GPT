@@ -472,7 +472,7 @@ def _limited(code: str | None = "rate_limit_exceeded", **headers: str) -> httpx.
 
 
 def _client(tmp_path: Path, handler: Any, waits: list[float]) -> OpenAIResponsesClient:
-    settings = make_settings(tmp_path, openai_model=MODEL, openai_max_retries=0)
+    settings = make_settings(tmp_path, openai_model=MODEL, openai_max_retries=0, openai_max_output_tokens=1_000)
     return OpenAIResponsesClient(settings, http_client=httpx.Client(transport=httpx.MockTransport(handler)), sleep=waits.append)
 
 

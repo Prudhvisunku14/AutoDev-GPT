@@ -147,3 +147,29 @@ def test_the_repository_decides_the_stack_and_a_mismatch_is_declined(no_web_appr
 def test_a_plain_request_without_a_kind_goes_to_the_one_verified_stack_and_mobile_is_declined() -> None:
     assert decide(classify("Track my reading list and remind me what to read next")).stack == "python-cli"
     assert "cannot be built" in decide(classify("Make an Android app for habits")).reason
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "a Python command-line tool that compares Django and Flask release notes",
+        "a terminal app that backs up photos from my Android phone",
+        "a CLI that lists outdated Laravel packages in a composer.lock file",
+    ],
+)
+def test_explicit_command_line_wording_wins_over_frameworks_it_only_mentions(text: str) -> None:
+    request = classify(text)
+    assert request.kind == "cli" and request.stack_hint == "python-cli" and request.unsupported is None
+    assert decide(request).stack == "python-cli" and decide(request).accepted
+
+
+def test_a_chosen_stack_is_not_overridden_by_an_incidental_framework_word() -> None:
+    request = classify("compare the Django and Flask changelogs and print a summary")
+    assert request.unsupported is not None and not decide(request).accepted  # without a choice, the word still decides
+    chosen = decide(request, chosen_stack="python-cli")
+    assert chosen.stack == "python-cli" and chosen.accepted
+
+
+def test_a_mobile_or_unsupported_framework_request_is_still_declined() -> None:
+    assert not decide(classify("Build an Android app for my gym")).accepted
+    assert not decide(classify("Build a Django website for my shop")).accepted

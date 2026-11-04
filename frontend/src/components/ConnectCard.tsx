@@ -2,22 +2,24 @@ import { KeyRound, Loader2 } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { ApiError, UnauthorizedError } from "../lib/api";
 import { useApi } from "../lib/apiContext";
-import { setToken } from "../lib/token";
+import { cleanToken, setToken } from "../lib/token";
 import { Notice } from "./Notice";
 
 /**
  * Asks for the backend's API token and checks it against /status before keeping it, so a wrong token is never stored
- * and this card stays on screen to say why. The token stays in this tab only.
+ * and this card stays on screen to say why. By default the token is remembered on this computer, so a new tab or a
+ * browser restart does not ask again; unticking keeps it in this tab only.
  */
 export function ConnectCard() {
   const api = useApi();
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [remember, setRemember] = useState(true);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    const token = value.trim();
+    const token = cleanToken(value);
     if (!token) {
       setError("Paste the backend's API token.");
       return;
@@ -28,10 +30,16 @@ export function ConnectCard() {
       await api.checkToken(token);
     } catch (failure) {
       setBusy(false);
-      setError(failure instanceof UnauthorizedError ? "The backend did not accept this token." : failure instanceof ApiError ? failure.message : "The backend could not be reached.");
+      setError(
+        failure instanceof UnauthorizedError
+          ? "The backend did not accept this token. Use DEVPILOT_API_TOKEN from the .env in the folder the running backend was started from; if you changed it, restart the backend."
+          : failure instanceof ApiError
+            ? failure.message
+            : "The backend could not be reached.",
+      );
       return;
     }
-    setToken(token); // this card unmounts here: the layout now shows the page
+    setToken(token, { remember }); // this card unmounts here: the layout now shows the page
   }
 
   return (
@@ -41,7 +49,7 @@ export function ConnectCard() {
       </span>
       <h1 className="text-lg font-semibold">Connect to your DevPilot backend</h1>
       <p className="mt-1.5 text-sm text-muted">
-        Enter the API token the backend was started with (its <code className="rounded bg-slate-100 px-1 text-[12px]">DEVPILOT_API_TOKEN</code>). It is kept only in this browser tab and sent only to your local backend.
+        Enter the API token the backend was started with (its <code className="rounded bg-slate-100 px-1 text-[12px]">DEVPILOT_API_TOKEN</code>). It is sent only to your local backend.
       </p>
       <form className="mt-5 space-y-3" onSubmit={submit}>
         <label htmlFor="api-token" className="block text-sm font-medium">
@@ -58,6 +66,12 @@ export function ConnectCard() {
           aria-invalid={!!error}
           aria-describedby={error ? "api-token-error" : undefined}
         />
+        <label className="flex items-start gap-2 text-sm">
+          <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} className="mt-0.5 size-4 shrink-0 accent-violet-600" />
+          <span>
+            Remember on this computer <span className="text-muted">(untick on a shared computer: the token is then kept in this tab only)</span>
+          </span>
+        </label>
         {error && (
           <div id="api-token-error">
             <Notice tone="error">{error}</Notice>

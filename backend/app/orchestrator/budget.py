@@ -47,7 +47,11 @@ def turn_input_tokens(request: LLMRequest, run: Run) -> int:
 
 def turn_ceiling_usd(request: LLMRequest, run: Run, settings: Settings) -> float:
     """The most this GPT call can cost. The output is at most the cap that is sent with it. Zero when prices
-    are not configured."""
+    are not configured.
+
+    A real GPT client cannot exist without that cap: `OpenAIResponsesClient` refuses to be built without
+    OPENAI_MAX_OUTPUT_TOKENS (and with SDK retries), and `llm_config_problem` refuses a start, so the reserved
+    output is the enforced one. Only scripted GPT (FakeLLM), which costs nothing, can run without a cap."""
     return turn_cost_usd(Usage(input_tokens=turn_input_tokens(request, run), output_tokens=settings.openai_max_output_tokens or 0), settings) or 0.0
 
 

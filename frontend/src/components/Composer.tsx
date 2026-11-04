@@ -3,8 +3,8 @@ import { ArrowUp, Loader2, Sparkles } from "lucide-react";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { ApiError } from "../lib/api";
 import { useApi } from "../lib/apiContext";
-import { DEFAULT_STACK, projectNameFrom, requirementForStack } from "../lib/capabilities";
-import { validatePrompt, unsupportedRequest } from "../lib/prompt";
+import { projectNameFrom, requirementForStack } from "../lib/capabilities";
+import { decideStack, requestedStack, validatePrompt, DEFAULT_STACK_ID } from "../lib/prompt";
 import { assessReadiness } from "../lib/readiness";
 import { keys, useBudget, useCapabilities, useStatus } from "../lib/queries";
 import { cn } from "../lib/cn";
@@ -15,9 +15,10 @@ const MAX_HEIGHT = 320;
 
 /**
  * Collects a requirement, then asks for explicit approval of the spending limit the backend enforces before creating
- * and starting a run. Builds use the Python command-line stack, the one verified end to end. Whether a build may start is
- * the backend's answer (assessReadiness), checked again on fresh data at the moment of approval and once more by the
- * backend itself when the run starts.
+ * and starting a run. The stack comes from the request (decideStack) and is built only if the backend's capabilities say
+ * it can be verified; otherwise the request is declined with the backend's reason, never turned into another kind of
+ * application. The dialog names the stack. Whether a build may start is the backend's answer (assessReadiness), checked
+ * again on fresh data at the moment of approval and once more by the backend itself when the run starts.
  */
 export function Composer({ initialPrompt = "", onCreated }: { initialPrompt?: string; onCreated?: (project: Project, run: Run, error?: string) => void }) {
   const [prompt, setPrompt] = useState(initialPrompt);
@@ -34,14 +35,16 @@ export function Composer({ initialPrompt = "", onCreated }: { initialPrompt?: st
   const capabilities = useCapabilities();
   const budget = useBudget();
   const backendStatus = useStatus();
+  const decision = decideStack(prompt, capabilities.data?.stacks);
+  const stackId = decision.stack?.id ?? requestedStack(prompt).stackId ?? DEFAULT_STACK_ID;
   const readiness = assessReadiness({
     capabilities: capabilities.data,
     budget: budget.data,
     status: backendStatus.data,
-    stackId: DEFAULT_STACK,
+    stackId,
     failed: { capabilities: capabilities.error, budget: budget.error, status: backendStatus.error },
   });
-  const unsupported = unsupportedRequest(prompt);
+  const unsupported = decision.refusal;
   const loading = capabilities.isLoading || budget.isLoading || backendStatus.isLoading;
 
   useEffect(() => {
@@ -95,13 +98,17 @@ export function Composer({ initialPrompt = "", onCreated }: { initialPrompt?: st
         setError("The spending limit changed. Please approve the new limit.");
         return;
       }
-      const fresh = assessReadiness({ capabilities: freshCapabilities, budget: freshBudget, status, stackId: DEFAULT_STACK });
+      const chosen = decideStack(prompt, freshCapabilities.stacks); // the backend may have changed since the dialog opened
+      if (chosen.refusal || !chosen.stack) {
+        setError(chosen.refusal ?? "This request cannot be built on this backend.");
+        return;
+      }
+      const stack = chosen.stack;
+      const fresh = assessReadiness({ capabilities: freshCapabilities, budget: freshBudget, status, stackId: stack.id });
       if (!fresh.ready) {
         setError(fresh.summary);
         return;
       }
-      const stack = freshCapabilities.stacks.find((candidate) => candidate.id === DEFAULT_STACK);
-      if (!stack) return;
       const project = await api.createProject({ name: projectNameFrom(prompt), requirement_text: requirementForStack(prompt, stack), stack: stack.id });
       const run = await api.createRun(project.id);
       try {
@@ -207,6 +214,7 @@ export function Composer({ initialPrompt = "", onCreated }: { initialPrompt?: st
             <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 [overflow-wrap:anywhere] sm:px-6" data-testid="spend-body">
               <dl className="space-y-2 rounded-xl bg-slate-50 p-3 text-sm sm:p-4">
                 <div className="flex justify-between gap-3"><dt className="shrink-0 text-muted">Application</dt><dd className="min-w-0 text-right font-medium">{projectNameFrom(prompt)}</dd></div>
+                <div className="flex justify-between gap-3"><dt className="shrink-0 text-muted">Builds as</dt><dd className="min-w-0 text-right font-medium">{decision.stack?.name ?? "Checking the backend…"}</dd></div>
                 <div className="flex justify-between gap-3"><dt className="text-muted">Maximum spending</dt><dd className="font-semibold">${budget.data.run_limit_usd.toFixed(2)}</dd></div>
               </dl>
               {(error || !readiness.ready) && (

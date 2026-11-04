@@ -92,13 +92,21 @@ def start_run(
         raise HTTPException(status.HTTP_409_CONFLICT, "Run is waiting for an approval decision")
     settings = request.app.state.settings
     limit = settings.run_budget_usd
-    if approval is None and (settings.require_spend_approval or (project.stack is not None and run.started_at is None)):
-        raise HTTPException(status.HTTP_409_CONFLICT, f"This backend starts a run only with a spending approval: approve its limit of ${limit:.2f}")
+    # What makes a limit unenforceable is reported first: approving a limit that cannot be enforced would mean nothing.
     if not settings.cost_known:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             "No spending limit can be enforced: OPENAI_PRICE_INPUT_PER_MTOK and OPENAI_PRICE_OUTPUT_PER_MTOK are not set",
         )
+    problem = request.app.state.llm_problem()
+    if problem is not None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"GPT orchestrator is not configured: {problem}")
+    # A first start that can spend money always needs the person's approval of the enforced limit, whatever the stack or
+    # REQUIRE_SPEND_APPROVAL. Only scripted GPT (FakeLLM), which costs nothing, starts without one. With the setting on,
+    # resuming a paused run needs it again too.
+    paid = not request.app.state.scripted_llm
+    if approval is None and (settings.require_spend_approval or (run.started_at is None and (paid or project.stack is not None))):
+        raise HTTPException(status.HTTP_409_CONFLICT, f"This backend starts a run only with a spending approval: approve its limit of ${limit:.2f}")
     if approval is not None:
         if abs(approval.approved_max_usd - limit) > _SAME_DOLLARS:
             raise HTTPException(status.HTTP_409_CONFLICT, f"The approval is for ${approval.approved_max_usd:.2f}, but this run's enforced limit is ${limit:.2f}: approve that limit")
@@ -110,9 +118,6 @@ def start_run(
         if selected is None or not selected.verifiable:
             reason = selected.reason if selected is not None else "the selected stack is not in the backend catalog"
             raise HTTPException(status.HTTP_409_CONFLICT, f"The selected stack cannot be built and verified: {reason}")
-    problem = request.app.state.llm_problem()
-    if problem is not None:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"GPT orchestrator is not configured: {problem}")
     policy = request.app.state.start_policy
     refusal = policy.admit(session, run) if policy is not None else None
     if refusal is not None:

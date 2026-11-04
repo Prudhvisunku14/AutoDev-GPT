@@ -6,6 +6,8 @@
 #   description: what a person reads before approving the trigger
 #   inputs:      the input names the workflow accepts (all required, string values)
 #   callback:    true if the workflow posts its result to POST /integrations/n8n/callback
+#   effect:      required. What the workflow does beyond receiving the trigger: read_only, notify, write or destructive.
+#                N8N_AUTO_APPROVE=true skips approval only for read_only and notify; write and destructive always wait for a person.
 
 workflows:
   notify:
@@ -13,8 +15,10 @@ workflows:
     description: Send a short notification (a title and a message) to the channels configured in this n8n workflow.
     inputs: [title, message]
     callback: false
+    effect: notify
   echo:
     path: devpilot-echo
     description: Round-trip check. n8n receives the text and posts it back to DevPilot's callback, proving both directions work.
     inputs: [text]
     callback: true
+    effect: read_only

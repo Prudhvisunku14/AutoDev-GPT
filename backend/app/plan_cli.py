@@ -244,7 +244,8 @@ def run_planning(settings: Settings, inner: LLMClient, requirement: str, *, labe
             ledger.reserve(run_id, settings.run_budget_usd)
         person_stopped = False
         try:
-            _ok(client.post(f"{API}/runs/{run_id}/start", headers=headers))
+            # The limits are this command's constants, accepted when it was launched; the API still requires the approval to name them.
+            _ok(client.post(f"{API}/runs/{run_id}/start", json={"approved_max_usd": settings.run_budget_usd}, headers=headers))
             person_stopped = _wait(client, headers, run_id, settings, ask, emit)
         except KeyboardInterrupt:
             person_stopped = True

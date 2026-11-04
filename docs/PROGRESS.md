@@ -1276,3 +1276,48 @@ The claim in `verification/recipes.py` that the Docker website pipeline passed w
 
 **Not done:** a real n8n instance, so the templates have never been imported. Forwarding `approval.requested`, `run.completed` and `run.failed` to the notify workflow. The `opencode_via_n8n` coding provider, which stays PLANNED.
 
+### Integration and bug audit: fixes (2026-11-04)
+
+**Offline only.** No paid call, no live service, and the real `.env` was never opened. Each finding below was checked against the source before it was changed. The audit was run against `main` before the n8n and website commits were merged.
+
+**Fixed:**
+- **A01 (P0), CLI packaging:** `devpilot build`'s ZIP skipped the check for source files dropped by a safeguard, which the dashboard's download made.
+  - Both now call one function, `verification/artifact.decide`.
+  - New tests cover a credential-shaped literal in `.py`, `.js`, `.json`, `.html` and `.txt`: the CLI refuses with the same reason as the HTTP route.
+  - One older CLI test had expected a ZIP in that case, and was corrected.
+- **A02 (P0), unbounded GPT spend:** with prices set and no `OPENAI_MAX_OUTPUT_TOKENS`, each call reserved 0 output tokens and sent no cap. SDK retries could also resend a billed call that the budget then counted once.
+  - `llm_client.spend_bound_problem` refuses a start, and `OpenAIResponsesClient` refuses to be built, without a finite output cap or with `OPENAI_MAX_RETRIES` above 0. Every call now carries the cap.
+  - OpenAI's unprocessed 429s are still waited out by `rate_wait`.
+  - `.env.example` now ships `OPENAI_MAX_OUTPUT_TOKENS=4000` and `OPENAI_MAX_RETRIES=0`.
+  - **Your own `.env` may need both settings** before `python -m app` can start runs.
+- **A03 (P1), start without approval:** with `REQUIRE_SPEND_APPROVAL=false`, a run with no stack started a paid run with no approval.
+  - Now the first start of any run whose GPT is not scripted (FakeLLM) needs an approval of the enforced limit.
+  - Configuration problems (unknown prices, GPT not configured) are reported before the approval request.
+  - `plan_cli` and `scripts/live_demo.py`, which confirm spending in the terminal, now pass that approval to the API.
+- **A04 and A05 (P1), dashboard stack choice:** the composer always used `python-cli`, and a regex declined website and React prompts whatever the backend supported.
+  - `lib/prompt.decideStack` maps the request to a stack: explicit command-line wording wins, otherwise React, API, then website wording.
+  - That stack is built only if `/capabilities` says it is verifiable. Otherwise the request is declined with the backend's reason, never turned into a Python program.
+  - It is decided again on fresh capabilities at approval, and the dialog shows "Builds as".
+- **A06 (P1), entry-point wiring:** the CLI engine and `scripts/live_server.py` built the app without the GitHub, Drive and n8n integrations.
+  - `app/integrations.integrations_for` is now used by all three entry points, each integration still enabled only by its own setting.
+  - A test checks that every production `create_app(...)` call goes through it.
+- **A07 (P1), n8n auto-approve:** `N8N_AUTO_APPROVE` covered every workflow.
+  - Each registered workflow must now declare its `effect` (`read_only`, `notify`, `write` or `destructive`), and a missing one stops the app.
+  - The exemption is a predicate on the parsed arguments, consulted by the PolicyEngine only after the arguments are valid, and it fails closed. Only `read_only` and `notify` are exempt.
+  - Tests show that `write` and `destructive` workflows wait for approval and send nothing before it.
+- **A10 (P2), cache across tokens:** a changed or cleared token now empties the query cache before the page renders with the new token.
+- **A11 (P2), file browser selection:** the selection belongs to one project and one existing file.
+- **A13 (P2), CLI request classifier:**
+  - Explicit command-line wording now wins over frameworks or platforms the request only mentions ("a CLI that compares Django and Flask releases").
+  - A `--stack` the person chose is not overridden by an incidental word.
+  - Mobile apps and Django websites are still declined.
+- **A14 (P2), home page copy:** it no longer promises "deploy".
+- **A15 (P2), CI:** `.github/workflows/ci.yml` runs the backend pytest on Windows and the frontend typecheck, lint, Vitest and build. It uses no secrets, and the opt-in Docker and paid tests skip themselves. It has not run yet: it first runs when pushed.
+
+**Not fixed: design work, each needing its own decision:**
+- **A08:** a delayed n8n callback is stored but does not resume a run. Resuming on a callback would spend money without a person, so it needs a wait state and a rule for when a callback may continue a run.
+- **A09, partly done:** the dashboard now remembers the token on this computer by default (localStorage; untick it for this tab only), strips quotes copied from `.env`, forgets a refused token everywhere, and its error names the `.env` to use. Server-side sessions, so that no token is pasted at all, are still open.
+- **A12:** pagination of projects and runs.
+- **A16:** a durable queue that resumes runs after a restart.
+- **The audit's G01–G14 gaps:** GitHub writes and PRs, Drive file links and live OAuth, real RAG, the FastAPI and React runtimes, and the others.
+

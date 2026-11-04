@@ -6,4 +6,5 @@ afterEach(() => {
   cleanup();
   sessionStorage.clear();
   localStorage.clear();
+  localStorage.clear();
 });

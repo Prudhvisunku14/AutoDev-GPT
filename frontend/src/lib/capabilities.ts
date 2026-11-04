@@ -40,7 +40,7 @@ export const TECHS: readonly Tech[] = [
   },
 ];
 
-/** The stack every build uses for now: the one the backend has verified end to end. */
+/** The stack assumed for a project created without one (older projects). New builds choose theirs with decideStack. */
 export const DEFAULT_STACK = "python-cli";
 
 export const CAPABILITY_SOURCE = "Stack support is read from the authenticated backend capabilities endpoint.";
