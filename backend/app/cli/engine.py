@@ -11,6 +11,8 @@ are the ones the verified builds ran under.
 
 from __future__ import annotations
 
+import os
+import re
 import secrets
 import shutil
 import warnings
@@ -23,6 +25,7 @@ from typing import Any
 
 import openai
 
+from app.cli import credentials
 from app.cli.paths import Paths
 from app.cli.userconfig import UserConfig
 from app.config import Settings
@@ -63,17 +66,75 @@ def build_settings(
     )  # fmt: skip
 
 
-def model_access(key: str, model: str, *, client_factory: Callable[..., Any] = openai.OpenAI) -> str | None:
-    """None when the key can see the model (GET /v1/models/{model}: not billed, and no quota is proven); else why not.
-    The key is sent to OpenAI only, and never appears in the answer."""
+_SAFE_TOKEN = re.compile(r"[A-Za-z0-9_.\-]{1,64}")
+# Variables the OpenAI SDK itself reads. OPENAI_BASE_URL is ignored by the check below (the endpoint is pinned); these two are not,
+# so a stale one can make OpenAI refuse a good key. Only their names are ever reported.
+_SDK_HEADER_ENV = ("OPENAI_ORG_ID", "OPENAI_PROJECT_ID")
+
+
+def _token(value: object) -> str | None:
+    """An API error `code`/`type`/request id, only if it is a short plain identifier. Anything else is dropped, not shown."""
+    return value if isinstance(value, str) and _SAFE_TOKEN.fullmatch(value) else None
+
+
+def describe_access_failure(exc: openai.OpenAIError, model: str, *, key_source: str | None = None, key: str | None = None) -> str:
+    """Why the model check failed, naming the HTTP status and OpenAI's own error code.
+
+    Only the status, the machine-readable `code`/`type` (when they are plain identifiers) and the request id are taken from the answer.
+    Its human-readable message is never shown: for a rejected key OpenAI quotes a masked copy of it there."""
+    if isinstance(exc, openai.APITimeoutError):
+        return "OpenAI did not answer within 30 seconds (timeout): check the internet connection, a VPN or a proxy"
+    if isinstance(exc, openai.APIConnectionError):
+        cause = type(exc.__cause__).__name__ if exc.__cause__ is not None else type(exc).__name__
+        return f"OpenAI could not be reached ({cause}): check the internet connection, a VPN, a proxy or a firewall. This is not a key problem"
+    if not isinstance(exc, openai.APIStatusError):
+        return f"the check failed before OpenAI answered ({type(exc).__name__})"
+
+    status = exc.status_code
+    code = _token(getattr(exc, "code", None))
+    kind = _token(getattr(exc, "type", None))
     try:
-        client_factory(api_key=key, max_retries=0, timeout=30.0).models.retrieve(model)
-    except openai.AuthenticationError:
-        return "OpenAI did not accept the API key"
-    except (openai.NotFoundError, openai.PermissionDeniedError):
-        return f"the key cannot see the model {model}: check the name, or your account's access"
-    except openai.APIError as exc:
-        return f"OpenAI could not be reached ({type(exc).__name__}): check your internet connection"
+        request_id = _token(exc.response.headers.get("x-request-id"))
+    except AttributeError:
+        request_id = None
+    facts = f"HTTP {status}" + (f", code {code}" if code else "") + (f", type {kind}" if kind and kind != code else "")
+    tail = f" (request id {request_id}, quote it to OpenAI support)" if request_id else ""
+    overrides = [name for name in _SDK_HEADER_ENV if os.environ.get(name, "").strip()]
+    env_hint = f" {' and '.join(overrides)} is set in your environment and is sent with the request: if it names another organization or project, unset it." if overrides else ""
+    where = f" (read from {key_source})" if key_source else ""
+
+    if status == 401:
+        text = (f"OpenAI rejected the API key{where}: {facts}. The key is wrong, revoked, deleted, or belongs to a different account than the one you expect."
+                f" Run `devpilot forget-key`, then `.\\setup.cmd`, and enter the key again.{env_hint}")
+    elif status == 403:
+        text = (f"OpenAI accepted the key{where} but forbids this request: {facts}. The key's project or permissions do not allow reading model {model}"
+                f" (a restricted key, or a project without access to it).{env_hint}")
+    elif status == 404:
+        text = f"OpenAI does not know the model {model!r} for this key: {facts}. Check the spelling, or whether your project has access to it"
+    elif status == 429:
+        reason = "no credit or quota left: check billing" if code == "insufficient_quota" else "rate limited: wait a minute and retry"
+        text = f"OpenAI answered {facts}: {reason}"
+    elif status >= 500:
+        text = f"OpenAI had a server problem: {facts}. Try again shortly; this is not a key problem"
+    else:
+        text = f"OpenAI refused the check: {facts}"
+    text += tail
+    return text.replace(key, "[key]") if key else text
+
+
+def model_access(
+    key: str, model: str, *, client_factory: Callable[..., Any] = openai.OpenAI, key_source: str | None = None
+) -> str | None:
+    """None when the key can see the model (GET /v1/models/{model}: not billed, and no quota is proven); else why not.
+
+    The endpoint is OpenAI's own, whatever OPENAI_BASE_URL says in the environment, so the key goes nowhere else. The key never
+    appears in the answer; see `describe_access_failure` for what does."""
+    from app.orchestrator.llm_client import DEFAULT_OPENAI_BASE_URL
+
+    try:
+        client_factory(api_key=key, base_url=DEFAULT_OPENAI_BASE_URL, max_retries=0, timeout=30.0).models.retrieve(model)
+    except openai.OpenAIError as exc:
+        return describe_access_failure(exc, model, key_source=key_source, key=key)
     return None
 
 
@@ -123,9 +184,9 @@ class LiveEngine(AbstractContextManager[Session]):
                     networks=[name for name, _ in reversed(NETWORKS)], docker=settings.docker_cli)  # fmt: skip
 
         self._say("Checking that your OpenAI key can see the model (free, no tokens)…")
-        problem = model_access(key, config.model or "")
+        problem = model_access(key, config.model or "", key_source=credentials.source(paths.credentials))
         if problem:
-            raise EngineRefused(problem + ". Nothing was billed.")
+            raise EngineRefused(problem.rstrip(". ") + ". Nothing was billed.")
 
         launcher = OpenCodeLauncher(settings, cli, EgressPolicy.from_file(settings.egress_allowlist_file))
         problem = launcher.unavailable_reason()

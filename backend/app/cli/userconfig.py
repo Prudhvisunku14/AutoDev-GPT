@@ -25,10 +25,21 @@ class UserConfig:
     price_output_per_mtok: float | None = None
     run_cap_usd: float = DEFAULT_CAP_USD
     output_dir: str | None = None
+    # Where the prices came from: "typed" (the person entered or passed them), "default" (they pressed Enter on DevPilot's built-in
+    # figures, which are what the OpenCode release lists, not an OpenAI-published rate), or None (a file from before this was recorded).
+    prices_source: str | None = None
 
     @property
     def prices_set(self) -> bool:
         return self.price_input_per_mtok is not None and self.price_output_per_mtok is not None
+
+    @property
+    def prices_note(self) -> str:
+        """How much to trust the prices, for any line that shows them."""
+        return {
+            "typed": "entered by you, not checked by DevPilot",
+            "default": "DevPilot's built-in defaults, NOT an OpenAI-published rate: check them",
+        }.get(self.prices_source or "", "source not recorded: check them against your OpenAI pricing page")
 
     def with_(self, **changes: object) -> UserConfig:
         return replace(self, **changes)  # type: ignore[arg-type]
@@ -48,6 +59,8 @@ def validate(config: UserConfig) -> UserConfig:
     for name, value in (("price_input_per_mtok", config.price_input_per_mtok), ("price_output_per_mtok", config.price_output_per_mtok)):
         if value is not None:
             _positive(value, name)
+    if config.prices_source not in (None, "typed", "default"):
+        raise ConfigError('prices_source must be "typed" or "default"')
     if not 0 < config.run_cap_usd <= MAX_CAP_USD:
         raise ConfigError(f"run_cap_usd must be above 0 and at most {MAX_CAP_USD:.2f}")
     return config
@@ -60,13 +73,14 @@ def load(path: Path) -> UserConfig:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"{path} cannot be read: {exc}") from exc
-    known = {"model", "price_input_per_mtok", "price_output_per_mtok", "run_cap_usd", "output_dir"}
+    known = {"model", "price_input_per_mtok", "price_output_per_mtok", "run_cap_usd", "output_dir", "prices_source"}
     unknown = sorted(set(data) - known)
     if unknown:
         raise ConfigError(f"{path} has unknown settings: {', '.join(unknown)}")
     return validate(UserConfig(
         model=data.get("model"), price_input_per_mtok=data.get("price_input_per_mtok"), price_output_per_mtok=data.get("price_output_per_mtok"),
         run_cap_usd=float(data.get("run_cap_usd", DEFAULT_CAP_USD)), output_dir=data.get("output_dir"),
+        prices_source=data.get("prices_source"),
     ))  # fmt: skip
 
 
@@ -83,6 +97,8 @@ def save(path: Path, config: UserConfig) -> None:
         lines.append(f"price_input_per_mtok = {config.price_input_per_mtok!r}")
     if config.price_output_per_mtok is not None:
         lines.append(f"price_output_per_mtok = {config.price_output_per_mtok!r}")
+    if config.prices_source is not None:
+        lines.append(f"prices_source = {_quote(config.prices_source)}")
     lines.append(f"run_cap_usd = {config.run_cap_usd!r}")
     if config.output_dir is not None:
         lines.append(f"output_dir = {_quote(config.output_dir)}")

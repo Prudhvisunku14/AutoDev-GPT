@@ -75,11 +75,14 @@ def test_an_unaffordably_large_cap_is_refused_before_anything_else(capsys: pytes
 def test_doctor_exits_non_zero_when_something_blocks(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
     from app.cli import doctor
 
-    monkeypatch.setattr(doctor, "run_checks", lambda p, c: [doctor.Check("Docker running", "fail", "x", "start Docker Desktop")])
+    flags: list[bool] = []
+    monkeypatch.setattr(doctor, "run_checks", lambda p, c, check_key=False: flags.append(check_key) or [doctor.Check("Docker running", "fail", "x", "start Docker Desktop")])
     assert cli_main.main(["--home", str(tmp_path), "doctor"]) == 1
     assert "to fix: start Docker Desktop" in capsys.readouterr().out
-    monkeypatch.setattr(doctor, "run_checks", lambda p, c: [doctor.Check("Docker running", "ok")])
+    monkeypatch.setattr(doctor, "run_checks", lambda p, c, check_key=False: flags.append(check_key) or [doctor.Check("Docker running", "ok")])
     assert cli_main.main(["--home", str(tmp_path), "doctor"]) == 0
+    assert cli_main.main(["--home", str(tmp_path), "doctor", "--check-key"]) == 0
+    assert flags == [False, False, True]  # OpenAI is contacted only when --check-key is given
 
 
 def test_the_stored_key_can_be_forgotten(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:

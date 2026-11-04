@@ -18,11 +18,12 @@ from app.cli.paths import Paths
 from app.cli.userconfig import DEFAULT_MODEL, DEFAULT_PRICE_INPUT, DEFAULT_PRICE_OUTPUT, ConfigError, UserConfig, save, validate
 
 
-def _ask_number(io: IO, prompt: str, default: float) -> float:
+def _ask_number(io: IO, prompt: str, default: float) -> tuple[float, bool]:
+    """The number, and whether the person typed it (False: they pressed Enter on the default)."""
     while True:
         answer = io.ask(f"{prompt} [{default:g}]: ").strip()
         try:
-            return float(answer) if answer else default
+            return (float(answer), True) if answer else (default, False)
         except ValueError:
             io.say("Enter a number.")
 
@@ -52,12 +53,18 @@ def configure(paths: Paths, config: UserConfig, io: IO, *, key_from_env: bool, a
         chosen_model = io.ask(f"\nOpenAI model to use [{DEFAULT_MODEL}]: ").strip() or DEFAULT_MODEL
     chosen_in = input_price if input_price is not None else config.price_input_per_mtok
     chosen_out = output_price if output_price is not None else config.price_output_per_mtok
+    source = config.prices_source
+    if input_price is not None or output_price is not None:
+        source = "typed"  # passed on the command line: the person's own figures
     if (chosen_in is None or chosen_out is None) and interactive:
         io.say("\nPrices, in US dollars per 1 million tokens, from your own OpenAI pricing page. DevPilot uses them to cap your spending:")
         io.say("a build cannot start without them. Wrong (too low) prices make the cap too loose, so check them.")
-        chosen_in = _ask_number(io, "  Input price", DEFAULT_PRICE_INPUT)
-        chosen_out = _ask_number(io, "  Output price", DEFAULT_PRICE_OUTPUT)
-    updated = validate(config.with_(model=chosen_model, price_input_per_mtok=chosen_in, price_output_per_mtok=chosen_out))
+        io.say(f"The figures in brackets (${DEFAULT_PRICE_INPUT:g} and ${DEFAULT_PRICE_OUTPUT:g}) are DevPilot's own defaults, taken from the OpenCode release.")
+        io.say("They are NOT an official OpenAI rate and may be out of date: type your own, or press Enter to keep them (they are then recorded as defaults).")
+        chosen_in, typed_in = _ask_number(io, "  Input price", DEFAULT_PRICE_INPUT)
+        chosen_out, typed_out = _ask_number(io, "  Output price", DEFAULT_PRICE_OUTPUT)
+        source = "typed" if typed_in and typed_out else "default"
+    updated = validate(config.with_(model=chosen_model, price_input_per_mtok=chosen_in, price_output_per_mtok=chosen_out, prices_source=source))
     save(paths.config, updated)
     return updated
 

@@ -1,7 +1,7 @@
 """`devpilot doctor`: every requirement for a real build, checked locally, with what to do about each one that is missing.
 
-It reads local state only. It never contacts OpenAI, never starts a container, never reads the repository's `.env`, and never prints
-the key. Each check is `ok`, `warn` (a build can still start) or `fail` (it cannot), and a failure says how to fix it.
+It reads local state only. It never starts a container, never reads the repository's `.env`, and never prints the key. It contacts
+OpenAI only with `--check-key`, for one free request (GET /v1/models/{model}) that generates no tokens. Each check is `ok`, `warn` (a build can still start) or `fail` (it cannot), and a failure says how to fix it.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.cli import credentials, runtime
-from app.cli.engine import build_settings
+from app.cli.engine import build_settings, model_access
 from app.cli.paths import Paths
 from app.cli.userconfig import UserConfig
 from app.coding.launcher import config_problems
@@ -63,6 +63,8 @@ def run_checks(
     port_free: Callable[[int], bool] = _port_free,
     free_gb: Callable[[Path], float] = _free_gb,
     on_mains: Callable[[], bool | None] = _on_mains,
+    check_key: bool = False,
+    model_check: Callable[..., str | None] = model_access,
 ) -> list[Check]:
     checks: list[Check] = []
 
@@ -104,7 +106,14 @@ def run_checks(
     key = credentials.load_key(paths.credentials)
     if key is not None and not credentials.plausible(key):
         add("OpenAI API key format", False, "it does not look like an OpenAI key", "run setup.cmd and enter the key again")
-    add("Model and prices", bool(config.model) and config.prices_set, f"{config.model}, ${config.price_input_per_mtok} in / ${config.price_output_per_mtok} out per 1M tokens" if config.model and config.prices_set else "not set", "run setup.cmd: it asks for the model and your prices, which cap your spending")
+    if check_key:
+        # The one request this command ever makes: GET /v1/models/{model}. It is free (no tokens) and runs only because it was asked for.
+        if key is None or not config.model:
+            add("OpenAI key can see the model (free check)", False, "needs a key and a model first", "run setup.cmd")
+        else:
+            reason = model_check(key, config.model, key_source=where)
+            add("OpenAI key can see the model (free check)", reason is None, reason or f"{config.model}: HTTP 200, no tokens used", "the message above says which part failed")
+    add("Model and prices", bool(config.model) and config.prices_set, f"{config.model}, ${config.price_input_per_mtok} in / ${config.price_output_per_mtok} out per 1M tokens, {config.prices_note}" if config.model and config.prices_set else "not set", "run setup.cmd: it asks for the model and your prices, which cap your spending")
     add("Spending cap", True, f"${config.run_cap_usd:.2f} per build, GPT and OpenCode together, enforced before every request")
 
     # The network policy and the engine's own readiness check, the same one a build runs.

@@ -120,7 +120,7 @@ def choose_stack(requested: str | None, io: IO, interactive: bool) -> str | None
 def approval_text(config: UserConfig, cap: float) -> str:
     return (
         "\nSpending approval\n"
-        f"  Model: {config.model}  (${config.price_input_per_mtok} in / ${config.price_output_per_mtok} out per 1M tokens, your own prices)\n"
+        f"  Model: {config.model}  (${config.price_input_per_mtok} in / ${config.price_output_per_mtok} out per 1M tokens: {config.prices_note})\n"
         f"  This build may spend at most ${cap:.2f}, GPT planning and OpenCode coding together.\n"
         "  Its real cost cannot be known beforehand: it depends on the plan and on how many repairs the tests need.\n"
         f"  What is certain is the limit: before every model request the most it could cost is worked out, and a request that could\n"

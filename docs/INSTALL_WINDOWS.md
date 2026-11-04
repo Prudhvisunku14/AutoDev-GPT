@@ -101,7 +101,7 @@ Only an image that passes is recorded as approved, by its **exact ID**. Each sta
 
 ## `devpilot doctor`
 
-Checks, locally and without contacting OpenAI: Python 3.12, dependencies, Git, Docker installed and running, the sandbox image, the audited runtime image, the OpenCode binary, your key (present, plausible; never printed), model and prices, the network policy (OpenAI and the local filter only), the engine's own readiness check, leftover containers, an unconfirmed container stop, disk space, mains power and port 4096. Each failure says how to fix it.
+Checks, locally and without contacting OpenAI (unless you add `--check-key`, see Troubleshooting): Python 3.12, dependencies, Git, Docker installed and running, the sandbox image, the audited runtime image, the OpenCode binary, your key (present, plausible; never printed), model and prices, the network policy (OpenAI and the local filter only), the engine's own readiness check, leftover containers, an unconfirmed container stop, disk space, mains power and port 4096. Each failure says how to fix it.
 
 ## Troubleshooting
 
@@ -112,8 +112,12 @@ Checks, locally and without contacting OpenAI: Python 3.12, dependencies, Git, D
 | `docker build failed … apk fetch failed` | setup needs the internet once; check proxy/VPN, run `.\setup.cmd` again |
 | `… does not match its pinned SHA-256, so it was discarded` | the download was altered or corrupted; run setup again, and if it repeats, do not proceed |
 | `the image … is not the one that was audited` | the image was rebuilt or replaced; run `.\setup.cmd --rebuild` |
-| `OpenAI did not accept the API key` | `.\devpilot.cmd forget-key`, then `.\setup.cmd` with a valid key |
-| `the key cannot see the model` | the model name or your account's access; edit `model` in `config.toml` or rerun setup with `--model` |
+| `OpenAI rejected the API key … HTTP 401` | the key is wrong, revoked or from another account: `.\devpilot.cmd forget-key`, then `.\setup.cmd` with a valid key. If `OPENAI_API_KEY` is set in your environment it wins over the stored key (the message says which one was used) |
+| `… forbids this request … HTTP 403` | the key is valid but its project or permissions do not allow reading the model: use a key whose project has access, or an unrestricted key |
+| `OpenAI does not know the model … HTTP 404` | the model name, or your project's access to it; edit `model` in `config.toml` or rerun setup with `--model` |
+| `… HTTP 429` / `HTTP 5xx` / `could not be reached` | no credit or a rate limit / an OpenAI outage / your network. None of these is a key problem |
+
+To see which of these applies without starting a build, run `.\devpilot.cmd doctor --check-key`. It makes one free request (`GET /v1/models/<model>`, no tokens, not billed) and prints the HTTP status and OpenAI's error code. It never prints the key or OpenAI's own message text (OpenAI quotes a masked copy of a rejected key there). The check always goes to `api.openai.com`, whatever `OPENAI_BASE_URL` says.
 | `a crashed build left …` (warning) | `docker rm -f` the listed containers and `docker network rm` the `devpilot-*` networks |
 | `unconfirmed container stop` | an earlier build could not confirm a container stopped: check `docker ps -a`, then delete the marker folder named |
 | Windows asks about running scripts | `setup.cmd` runs `setup.ps1` with `-ExecutionPolicy Bypass` for that one process only; nothing is changed system-wide |

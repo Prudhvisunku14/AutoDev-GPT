@@ -38,7 +38,8 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--output", type=Path, help="where to save the project folder and ZIP (default: ./devpilot-output)")
     build.add_argument("--approve-spend", type=float, metavar="USD", help="approve the spending limit without typing it; must equal the limit exactly")
 
-    sub.add_parser("doctor", help="check that this computer can build, and say how to fix anything that cannot")
+    doctor = sub.add_parser("doctor", help="check that this computer can build, and say how to fix anything that cannot")
+    doctor.add_argument("--check-key", action="store_true", help="also ask OpenAI whether your key can see the model (one free request, no tokens)")
 
     setup = sub.add_parser("setup", help="one-time setup: your key, OpenCode, ripgrep and the audited Docker runtime image")
     setup.add_argument("--key-from-env", action="store_true", help="use the OPENAI_API_KEY environment variable instead of asking")
@@ -78,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "doctor":
         from app.cli.doctor import blockers, render, run_checks
 
-        checks = run_checks(where, config)
+        checks = run_checks(where, config, check_key=args.check_key)
         print(render(checks))
         return 1 if blockers(checks) else 0
     if args.command == "setup":
