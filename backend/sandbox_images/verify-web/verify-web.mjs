@@ -13,7 +13,8 @@
 //   assets     every same-origin script, stylesheet, image and icon the pages reference answers 200
 //   browser    headless Chromium: each page renders visible content with no uncaught error, no failed same-origin
 //              request and no console error; same-origin links are followed; visible buttons are clicked
-//   expect     the person's required texts, selectors and button behaviours, when a spec is given
+//   acceptance DevPilot's frozen browser checks (/spec/expect.json, version 2), one result per criterion, when given
+// The assets, browser and acceptance stages all run once the pages are served, so one run reports every problem.
 // Requests to other origins are blocked (there is no network) and reported, not counted as failures.
 // The last line of output is `DEVPILOT_WEB_REPORT <json>`. Exit code 0 only when every stage passed.
 
@@ -134,7 +135,7 @@ if (args.expect) {
   try {
     expect = JSON.parse(readFileSync(args.expect, "utf8"));
   } catch (e) {
-    stage("expect", false, `the expectation file cannot be read: ${e.message}`);
+    stage("acceptance", false, `the acceptance checks cannot be read: ${e.message}`);
     finish();
   }
 }
@@ -165,7 +166,7 @@ for (const asset of assetRefs) {
   const res = await fetch(origin + asset);
   if (res.status !== 200) missingAssets.push(`${asset} (HTTP ${res.status})`);
 }
-if (!stage("assets", missingAssets.length === 0, missingAssets.length ? `missing: ${missingAssets.join(", ")}` : `${assetRefs.size} referenced asset(s) answered 200`)) finish();
+stage("assets", missingAssets.length === 0, missingAssets.length ? `missing: ${missingAssets.join(", ")}` : `${assetRefs.size} referenced asset(s) answered 200`);
 
 // --- Browser -----------------------------------------------------------------------------------------------------
 let chromium;
@@ -231,25 +232,71 @@ try {
   }
   stage("browser", browserProblems.length === 0, browserProblems.length ? browserProblems.slice(0, 40).join("\n") : `${visited.size} page(s) rendered in Chromium with no error; ${clicks} button click(s)`, { ran: true });
 
-  if (expect && report.stages.every((s) => s.ok)) {
-    const problems = [];
-    for (const check of expect.checks || []) {
+  if (expect) {
+    // Independent acceptance: DevPilot's frozen checks (/spec/expect.json, version 2), one fresh page per criterion.
+    // Each step is data; only this code acts on it. A check passes when every step passed and the page threw nothing.
+    const results = [];
+    const locate = (page, s) => {
+      const name = { name: s.target, exact: false };
+      if (s.by === "role") return page.getByRole(s.role, name);
+      if (s.by === "label") return page.getByLabel(s.target, { exact: false });
+      if (s.by === "text") return page.getByText(s.target, { exact: false });
+      if (s.by === "placeholder") return page.getByPlaceholder(s.target, { exact: false });
+      if (s.by === "alt") return page.getByAltText(s.target, { exact: false });
+      return page.locator(s.target);
+    };
+    const KEYS = { Space: " " };
+    for (const check of (expect.version === 2 ? expect.checks : []) || []) {
       const page = await context.newPage();
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message.slice(0, 200)));
-      const label = check.id || check.text || check.selector;
+      const result = { id: String(check.id), ok: false, failed_step: null, detail: "", errors };
+      let index = -1;
       try {
-        await page.goto(origin + (check.route || "/"), { waitUntil: "networkidle", timeout: 30_000 });
-        if (check.click) await page.click(check.click, { timeout: 5_000 });
-        if (check.selector && !(await page.locator(check.selector).first().isVisible({ timeout: 5_000 }).catch(() => false))) problems.push(`${label}: ${check.selector} is not visible`);
-        if (check.text && !(await page.getByText(check.text, { exact: false }).first().isVisible({ timeout: 5_000 }).catch(() => false))) problems.push(`${label}: the text ${JSON.stringify(check.text)} is not visible`);
+        await page.goto(origin + check.start, { waitUntil: "networkidle", timeout: 30_000 });
+        for (const [i, s] of (check.steps || []).entries()) {
+          index = i;
+          const fail = (why) => { throw new Error(why); };
+          const one = () => locate(page, s).first();
+          if (s.action === "goto") await page.goto(origin + s.value, { waitUntil: "networkidle", timeout: 30_000 });
+          else if (s.action === "click") await one().click({ timeout: 5_000 });
+          else if (s.action === "fill") await one().fill(s.value, { timeout: 5_000 });
+          else if (s.action === "select") await one().selectOption({ label: s.value }, { timeout: 5_000 }).catch(() => one().selectOption(s.value, { timeout: 5_000 }));
+          else if (s.action === "check") await one().check({ timeout: 5_000 });
+          else if (s.action === "press") await page.keyboard.press(KEYS[s.value] || s.value);
+          else if (s.action === "expect_visible") { if (!(await one().isVisible())) await one().waitFor({ state: "visible", timeout: 5_000 }).catch(() => fail("it is not visible")); }
+          else if (s.action === "expect_hidden") { await one().waitFor({ state: "hidden", timeout: 5_000 }).catch(() => fail("it is still visible")); }
+          else if (s.action === "expect_text") { await page.getByText(s.value, { exact: false }).first().waitFor({ state: "visible", timeout: 5_000 }).catch(() => fail("that text is not visible")); }
+          else if (s.action === "expect_no_text") { await page.waitForTimeout(300); if (await page.getByText(s.value, { exact: false }).first().isVisible()) fail("that text is visible"); }
+          else if (s.action === "expect_url") {
+            const deadline = Date.now() + 5_000;
+            const here = () => { const u = new URL(page.url()); return u.pathname + u.search + u.hash; };
+            while (!(here() === s.value || here().endsWith(s.value) || (s.value.startsWith("/#") && new URL(page.url()).hash === s.value.slice(1))) && Date.now() < deadline) await page.waitForTimeout(100);
+            if (!(here() === s.value || here().endsWith(s.value) || (s.value.startsWith("/#") && new URL(page.url()).hash === s.value.slice(1)))) fail(`the page is ${here()}`);
+          } else if (s.action === "expect_title") { if (!(await page.title()).toLowerCase().includes(s.value.toLowerCase())) fail(`the title is ${JSON.stringify(await page.title())}`); }
+          else if (s.action === "expect_count") {
+            const deadline = Date.now() + 5_000;
+            let n = await locate(page, s).count();
+            while (n < s.count && Date.now() < deadline) { await page.waitForTimeout(150); n = await locate(page, s).count(); }
+            if (n < s.count) fail(`found ${n}`);
+          } else fail(`unknown action ${s.action}`);
+          if (s.action === "click" || s.action === "press") await page.waitForTimeout(250);
+        }
+        index = -1;
+        result.ok = errors.length === 0;
+        result.detail = errors.length ? "the page threw an uncaught error" : "passed";
       } catch (e) {
-        problems.push(`${label}: ${e.message.split("\n")[0]}`);
+        result.failed_step = index >= 0 ? index : null;
+        result.detail = String(e.message || e).split("\n")[0].replace(/\s+/g, " ").slice(0, 300);
       }
-      problems.push(...errors.map((e) => `${label}: uncaught error: ${e}`));
+      results.push(result);
       await page.close();
     }
-    stage("expect", problems.length === 0, problems.length ? problems.join("\n") : `${(expect.checks || []).length} required check(s) passed`);
+    report.acceptance = results;
+    const failedChecks = results.filter((r) => !r.ok);
+    stage("acceptance", failedChecks.length === 0 && results.length > 0,
+      results.length === 0 ? "no acceptance checks were given" : failedChecks.length ? failedChecks.map((r) => `${r.id}: ${r.detail}`).join("\n") : `${results.length} acceptance check(s) passed`,
+      { ran: results.length });
   }
 } finally {
   await browser.close();

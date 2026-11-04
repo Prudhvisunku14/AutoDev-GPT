@@ -251,23 +251,34 @@ def test_unknown_kinds_are_refused(tmp_path: Path) -> None:
 
 
 class ScriptedVerifier:
-    def __init__(self, verdicts: list[tuple[str, str]], image: str = IMAGE_ID) -> None:
+    """Plain verdicts for the stage fixtures; for the acceptance fixtures, the check ids that fail (and whether the smoke stages pass)."""
+
+    def __init__(self, verdicts: list[Any], image: str = IMAGE_ID) -> None:
         self.verdicts, self.image = list(verdicts), image
 
-    def verify(self, files: Any, kind: str, **kw: Any) -> web.WebResult:
-        verdict, reason = self.verdicts.pop(0)
-        return web.WebResult(verdict, reason, kind)
+    def verify(self, files: Any, kind: str, *, expect: Any = None, **kw: Any) -> web.WebResult:
+        answer = self.verdicts.pop(0)
+        if expect is None:
+            verdict, reason = answer
+            return web.WebResult(verdict, reason, kind)
+        failing, smoke_ok = answer
+        results = tuple({"id": c["id"], "ok": c["id"] not in failing, "errors": [], "detail": "x"} for c in expect["checks"])
+        stages = (web.Stage("serve", smoke_ok, ""), web.Stage("http", True, ""), web.Stage("assets", True, ""), web.Stage("browser", True, ""), web.Stage("acceptance", not failing, ""))
+        ok = smoke_ok and not failing
+        return web.WebResult("PASSED" if ok else "FAILED", "r", kind, stages, ({"path": "/"},), acceptance=results)
 
     def image_id(self) -> str:
         return self.image
 
 
-GOOD = [("PASSED", "every stage passed"), ("PASSED", "every stage passed"), ("FAILED", "assets: missing"), ("FAILED", "typecheck: TS2322")]
+GOOD = [("PASSED", "every stage passed"), ("PASSED", "every stage passed"), ("FAILED", "assets: missing"), ("FAILED", "typecheck: TS2322"), ((), True), (("AC-003",), True)]
 
 
 def test_the_self_test_requires_passes_and_failures_for_the_right_reasons() -> None:
-    assert len(webruntime.self_test(ScriptedVerifier(GOOD), say=lambda s: None)) == 4  # type: ignore[arg-type]
-    for bad in ([("FAILED", "browser: x"), *GOOD[1:]], [*GOOD[:2], ("PASSED", "ok"), GOOD[3]], [*GOOD[:3], ("FAILED", "build: something else")], [*GOOD[:2], ("NOT_RUN", "x"), GOOD[3]]):
+    assert len(webruntime.self_test(ScriptedVerifier(GOOD), say=lambda s: None)) == 6  # type: ignore[arg-type]
+    for bad in ([("FAILED", "browser: x"), *GOOD[1:]], [*GOOD[:2], ("PASSED", "ok"), *GOOD[3:]], [*GOOD[:3], ("FAILED", "build: something else"), *GOOD[4:]],
+                [*GOOD[:2], ("NOT_RUN", "x"), *GOOD[3:]], [*GOOD[:4], (("AC-002",), True), GOOD[5]], [*GOOD[:5], ((), True)],
+                [*GOOD[:5], (("AC-003", "AC-001"), True)], [*GOOD[:5], (("AC-003",), False)]):  # fmt: skip
         with pytest.raises(webruntime.WebRuntimeError):
             webruntime.self_test(ScriptedVerifier(bad), say=lambda s: None)  # type: ignore[arg-type]
 

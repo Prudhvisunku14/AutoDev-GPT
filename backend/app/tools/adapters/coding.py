@@ -56,7 +56,7 @@ from app.tools.adapters.workspace_fs import WorkspaceError, WorkspaceFS
 from app.tools.base import ErrorClass, ExternalStep, RecoveryInfo, RiskLevel, ToolArgs, ToolContext, ToolError, ToolSpec
 from app.tools.gates import MAX_TASKS
 from app.tools.registry import ToolRegistry
-from app.verification import acceptance
+from app.verification import acceptance, browser_acceptance
 from app.verification.backends import BackendResult, SingleStageBackend, VerificationBackend, WebsiteBackend, judge_website
 from app.verification.web import WEB_KINDS, WebVerifier
 from app.verification.recipes import VITEST_JSON, RecipeError, acceptance_spec, dependency_problems, judge_recipe, readiness, recipe_for, recipe_spec
@@ -156,7 +156,7 @@ def _begin_generate_code(runtime: CodingRuntime, ctx: ToolContext, args: Generat
         raise ToolError(ErrorClass.POLICY_REFUSED, f"task {task.order} depends on tasks that are not done yet: {', '.join(map(str, waiting))}")
     stack_id = _task_stack(ctx, task)
     stack = ctx.catalog.get(stack_id or "")
-    if stack is None or (stack.test_command is None and recipe_for(stack.id) is None):  # readiness above already required an approved recipe
+    if stack is None or (stack.test_command is None and recipe_for(stack.id) is None and stack.id not in WEB_KINDS):  # readiness above already required a verifier
         raise ToolError(ErrorClass.POLICY_REFUSED, f"stack {stack_id} cannot be verified yet, so no code is written for it; python-cli can")
     if ctx.workspace is None or ctx.call_id is None:
         raise ToolError(ErrorClass.TOOL_ERROR, "the workspace is not configured for this backend")
@@ -607,6 +607,7 @@ class _VerifyPlan:
     independent: _AcceptancePlan | None = None  # the evaluator's frozen suite, when the project has one
     components: tuple[tuple[str, Any, ExecSpec], ...] = ()  # (name, recipe, spec) per component of a multi-stack plan
     backend: VerificationBackend | None = None
+    browser_checks: browser_acceptance.FrozenChecks | None = None  # a website's frozen independent acceptance
 
 
 @dataclass(frozen=True)
@@ -660,12 +661,26 @@ def _begin_website_submit(runtime: CodingRuntime, ctx: ToolContext, args: Submit
         raise ToolError(ErrorClass.POLICY_REFUSED, "the existing Python/Vitest acceptance suite cannot be replaced by website smoke checks")
     criteria = tuple(Criterion(c.code, c.priority) for c in ctx.session.scalars(
         select(AcceptanceCriterion).where(AcceptanceCriterion.run_id == ctx.run.id).order_by(AcceptanceCriterion.code)))
-    backend = WebsiteBackend(runtime.web, acceptance.read_tree(runtime.candidates.path(ctx.run.id)), ctx.project.stack)
+    checks = _frozen_browser_checks(runtime, ctx)
+    backend = WebsiteBackend(runtime.web, acceptance.read_tree(runtime.candidates.path(ctx.run.id)), ctx.project.stack, checks=checks)
     if ctx.run.state is not RunState.VERIFYING:
         _change_state(ctx, RunState.VERIFYING, "submit_implementation accepted")
-    _record(ctx, "verification.started", {"backend": "website", "stack": ctx.project.stack, "summary": args.summary,
-                                        "repairs_so_far": ctx.run.repairs, "independent_acceptance": False})
-    return _VerifyPlan(runtime.sandbox, None, criteria, runtime.candidates.digest(ctx.run.id), backend=backend)
+    _record(ctx, "verification.started", {"backend": "website", "stack": ctx.project.stack, "summary": args.summary, "repairs_so_far": ctx.run.repairs,
+                                          "independent_acceptance": checks is not None, "acceptance_checks": len(checks.checks) if checks else 0,
+                                          "acceptance_sha256": checks.sha256 if checks else None})  # fmt: skip
+    return _VerifyPlan(runtime.sandbox, None, criteria, runtime.candidates.digest(ctx.run.id), backend=backend, browser_checks=checks)
+
+
+def _frozen_browser_checks(runtime: CodingRuntime, ctx: ToolContext) -> browser_acceptance.FrozenChecks | None:
+    """The run's frozen browser checks, or None. A copy that no longer matches its hash ends the run: nothing is judged by changed checks."""
+    run = ctx.run
+    if run.browser_acceptance_json is None or run.browser_acceptance_sha256 is None:
+        return None
+    try:
+        return browser_acceptance.thaw(run.browser_acceptance_json, run.browser_acceptance_sha256)
+    except browser_acceptance.ChecksChanged as exc:
+        why = str(exc)
+        raise ToolError(ErrorClass.POLICY_REFUSED, why, after_rollback=partial(_end_failed, runtime, ctx, outcome="acceptance_suite_changed", detail=why, keep_copy=True)) from exc
 
 
 def _acceptance_fs(settings: Settings) -> WorkspaceFS:
@@ -781,10 +796,14 @@ def _finish_submit(runtime: CodingRuntime, ctx: ToolContext, plan: _VerifyPlan, 
     result = verified.tests
     if plan.independent is not None:
         acceptance.discard(_acceptance_fs(ctx.settings), run.id)
+    browser_record = None
     if verified.backend is not None and verified.backend.website is not None:
         website = verified.backend.website
         _record(ctx, "verification.website", website.to_dict())
-        verification = judge_website(website, plan.criteria, plan.digest)
+        verification, browser_record = judge_website(website, plan.criteria, plan.digest, plan.browser_checks)
+        if browser_record is not None:  # independent acceptance: stored on the run, so the report and the delivery gate see it
+            run.acceptance_json = json.dumps(browser_record)
+            _record(ctx, "acceptance.finished", browser_record)
     else:
         verification = _judge_components(ctx, plan, verified) if plan.components else replace(judge(result, plan.criteria), fingerprint=plan.digest)
     run.verification_json = json.dumps(verification.to_dict())
@@ -794,6 +813,9 @@ def _finish_submit(runtime: CodingRuntime, ctx: ToolContext, plan: _VerifyPlan, 
             row.status, row.test_refs_json = judged.status.value, json.dumps(list(judged.tests))
     _record(ctx, "verification.finished", _verification_event(verification))
     data = _verification_data(verification)
+    if browser_record is not None:  # GPT hears which criteria failed and one sentence each, never the checks themselves
+        descriptions = {c.code: f"given {c.given}, when {c.when}, then {c.then}" for c in ctx.session.scalars(select(AcceptanceCriterion).where(AcceptanceCriterion.run_id == run.id))}
+        data["acceptance"] = browser_acceptance.for_gpt(browser_record, descriptions)
     if run.is_terminal:  # cancelled while the tests ran
         runtime.candidates.discard(run.id)
         return data

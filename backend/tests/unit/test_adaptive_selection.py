@@ -524,7 +524,9 @@ def test_the_policy_setting_chooses_the_selector(tmp_path: Path) -> None:
 def test_opencode_claims_only_what_has_been_shown(tmp_path: Path) -> None:
     settings, _ = _deployed(tmp_path)
     found = opencode_profile(settings)
-    assert found.status is ToolStatus.IMPLEMENTED and set(found.stacks) == {"python-cli"} and set(found.capabilities) == CODING_CAPABILITIES
+    assert found.status is ToolStatus.IMPLEMENTED and set(found.capabilities) == CODING_CAPABILITIES
+    # python-cli is shown by real runs at full weight; static-html is declared at a reduced weight until a real website build proves it.
+    assert dict(found.stacks) == {"python-cli": 1.0, "static-html": 0.6}
     assert found.quality is None and found.seconds is None and found.cost_usd is None  # no real model has run through it
 
 

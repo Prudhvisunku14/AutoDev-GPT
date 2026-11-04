@@ -17,7 +17,7 @@ from typing import Any
 
 from app.cli.paths import Paths
 from app.core.egress import EgressPolicy
-from app.verification import web, web_fixtures
+from app.verification import browser_acceptance, web, web_fixtures
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -48,6 +48,21 @@ def self_test(verifier: web.WebVerifier, *, say: Callable[[str], None] = print) 
             raise WebRuntimeError(f"the verifier did not fail a broken {label} (it said {result.verdict}: {result.reason})")
         if not must_pass and not result.reason.startswith(f"{failing_stage}:"):
             raise WebRuntimeError(f"the verifier failed the broken {label} for the wrong reason (expected the {failing_stage} stage): {result.reason}")
+    data, sha = browser_acceptance.freeze(web_fixtures.ACCEPTANCE_CHECKS)
+    checks = browser_acceptance.thaw(data, sha)  # the same path a run's frozen checks take
+    for label, project, must_pass, must_fail in web_fixtures.ACCEPTANCE_SELF_TEST:
+        say(f"  self-test: {label} (must {'pass' if must_pass else 'fail ' + ', '.join(must_fail)})…")
+        result = verifier.verify(web_fixtures.files(project), "static-html", require_approval=False, expect=checks.expect())
+        record = browser_acceptance.judge(checks, result.acceptance, smoke_passed=result.smoke_passed, smoke_reason=result.reason)
+        failed = tuple(c["code"] for c in record["criteria"] if c["status"] != browser_acceptance.PASSED)
+        results.append({"fixture": label, "kind": "static-html", "must_pass": must_pass, "verdict": record["verdict"], "reason": record["reason"], "failed": list(failed)})
+        say(f"    {record['verdict']}: {record['reason']}")
+        if must_pass and (record["verdict"] != browser_acceptance.PASSED or not result.passed):
+            details = "; ".join(f"{c['code']}: {c['detail']}" for c in record["criteria"] if c["status"] != browser_acceptance.PASSED)
+            raise WebRuntimeError(f"the verifier failed the acceptance checks of a working {label}: {record['reason']} ({details})\n{result.describe()}")
+        if not must_pass and (failed != must_fail or not result.smoke_passed or result.verdict != "FAILED"):
+            raise WebRuntimeError(f"the broken {label} was judged wrongly: expected exactly {', '.join(must_fail)} to fail with the built-in checks passing; "
+                                  f"got failed={', '.join(failed) or 'none'}, smoke_passed={result.smoke_passed}, verdict={result.verdict}")  # fmt: skip
     return results
 
 

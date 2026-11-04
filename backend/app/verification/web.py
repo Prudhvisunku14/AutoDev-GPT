@@ -100,10 +100,18 @@ class WebResult:
     exec_status: str = "SUCCEEDED"
     cleanup: str = "not_needed"
     duration_ms: int = 0
+    acceptance: tuple[dict[str, Any], ...] = ()  # one result per frozen browser check, when checks were given
 
     @property
     def passed(self) -> bool:
         return self.verdict == "PASSED"
+
+    @property
+    def smoke_passed(self) -> bool:
+        """The built-in checks (server, pages, assets, rendering, errors) passed and the browser ran, whatever the acceptance checks said."""
+        smoke = [s for s in self.stages if s.name != "acceptance"]
+        mandatory = set(MANDATORY.get(self.kind, ()))
+        return bool(smoke) and all(s.ok for s in smoke) and mandatory <= {s.name for s in smoke if not s.skipped} and bool(self.pages)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -111,6 +119,7 @@ class WebResult:
             "stages": [{"name": s.name, "ok": s.ok, "detail": s.detail, "skipped": s.skipped} for s in self.stages],
             "pages": list(self.pages), "blocked_external": list(self.blocked_external), "install": self.install, "proxy_audit": list(self.proxy_audit),
             "evidence": self.evidence, "exec_status": self.exec_status, "cleanup": self.cleanup, "duration_ms": self.duration_ms,
+            "acceptance": list(self.acceptance),
         }  # fmt: skip
 
     def describe(self) -> str:
@@ -123,9 +132,10 @@ class WebResult:
         return "\n".join(lines)
 
 
-def judge(kind: str, stdout: str, *, install: dict[str, Any] | None = None, image_id: str | None = None) -> WebResult:
-    """The verifier's own report, checked again here. PASSED needs every mandatory stage present and passed, and the browser run."""
-    tail = stdout[-4_000:]
+def judge(kind: str, stdout: str, *, install: dict[str, Any] | None = None, image_id: str | None = None, expect_given: bool = False) -> WebResult:
+    """The verifier's own report, checked again here. PASSED needs every mandatory stage present and passed, the browser run, and,
+    when acceptance checks were given, an acceptance stage with one result per check, all passed."""
+    tail = _REPORT.sub("[verification report recorded separately]", stdout)[-4_000:]
     if install is not None and install.get("ok") is not True:
         return WebResult("FAILED", f"dependency install failed: {str(install.get('detail', ''))[-600:]}", kind, install=install, image_id=image_id, output_tail=tail)
     match = list(_REPORT.finditer(stdout))
@@ -139,12 +149,13 @@ def judge(kind: str, stdout: str, *, install: dict[str, Any] | None = None, imag
         return WebResult("NOT_RUN", "the verifier's report has an invalid shape", kind, image_id=image_id, output_tail=tail)
     stages = tuple(Stage(str(s.get("name")), s.get("ok") is True, str(s.get("detail", "")), bool(s.get("skipped"))) for s in data.get("stages", []) if isinstance(s, dict))
     by_name = {s.name: s for s in stages}
+    accepted = data.get("acceptance", [])
     common = {"kind": kind, "stages": stages, "pages": tuple(p for p in data.get("pages", []) if isinstance(p, dict)), "blocked_external": tuple(str(u) for u in data.get("blocked_external", [])),
-              "install": install, "image_id": image_id, "output_tail": tail}  # fmt: skip
+              "install": install, "image_id": image_id, "output_tail": tail, "acceptance": tuple(a for a in accepted if isinstance(a, dict)) if isinstance(accepted, list) else ()}  # fmt: skip
     failed = next((s for s in stages if not s.ok), None)
     if failed:
         return WebResult("FAILED", f"{failed.name}: {failed.detail.splitlines()[0] if failed.detail else 'failed'}", **common)
-    missing = [name for name in MANDATORY.get(kind, ()) if name not in by_name or by_name[name].skipped]
+    missing = [name for name in (*MANDATORY.get(kind, ()), *(("acceptance",) if expect_given else ())) if name not in by_name or by_name[name].skipped]
     if missing:
         return WebResult("FAILED", f"stages did not run: {', '.join(missing)}", **common)
     browser = next((s for s in data.get("stages", []) if isinstance(s, dict) and s.get("name") == "browser"), {})
@@ -306,7 +317,7 @@ class WebVerifier:
                 done = self._verify_container(run_id, copy, spec if expect is not None else None, kind, image_id)
                 if self._cancel is not None and self._cancel.is_set():
                     raise _Interrupted("CANCELLED")
-                result = judge(kind, done.stdout + "\n" + done.stderr, install=install, image_id=image_id)
+                result = judge(kind, done.stdout + "\n" + done.stderr, install=install, image_id=image_id, expect_given=expect is not None)
                 if done.returncode != 0 and result.verdict != "FAILED":
                     result = replace(result, verdict="FAILED", reason=f"verification container exited with {done.returncode}", exec_status="FAILED")
             result = replace(result, proxy_audit=audit, evidence={"skipped_files": skipped, "files": sorted(files), "phase": phase}, exec_status="SUCCEEDED" if result.passed else "FAILED")

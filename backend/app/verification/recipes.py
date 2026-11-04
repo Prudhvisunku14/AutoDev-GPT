@@ -115,12 +115,15 @@ def recipe_for(stack: str) -> Recipe | None:
     return RECIPES.get(stack)
 
 
-# A static site has no one-container recipe: it is verified by app.verification.web (DevPilot's server, HTTP and asset checks
-# and a real browser, with no network). Generating one also needs the engine to run that path in its VERIFYING step and an
-# independent acceptance suite for pages; until both exist and have passed a real build, the stack stays unavailable, with
-# the exact missing piece named. React + Vite keeps its react-vitest recipe below (its runtime is not built or approved);
-# existing React + Vite sites can still be checked end to end with app.verification.web (`devpilot verify-site`).
-WEB_ENGINE_WIRED = False
+# A static site has no one-container recipe: it is verified by app.verification.web (DevPilot's server, HTTP and asset checks,
+# a real browser, and the run's browser acceptance checks frozen before any code existed, all with no network). The engine runs
+# that path as its VERIFYING step (tools/adapters/coding.py, verification/backends.py). It was enabled after the whole pipeline
+# passed with the real Docker verifier and Chromium: tests/integration/test_website_pipeline_docker.py, in which a broken
+# candidate failed one frozen check in the browser, was repaired by the bounded recovery and then passed and was delivered.
+# What that proves and what it does not: GPT and the coding provider were scripted there; the first real, approved paid build
+# is still to come (docs/WEBSITES_AND_REPOSITORIES.md). A static site is still refused unless the verifier image passed its
+# self-test on this computer. React + Vite keeps its react-vitest recipe below (its runtime is not built or approved).
+WEB_ENGINE_WIRED = True
 WEB_STACKS = ("static-html",)
 
 
@@ -133,7 +136,7 @@ def _web_readiness(stack: str) -> tuple[bool, str]:
         return False, ("the website verifier is self-tested here, but the build engine cannot yet run it as a complete verified build: "
                        "independent browser acceptance, component integration and a real approved build remain unverified. "
                        "Existing sites can be checked with `devpilot verify-site`")  # fmt: skip
-    return True, f"website verification for {stack} runs in the self-tested devpilot/verify-web image"
+    return True, f"{stack} is verified in the self-tested devpilot/verify-web image: built-in browser checks plus independent acceptance checks frozen before coding"
 
 
 def readiness(stack: str) -> tuple[bool, str]:

@@ -122,10 +122,13 @@ def test_a_website_is_declined_with_the_exact_missing_piece_until_its_verificati
     assert not react.accepted and react.stack == "react-vite" and "not built or approved" in react.reason and "verify-site" in react.reason
 
 
-def test_even_with_the_verifier_self_tested_a_static_site_stays_declined_until_the_engine_can_verify_it(no_web_approval: None) -> None:
+def test_once_the_verifier_is_self_tested_a_static_site_is_accepted_with_frozen_browser_acceptance(no_web_approval: None) -> None:
     web.approve_locally("sha256:" + "b" * 64)
     decision = decide(classify("Create a homepage for my bakery"))
-    assert not decision.accepted and "build engine cannot yet run it" in decision.reason and recipes.WEB_ENGINE_WIRED is False
+    assert recipes.WEB_ENGINE_WIRED is True and decision.accepted and decision.stack == "static-html"
+    assert "self-tested devpilot/verify-web image" in decision.reason and "frozen before coding" in decision.reason
+    react = decide(classify("Build a dashboard for monthly sales"))
+    assert not react.accepted and react.stack == "react-vite"  # only static sites were enabled
 
 
 def test_the_repository_decides_the_stack_and_a_mismatch_is_declined(no_web_approval: None) -> None:

@@ -134,11 +134,23 @@ def main(argv: list[str] | None = None, *, settings_for: Callable[..., Settings]
         return 1
     budget = SessionBudget(total, settings.run_budget_usd, run_seconds=settings.run_wall_clock_seconds + _START_MARGIN_SECONDS, ends_at=time.monotonic() + seconds)
     selector = ProviderSelector([ProviderOption("opencode_server", launcher, CAPABILITIES, simulated=False)])
+    if serve is None:  # really serving: static websites are buildable only if this computer's verifier image passed its self-test
+        print(f"Website builds: {_load_web_approval(settings)}")
     app = create_app(settings, sandbox=DockerSandbox.from_settings(settings), coding=selector, start_policy=budget)
     print(f"\nServing on http://{settings.devpilot_host}:{settings.devpilot_port} until {args.hours:g} hours have passed. Open the dashboard at "
           "http://localhost:5173 and connect with DEVPILOT_API_TOKEN from .env. Stop with Ctrl-C.")  # fmt: skip
     (serve or _serve)(app, settings)
     return 0
+
+
+def _load_web_approval(settings: Settings) -> str:
+    """The `devpilot setup --web` approval, re-checked against the image's current ID. Without it, static-html stays unavailable."""
+    from app.cli.paths import paths
+    from app.cli.webruntime import load_approval
+    from app.verification.web import WebVerifier
+
+    image_id, why = load_approval(paths(), WebVerifier(EgressPolicy.from_file(settings.egress_allowlist_file), docker=settings.docker_cli, work_dir=settings.coding_work_dir / "web-verification"))
+    return f"enabled (verifier {image_id[:19]}…)" if image_id else f"unavailable: {why}"
 
 
 def _serve(app: Any, settings: Settings) -> None:

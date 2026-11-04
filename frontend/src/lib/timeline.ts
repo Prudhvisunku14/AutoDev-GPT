@@ -86,14 +86,32 @@ function describe(event: RunEvent): Omit<TimelineItem, "key" | "ts"> | null {
         tone: kept ? "good" : "bad",
       };
     }
+    case "acceptance.frozen":
+      return { kind: "milestone", title: `Browser acceptance checks frozen before coding: ${count(p.checks)}`, detail: "Written from the requirements; the coding tool never sees them.", tone: "good" };
     case "verification.started":
-      return { kind: "test", title: "Tests started in the sandbox", tone: "neutral" };
+      return p.backend === "website"
+        ? { kind: "test", title: "Website checks started in Docker (no network)", detail: p.independent_acceptance ? `Built-in browser checks plus ${count(p.acceptance_checks)} frozen acceptance checks` : "Built-in browser checks only", tone: "neutral" }
+        : { kind: "test", title: "Tests started in the sandbox", tone: "neutral" };
+    case "verification.website": {
+      const stages = Array.isArray(p.stages) ? (p.stages as { name?: unknown; ok?: unknown }[]) : [];
+      const failedStages = stages.filter((stage) => stage.ok !== true).map((stage) => text(stage.name));
+      const pages = Array.isArray(p.pages) ? p.pages.length : 0;
+      return {
+        kind: "test",
+        title: `Browser run ${text(p.verdict)}: ${pages} page${pages === 1 ? "" : "s"} rendered in Chromium`,
+        detail: failedStages.length ? `Failed: ${failedStages.join(", ")}. ${text(p.reason)}` : text(p.reason) || undefined,
+        tone: p.verdict === "PASSED" ? "good" : "bad",
+      };
+    }
     case "verification.finished":
       return { kind: "test", title: `Tests ${text(p.verdict)}: ${count(p.passed)} of ${count(p.ran)} passed`, detail: text(p.reason) || undefined, tone: p.verdict === "PASSED" ? "good" : "bad" };
     case "verification.blocked":
       return { kind: "error", title: "Verification is unavailable for this stack, so nothing was generated", tone: "bad" };
-    case "acceptance.finished":
-      return { kind: "test", title: `Independent acceptance ${text(p.verdict)}: ${count(p.passed)} of ${count(p.total)} criteria`, detail: text(p.reason) || undefined, tone: p.verdict === "PASSED" ? "good" : "bad" };
+    case "acceptance.finished": {
+      const unmet = Array.isArray(p.criteria) ? (p.criteria as { code?: unknown; status?: unknown }[]).filter((c) => c.status !== "PASSED").map((c) => text(c.code)) : [];
+      const label = p.kind === "browser" ? "Independent browser acceptance" : "Independent acceptance";
+      return { kind: "test", title: `${label} ${text(p.verdict)}: ${count(p.passed)} of ${count(p.total)} criteria`, detail: unmet.length ? `Not passed: ${unmet.join(", ")}. ${text(p.reason)}` : text(p.reason) || undefined, tone: p.verdict === "PASSED" ? "good" : "bad" };
+    }
     case "recovery.decided":
       return { kind: "recovery", title: `Recovery: ${text(p.category ?? p.failure_class)} → ${text(p.action)}`, detail: text(p.reason) || undefined, tone: p.action === "STOP" ? "bad" : "warn" };
     case "recovery.outcome":
@@ -103,7 +121,7 @@ function describe(event: RunEvent): Omit<TimelineItem, "key" | "ts"> | null {
     case "repository.searched":
       return { kind: "tool", title: "Searched public repositories", tone: "neutral" };
     case "repository.imported":
-      return { kind: "tool", title: "Imported code from a public repository", tone: "neutral" };
+      return { kind: "tool", title: `Imported code from ${text(p.full_name, "a repository")}`, detail: p.commit ? `Commit ${text(p.commit).slice(0, 12)}` : undefined, tone: "neutral" };
     case "approval.requested":
       return { kind: "info", title: `Waiting for approval: ${text(p.tool, "a decision")}`, tone: "warn" };
     case "approval.decided":

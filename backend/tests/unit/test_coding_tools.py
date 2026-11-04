@@ -54,7 +54,8 @@ def failed(spec: ExecSpec) -> ExecResult:
 
 
 class Rig:
-    def __init__(self, tmp_path: Path, *steps: Step, coding: list[ScriptedAttempt] | None = None, sandbox: FakeSandbox | None = None, launcher: Any = None, selector: Any = None, **overrides: Any) -> None:
+    def __init__(self, tmp_path: Path, *steps: Step, coding: list[ScriptedAttempt] | None = None, sandbox: FakeSandbox | None = None, launcher: Any = None, selector: Any = None,
+                 web: Any = None, **overrides: Any) -> None:
         self.sandbox = sandbox or FakeSandbox(passed)
         self.launcher = launcher or SimulatedLauncher(coding or [])
         self.selector = selector or ProviderSelector([ProviderOption(PROVIDER_NAME, self.launcher, CAPABILITIES, simulated=True)])
@@ -64,7 +65,7 @@ class Rig:
         self.h.orchestrator._candidates = self.fs
         self.store = SqlAttemptStore(self.h.sessions, self.h.redactor)
         self.candidates = CandidateWorkspaces(self.fs)
-        self.runtime = CodingRuntime(selector=self.selector, store=self.store, candidates=self.candidates, sandbox=self.sandbox, gpt_label="FakeLLM (scripted)", stop_policy=FAST)
+        self.runtime = CodingRuntime(selector=self.selector, store=self.store, candidates=self.candidates, sandbox=self.sandbox, gpt_label="FakeLLM (scripted)", stop_policy=FAST, web=web)
         register_sandbox_tools(self.h.registry)
         register_coding_tools(self.h.registry, self.runtime)
         self.run_id = self.h.new_run()

@@ -17,6 +17,8 @@ from app.core.events import event_payload, list_events
 from app.db.models import AcceptanceCriterion, PlanTask, Requirement, RunState
 from app.orchestrator.run_control import change_state
 from app.rag.blueprint import plan_problems
+from app.verification import browser_acceptance
+from app.verification.browser_acceptance import BrowserCheckSpec
 from app.tools.base import ErrorClass, RiskLevel, ToolArgs, ToolContext, ToolError, ToolSpec
 from app.tools.registry import ToolRegistry
 
@@ -30,6 +32,7 @@ StackId = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, 
 MAX_REQUIREMENTS = 50
 MAX_TASKS = 30
 MAX_CRITERIA = 100
+WEBSITE_STACKS = frozenset({"static-html", "react-vite"})  # verified by app.verification.web, with frozen browser checks
 
 
 # --- Argument models ------------------------------------------------------------
@@ -101,6 +104,14 @@ class CriterionItem(ToolArgs):
     priority: Literal["MUST", "SHOULD", "COULD"]
     method: Literal["unit", "api", "e2e", "static", "manual"]
     requirement_refs: list[RequirementCode] = Field(min_length=1)
+    browser: BrowserCheckSpec | None = Field(description="Websites only: the browser check that proves this criterion, using what a visitor sees "
+                                                     "(roles and accessible names, labels, visible text). Required for every automated criterion of a website; null otherwise")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _no_browser_by_default(cls, data: Any) -> Any:
+        """Criteria written before browser checks existed omit the field: it means no browser check."""
+        return {"browser": None, **data} if isinstance(data, dict) else data
 
 
 class SubmitCriteriaArgs(ToolArgs):
@@ -276,6 +287,14 @@ def submit_criteria(ctx: ToolContext, args: SubmitCriteriaArgs) -> dict[str, obj
         problems.append(f"requirements without any criterion: {', '.join(missing)}")
     if not any(c.priority == "MUST" for c in args.criteria):
         problems.append("at least one criterion must be MUST")
+    website = stack is not None and stack.id in WEBSITE_STACKS and not json.loads(ctx.run.plan_json or "{}").get("components")
+    for c in args.criteria:
+        if website and c.method != "manual" and c.browser is None:
+            problems.append(f"{c.code} is an automated criterion of a website and needs a `browser` check that proves it")
+        elif not website and c.browser is not None:
+            problems.append(f"{c.code} has a `browser` check, but browser checks are only for one-stack website projects")
+        if c.browser is not None:
+            problems += browser_acceptance.step_problems(c.browser.steps, c.code)
     _reject_if(problems, "submit_criteria")
 
     for c in args.criteria:
@@ -292,6 +311,13 @@ def submit_criteria(ctx: ToolContext, args: SubmitCriteriaArgs) -> dict[str, obj
             )
         )
     must = sum(1 for c in args.criteria if c.priority == "MUST")
+    if website:  # frozen now, before any code exists; the coding provider never receives them
+        frozen, digest = browser_acceptance.freeze(
+            {"code": c.code, "priority": c.priority, "start": c.browser.start, "steps": [s.model_dump() for s in c.browser.steps]} for c in args.criteria if c.browser is not None
+        )
+        ctx.run.browser_acceptance_json, ctx.run.browser_acceptance_sha256 = frozen, digest
+        ctx.events.record(ctx.session, project_id=ctx.project.id, run_id=ctx.run.id, type="acceptance.frozen",
+                          payload={"kind": browser_acceptance.KIND, "checks": sum(c.browser is not None for c in args.criteria), "sha256": digest})  # fmt: skip
     ctx.events.record(
         ctx.session,
         project_id=ctx.project.id,

@@ -39,8 +39,8 @@ def test_multi_stage_backend_reports_evidence_without_inventing_acceptance(tmp_p
     assert result.website.cleanup == "removed"
     assert result.website.pages == ({"path": "/"},)
     assert result.website.evidence["files"] == sorted(files)
-    judged = judge_website(result.website, (Criterion("AC-001", "MUST"),), "digest")
-    assert judged.verdict is Verdict.NOT_RUN and judged.counts.ran == 0
+    judged, record = judge_website(result.website, (Criterion("AC-001", "MUST"),), "digest")  # no frozen checks: smoke evidence only
+    assert judged.verdict is Verdict.NOT_RUN and judged.counts.ran == 0 and record is None
     assert judged.fingerprint == "digest"
     assert all(str(c.status) != "PASSED" for c in judged.criteria)
     args = docker.run_args("verify-web.mjs")
@@ -186,11 +186,13 @@ def _context(rig, session):
     return ToolContext(session, run, project, rig.h.settings, rig.h.events, rig.h.catalog, workspace=rig.h.workspace)
 
 
-def test_real_release_gate_still_refuses_website_submit(tmp_path, approved):
+def test_website_submit_fails_closed_without_the_website_verification_backend(tmp_path, approved):
+    # The release gate now admits static-html once the verifier image is approved; a runtime with no website backend
+    # still refuses the submission instead of delivering anything unverified.
     rig = Rig(tmp_path)
     with rig.h.sessions.begin() as session:
         ctx = _context(rig, session)
-        with pytest.raises(ToolError, match="blocked"):
+        with pytest.raises(ToolError, match="website verification backend is not configured"):
             coding._begin_submit(rig.runtime, ctx, coding.SubmitImplementationArgs(summary="A site"))
 
 

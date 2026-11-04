@@ -192,6 +192,9 @@ class Run(Base):
     acceptance_suite_json: Mapped[str | None] = mapped_column(Text, default=None)  # the project's suite, copied when the run was created
     acceptance_sha256: Mapped[str | None] = mapped_column(String(64), default=None)  # of that copy; a mismatch stops the run
     acceptance_json: Mapped[str | None] = mapped_column(Text, default=None)  # the last acceptance result
+    # Websites: the browser checks frozen when the criteria were accepted (app/verification/browser_acceptance.py), and their hash.
+    browser_acceptance_json: Mapped[str | None] = mapped_column(Text, default=None)
+    browser_acceptance_sha256: Mapped[str | None] = mapped_column(String(64), default=None)
 
     project: Mapped[Project] = relationship(back_populates="runs")
 

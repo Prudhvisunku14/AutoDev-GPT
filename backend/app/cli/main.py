@@ -23,8 +23,9 @@ examples:
   devpilot setup --github-token                    store a GitHub token for private repositories (typed hidden)
 
 A build spends your own OpenAI credit, never more than the limit you approve. Builds are accepted only for stacks DevPilot can
-verify: today, Python command-line applications (new, or starting from your GitHub repository). Websites can be inspected and
-verified (static HTML, React + Vite + TypeScript), but website generation is not enabled until the engine can verify it.
+verify: Python command-line applications, and static websites (HTML, CSS, JavaScript) once `setup --web` has self-tested the
+browser verifier. Either can start from your GitHub repository. A static website passes only if independent browser checks,
+written from your request before any code exists, pass in a real browser. React, FastAPI and full-stack builds are declined.
 """
 
 

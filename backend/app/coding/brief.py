@@ -31,6 +31,16 @@ Name each test after the acceptance criterion it proves, such as test_ac_002_div
 passing test of that name fails verification."""
 
 
+_STATIC_SITE_NOTES = """\
+Static website notes: plain HTML, CSS and JavaScript, served as files from the project folder (index.html at the root). No
+build step, no package manager, no framework and no network at all: nothing may load from another site (fonts, scripts,
+images, APIs), so keep every asset in the project. Give interactive elements real, visible names (button text, link text,
+<label> for every form field) and use semantic elements (header, nav, main, footer, form, button): DevPilot checks the
+finished site in a real browser against the acceptance criteria, the way a visitor would, and treats any uncaught JavaScript
+error, console error, missing file or broken link as a failure. Keep existing pages, content and assets unless the task says
+to change them."""
+
+
 @dataclass(frozen=True)
 class BriefInput:
     task_order: int
@@ -67,4 +77,6 @@ def build_brief(spec: BriefInput) -> str:
     ]
     if spec.language.casefold() == "python":
         sections.append(_PYTHON_NOTES)
+    elif spec.stack_id == "static-html":
+        sections.append(_STATIC_SITE_NOTES)
     return "\n\n".join(sections)

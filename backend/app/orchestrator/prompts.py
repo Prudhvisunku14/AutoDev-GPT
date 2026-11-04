@@ -101,7 +101,25 @@ def instructions_for(
         methods=", ".join(stack.test_methods) if stack else "unknown",
         tasks=data_block("data", "\n".join(f"{order}. [{status}] {title}" for order, title, status in tasks or []) or "(none)"),
     )
+    if state is RunState.DEFINING_CRITERIA and stack is not None and stack.id in WEBSITE_STACKS:
+        body += "\n\n" + WEBSITE_CRITERIA
     return f"{BASE_INSTRUCTIONS}\n{body}"
+
+
+WEBSITE_STACKS = frozenset({"static-html", "react-vite"})
+WEBSITE_CRITERIA = """\
+This is a website. Every automated criterion needs a `browser` check: the page it starts on (`start`, e.g. / or /contact.html)
+and up to 15 steps that a visitor could perform and observe. The checks are frozen now, before any code exists, are never shown
+to the coding tool, and decide delivery: write them from the requirements, not from a guess at the code.
+- Find things the way a visitor does: by=role with role (button, link, heading, textbox, navigation, …) and target = its visible
+  or accessible name; by=label for form fields; by=text, placeholder or alt. Use by=css only when nothing visible names it.
+- Actions: goto (value=/path), click, fill (value), select (value), check, press (value=Enter, Escape, …).
+  Expectations: expect_visible, expect_hidden, expect_text (value), expect_no_text (value), expect_url (value=/path or /#id),
+  expect_title (value), expect_count (count). Every check needs at least one expectation.
+- Check behaviour, not wording you cannot know: prefer names and texts the requirement states, keep them short, and test
+  interactions (a menu opens, a form refuses empty input and confirms valid input, a list shows its items).
+- The site is served from its own folder with no network: do not depend on external APIs, fonts or images.
+- Set unused step fields to null."""
 
 
 def initial_message(project_name: str, requirement_text: str) -> str:

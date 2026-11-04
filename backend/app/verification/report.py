@@ -101,9 +101,12 @@ def render_markdown(report: dict[str, Any]) -> str:
         for check in report["website_verifications"]:
             lines.append(f"- {check['kind']}: {check['verdict']}. {check['reason']} Cleanup: {check['cleanup']}.")
             lines += [f"  - {s['name']}: {'passed' if s['ok'] else 'failed'}; {s['detail']}" for s in check["stages"]]
-    lines += ["", "## Acceptance criteria (proved by the provider's own tests)", *[f"- {c['code']} [{c['priority']}]: {c['status']}" for c in report["criteria"]], ""]
+    by_browser = (report.get("acceptance") or {}).get("kind") == "browser"
+    lines += ["", "## Acceptance criteria (" + ("proved by the frozen browser checks below" if by_browser else "proved by the provider's own tests") + ")",
+              *[f"- {c['code']} [{c['priority']}]: {c['status']}" for c in report["criteria"]], ""]  # fmt: skip
     independent = report.get("acceptance", _NOT_CONFIGURED)
-    lines += ["## Independent acceptance (the evaluator's frozen suite)"]
+    browser = independent.get("kind") == "browser"
+    lines += ["## Independent acceptance (" + ("browser checks frozen before any code was written" if browser else "the evaluator's frozen suite") + ")"]
     if not independent.get("configured"):
         lines += [independent["note"], ""]
     else:
@@ -111,7 +114,10 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines += [f"Acceptance run {n}: {a['verdict']}, {a['passed']} of {a['total']} criteria. {a['reason']}" for n, a in enumerate(runs, start=1)]
         lines += [f"Final: {independent['verdict']}: {independent['reason']}. Suite SHA-256 {independent.get('suite_sha256') or 'unknown'}."]
         lines += [f"- {c['code']} [{c['priority']}]: {c['status']}. {c['description']}" for c in independent.get("criteria", [])]
-        lines += ["", "_The suite runs in the same Python process as the code it judges. It catches honest mistakes and self-graded passes, and it is not an adversarial security boundary._", ""]
+        lines += ["", "_The checks were written from the acceptance criteria before any code existed, frozen with the SHA-256 above, never shown to the coding provider, "
+                  "and run as data by DevPilot's own browser runner in a no-network container. The site's scripts run in the same browser page they judge, so the "
+                  "checks catch honest mistakes and self-graded passes; they are not an adversarial security boundary._" if browser else
+                  "_The suite runs in the same Python process as the code it judges. It catches honest mistakes and self-graded passes, and it is not an adversarial security boundary._", ""]  # fmt: skip
     if report["recovery"]:
         lines += ["## Recovery", *[f"- {r.get('category') or r['failure_class']}: {r['action']}. {r['reason']}" + (f" Evidence: {r['evidence'][0]}" if r.get("evidence") else "") for r in report["recovery"]], ""]
     lines += ["## Delivered", *([f"- {f['path']} ({f['change']}, {f['bytes']} bytes)" for f in report["delivered_files"]] or ["Nothing was delivered. The project was not changed."]), ""]

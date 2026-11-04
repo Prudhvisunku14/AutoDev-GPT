@@ -4,7 +4,8 @@ Nothing here is invented to make a comparison look richer. There is one real cod
 that has never been measured stays None and is scored cautiously: no real model has run through OpenCode,
 so its quality, duration and cost are unknown, and it is IMPLEMENTED rather than VERIFIED.
 
-The simulated provider declares `python-cli`, `python-fastapi` and `react-vite`; OpenCode claims only `python-cli`, where it has been shown. Only `python-cli` has an approved verification runtime;
+The simulated provider declares `python-cli`, `python-fastapi`, `react-vite` and `static-html`; OpenCode claims `python-cli`, where it has been
+shown, and `static-html` at a reduced weight, declared but not yet shown by a real run. Only `python-cli` has an approved verification runtime;
 the others are blocked before selection until their runtime images are built and approved.
 """
 
@@ -26,9 +27,12 @@ CODING_CAPABILITIES = frozenset({"code_generation", "test_generation", "document
 _ALL_CAPABILITIES = dict.fromkeys(CODING_CAPABILITIES, 1.0)
 # What a tool can write. Whether that work can run is a separate gate: generate_code stops a run before any selection
 # when a stack's verification recipe has no approved runtime (app/verification/recipes.py).
-_DECLARED_STACKS = {"python-cli": 1.0, "python-fastapi": 1.0, "react-vite": 1.0}
-# OpenCode claims only the stacks it has been shown working in (Stage 2). It gains one after a real run proves it.
-_SHOWN_STACKS = {"python-cli": 1.0}
+_DECLARED_STACKS = {"python-cli": 1.0, "python-fastapi": 1.0, "react-vite": 1.0, "static-html": 1.0}
+# OpenCode claims the stacks it has been shown working in (Stage 2) at full weight. Static websites are declared at a reduced weight:
+# writing plain HTML, CSS and JavaScript files is within what it has done, and every such run is judged by frozen browser
+# acceptance in Docker, but no real OpenCode website build has run yet. The first approved one is that proof; until then the
+# weight stays reduced and the readiness gate (verification.recipes) decides whether a website build may start at all.
+_SHOWN_STACKS = {"python-cli": 1.0, "static-html": 0.6}
 _KINDS = {BUILD: 1.0, REPAIR: 1.0}
 DOCKER_INTERNAL, IN_PROCESS = "docker-internal", "in-process"
 OPENAI_KEY_NAME, OPENAI_HOST = "OPENAI_API_KEY", "api.openai.com"
