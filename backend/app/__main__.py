@@ -8,6 +8,7 @@ from app.coding.launcher import OpenCodeLauncher
 from app.config import get_settings
 from app.core.egress import EgressPolicy
 from app.main import create_app
+from app.n8n.runtime import build_n8n_runtime
 from app.repos.source import build_repository_source
 from app.sandbox.runner import DockerSandbox
 from app.selection.catalog import CODING_CAPABILITIES, build_selector, opencode_profile
@@ -31,7 +32,9 @@ def main() -> None:
         # REPOSITORY_SOURCE=github wires the GitHub client; each search and import still waits for approval.
         # DRIVE_SOURCE=google wires the Drive tools; consent fails closed until encryption is installed, so they stop safely.
         create_app(settings, sandbox=sandbox, coding=coding, repositories=build_repository_source(settings, EgressPolicy.from_file(settings.egress_allowlist_file)),
-                   drive=build_drive_runtime(settings, EgressPolicy.from_file(settings.egress_allowlist_file), sandbox)),
+                   drive=build_drive_runtime(settings, EgressPolicy.from_file(settings.egress_allowlist_file), sandbox),
+                   # N8N_ENABLED=true wires the n8n tools; each trigger still waits for approval unless N8N_AUTO_APPROVE=true.
+                   n8n_runtime=build_n8n_runtime(settings, EgressPolicy.from_file(settings.egress_allowlist_file))),
         host=settings.devpilot_host,
         port=settings.devpilot_port,
         log_config=None,

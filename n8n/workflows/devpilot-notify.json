@@ -1,0 +1,38 @@
+{
+  "name": "DevPilot notify",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "devpilot-notify",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Verifies DevPilot's HMAC signature and passes on the title and message.\n// Needs NODE_FUNCTION_ALLOW_BUILTIN=crypto, N8N_BLOCK_ENV_ACCESS_IN_NODE=false and DEVPILOT_WEBHOOK_SECRET in n8n's environment.\nconst crypto = require('crypto');\nconst secret = $env.DEVPILOT_WEBHOOK_SECRET;\nif (!secret) throw new Error('DEVPILOT_WEBHOOK_SECRET is not set in n8n');\nconst canonical = (v) => Array.isArray(v) ? '[' + v.map(canonical).join(',') + ']'\n  : (v !== null && typeof v === 'object') ? '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + canonical(v[k])).join(',') + '}'\n  : JSON.stringify(v);\nconst item = $input.first().json;\nconst headers = item.headers || {};\nconst ts = headers['x-devpilot-timestamp'];\nconst given = String(headers['x-devpilot-signature'] || '');\nconst expected = ts ? 'sha256=' + crypto.createHmac('sha256', secret).update(ts + '.' + canonical(item.body)).digest('hex') : '';\nconst fresh = ts && Math.abs(Date.now() / 1000 - Number(ts)) <= 300;\nif (!fresh || given.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(given), Buffer.from(expected))) {\n  throw new Error('DevPilot signature rejected');\n}\nreturn [{ json: { title: item.body.inputs.title, message: item.body.inputs.message, run_id: item.body.run_id } }];\n"
+      },
+      "name": "Verify signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [240, 0]
+    },
+    {
+      "parameters": {},
+      "name": "Replace with your channel (Slack, email, Teams...)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [480, 0]
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "Verify signature", "type": "main", "index": 0 }]] },
+    "Verify signature": { "main": [[{ "node": "Replace with your channel (Slack, email, Teams...)", "type": "main", "index": 0 }]] }
+  },
+  "settings": {}
+}

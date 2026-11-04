@@ -1,0 +1,20 @@
+# n8n workflows DevPilot may trigger (ARCHITECTURE §8.1). Used only when N8N_ENABLED=true.
+# GPT names a key and supplies values for exactly the listed inputs; it never supplies a URL or a path.
+# Each key needs a matching active workflow in n8n whose Webhook node uses `path` (see n8n/workflows/).
+#
+#   path:        one URL segment; DevPilot posts to <N8N_BASE_URL>/webhook/<path>
+#   description: what a person reads before approving the trigger
+#   inputs:      the input names the workflow accepts (all required, string values)
+#   callback:    true if the workflow posts its result to POST /integrations/n8n/callback
+
+workflows:
+  notify:
+    path: devpilot-notify
+    description: Send a short notification (a title and a message) to the channels configured in this n8n workflow.
+    inputs: [title, message]
+    callback: false
+  echo:
+    path: devpilot-echo
+    description: Round-trip check. n8n receives the text and posts it back to DevPilot's callback, proving both directions work.
+    inputs: [text]
+    callback: true

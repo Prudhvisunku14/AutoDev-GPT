@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api import approvals, artifacts, budget, capabilities, health, history, integrations, projects, runs
+from app.api import approvals, artifacts, budget, capabilities, health, history, integrations, n8n, projects, runs
 from app.coding.attempt_store import SqlAttemptStore
 from app.coding.candidate import CandidateWorkspaces
 from app.config import Settings, get_settings
@@ -28,6 +28,7 @@ from app.orchestrator.loop import Orchestrator
 from app.orchestrator.run_manager import RunManager
 from app.orchestrator.start_policy import StartPolicy
 from app.orchestrator.state_machine import FULL_RUN_STATES, ORCHESTRATED_STATES
+from app.n8n.runtime import N8nRuntime
 from app.repos.source import RepositorySource
 from app.sandbox.docker_cli import SandboxError
 from app.sandbox.runner import SandboxRunner
@@ -35,6 +36,7 @@ from app.selection.selector import Selector
 from app.stacks.catalog import StackCatalog
 from app.tools.adapters.coding import CodingRuntime, recover_attempts, register_coding_tools
 from app.tools.adapters.drive import DriveRuntime, register_drive_tools
+from app.tools.adapters.n8n import register_n8n_tools
 from app.tools.adapters.repositories import RepositoryRuntime, register_repository_tools
 from app.tools.adapters.sandbox import register_sandbox_tools
 from app.tools.adapters.workspace_fs import WorkspaceFS
@@ -58,6 +60,7 @@ def create_app(
     coding: Selector | None = None,
     repositories: RepositorySource | None = None,
     drive: DriveRuntime | None = None,
+    n8n_runtime: N8nRuntime | None = None,
     gpt_label: str | None = None,
     start_policy: StartPolicy | None = None,
     web_verifier: WebVerifier | None = None,
@@ -71,6 +74,7 @@ def create_app(
     GPT drive a run to the end. Without it a run pauses at IMPLEMENTING. `repositories` enables the
     approval-gated search and import of public code in PLANNING (fixtures offline; GitHub once approved).
     `drive` enables the Google Drive and RAG knowledge-base tools (a fixture Drive offline; off by default).
+    `n8n_runtime` enables `trigger_workflow`, `get_workflow_result` and the n8n routes (a simulated n8n offline; off by default).
     """
     settings = settings or get_settings()
     redactor = Redactor(settings.secret_values())
@@ -109,6 +113,8 @@ def create_app(
         register_repository_tools(registry, RepositoryRuntime(repositories))
     if drive is not None:
         register_drive_tools(registry, drive)
+    if n8n_runtime is not None:
+        register_n8n_tools(registry, n8n_runtime)
     executor = ToolExecutor(registry, PolicyEngine(), redactor, max_output_chars=settings.tool_output_max_chars)
     llm_provider, llm_problem = _llm_wiring(settings, egress, llm)
     orchestrator = Orchestrator(
@@ -163,6 +169,7 @@ def create_app(
     app.state.llm_problem = llm_problem
     app.state.sandbox = sandbox
     app.state.drive = drive
+    app.state.n8n = n8n_runtime
     app.state.gpt_label = gpt_label
     app.state.coding_selector = coding if runtime is not None else None
     app.state.start_policy = start_policy
@@ -203,6 +210,7 @@ def create_app(
     app.include_router(capabilities.router, prefix=API_PREFIX)
     app.include_router(history.router, prefix=API_PREFIX)
     app.include_router(integrations.router)  # its own paths: the OAuth callback is not under the API prefix
+    app.include_router(n8n.router)  # its own paths: n8n's signed callback is not under the API prefix
     if UI_DIR.is_dir():
         app.mount("/ui", StaticFiles(directory=UI_DIR, html=True), name="ui")
     return app

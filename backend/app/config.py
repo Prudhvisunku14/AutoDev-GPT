@@ -163,6 +163,18 @@ class Settings(BaseSettings):
     repository_max_archive_mb: float = Field(default=20.0, gt=0, le=200)
     repository_max_files: int = Field(default=2_000, ge=1, le=20_000)
 
+    # --- n8n workflows (ARCHITECTURE §8.1) ----------------------------------
+    # Off by default. On, GPT may trigger only the workflows listed in N8N_WORKFLOWS_FILE, each call signed with
+    # N8N_WEBHOOK_SECRET and waiting for a person's approval unless N8N_AUTO_APPROVE=true. n8n answers asynchronously
+    # at POST /integrations/n8n/callback, signed the same way. The base URL must also be in the egress allowlist's n8n entry.
+    n8n_enabled: bool = False
+    n8n_base_url: str = "http://127.0.0.1:5678"
+    n8n_workflows_file: Path = Path("config/n8n_workflows.yaml")
+    n8n_auto_approve: bool = False
+    n8n_callback_url: str | None = None  # where n8n should post results, as n8n sees DevPilot; None: no callback is offered
+    n8n_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
+    n8n_max_response_bytes: int = Field(default=64_000, ge=1_024, le=1_000_000)
+
     # --- Google Drive and the RAG knowledge base (Milestone 6) --------------
     # off: no Drive tools. google: the Drive v3 client and the OAuth flow (app/drive/oauth.py), which fails closed
     # until cryptography is installed and DEVPILOT_TOKEN_KEY is set, and has never run against Google. Tests and the
@@ -262,6 +274,7 @@ class Settings(BaseSettings):
     def _resolve_paths(self) -> Settings:
         self.workspaces_dir = _from_repo_root(self.workspaces_dir)
         self.egress_allowlist_file = _from_repo_root(self.egress_allowlist_file)
+        self.n8n_workflows_file = _from_repo_root(self.n8n_workflows_file)
         self.coding_checkpoints_dir = _from_repo_root(self.coding_checkpoints_dir)
         self.coding_work_dir = _from_repo_root(self.coding_work_dir)
         return self

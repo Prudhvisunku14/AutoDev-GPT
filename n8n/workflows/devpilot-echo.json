@@ -1,0 +1,53 @@
+{
+  "name": "DevPilot echo (round-trip check)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "devpilot-echo",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Verifies DevPilot's HMAC signature, then builds a signed callback (ARCHITECTURE §8.1).\n// Needs NODE_FUNCTION_ALLOW_BUILTIN=crypto, N8N_BLOCK_ENV_ACCESS_IN_NODE=false and DEVPILOT_WEBHOOK_SECRET in n8n's environment.\nconst crypto = require('crypto');\nconst secret = $env.DEVPILOT_WEBHOOK_SECRET;\nif (!secret) throw new Error('DEVPILOT_WEBHOOK_SECRET is not set in n8n');\n// DevPilot signs JSON with sorted keys and no spaces; rebuild exactly that from the parsed body.\nconst canonical = (v) => Array.isArray(v) ? '[' + v.map(canonical).join(',') + ']'\n  : (v !== null && typeof v === 'object') ? '{' + Object.keys(v).sort().map((k) => JSON.stringify(k) + ':' + canonical(v[k])).join(',') + '}'\n  : JSON.stringify(v);\nconst hmac = (ts, text) => 'sha256=' + crypto.createHmac('sha256', secret).update(ts + '.' + text).digest('hex');\nconst item = $input.first().json;\nconst headers = item.headers || {};\nconst ts = headers['x-devpilot-timestamp'];\nconst given = String(headers['x-devpilot-signature'] || '');\nconst expected = ts ? hmac(ts, canonical(item.body)) : '';\nconst fresh = ts && Math.abs(Date.now() / 1000 - Number(ts)) <= 300;\nif (!fresh || given.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(given), Buffer.from(expected))) {\n  throw new Error('DevPilot signature rejected');\n}\nconst sent = item.body;\nif (!sent.callback_url) throw new Error('DevPilot sent no callback_url: set N8N_CALLBACK_URL');\nconst reply = canonical({\n  trigger_id: sent.trigger_id, project_id: sent.project_id, run_id: sent.run_id,\n  status: 'success', execution_id: String($execution.id), result: { echo: sent.inputs.text },\n});\nconst now = String(Math.floor(Date.now() / 1000));\nreturn [{ json: { callback_url: sent.callback_url, timestamp: now, signature: hmac(now, reply), body: reply } }];\n"
+      },
+      "name": "Verify and sign reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [240, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.callback_url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-DevPilot-Timestamp", "value": "={{ $json.timestamp }}" },
+            { "name": "X-DevPilot-Signature", "value": "={{ $json.signature }}" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.body }}",
+        "options": {}
+      },
+      "name": "Callback to DevPilot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 0]
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "Verify and sign reply", "type": "main", "index": 0 }]] },
+    "Verify and sign reply": { "main": [[{ "node": "Callback to DevPilot", "type": "main", "index": 0 }]] }
+  },
+  "settings": {}
+}

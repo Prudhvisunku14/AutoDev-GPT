@@ -12,7 +12,7 @@ from enum import StrEnum
 from app.db.models import TERMINAL_RUN_STATES, RunState
 from app.tools.base import RiskLevel, ToolSpec
 
-# SECURITY.md §3. Phase 8 adds the N8N_AUTO_APPROVE exception for EXTERNAL_NETWORK.
+# SECURITY.md §3. The one exception: an EXTERNAL_NETWORK tool registered with auto_approved (N8N_AUTO_APPROVE=true).
 _ALWAYS_APPROVE = frozenset({RiskLevel.EXTERNAL_NETWORK, RiskLevel.GIT_PUSH, RiskLevel.DESTRUCTIVE})
 
 
@@ -38,6 +38,8 @@ class PolicyEngine:
             return PolicyDecision(Decision.DENY, f"{spec.name} is not available in state {state} (allowed: {allowed})")
         if spec.asks_human:
             return PolicyDecision(Decision.ASK_HUMAN, "the run pauses until a person answers")
+        if spec.auto_approved and spec.risk is RiskLevel.EXTERNAL_NETWORK and not approved:
+            return PolicyDecision(Decision.ALLOW, f"{spec.name} runs without approval because the operator set N8N_AUTO_APPROVE=true")
         if spec.risk in _ALWAYS_APPROVE and not approved:
             return PolicyDecision(Decision.REQUIRE_APPROVAL, f"{spec.risk} actions always need approval")
         return PolicyDecision(Decision.ALLOW, f"{spec.risk} is allowed in {state}")

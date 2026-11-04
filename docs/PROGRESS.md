@@ -60,7 +60,7 @@ Phase 4D Round 3 (2026-10-31): the API filter and independent container terminat
 | 5 | Verification-guided development | 🟡 Tests in Docker judged against MUST criteria; Stage 4 adds a frozen, hidden evaluator suite with per-criterion evidence (offline-tested, replayed). No score | Docker for the acceptance run |
 | 6 | Failure classification and recovery | 🟡 Stage 3 implemented and tested offline (2026-11-02), not validated on real failures. Simulated recovery 59.8% against 66.3% for the bounded baseline (55.7% as deployed), at lower cost. Escalation off, repeat limit 2. No real-failure dataset | Docker for the deferred tests, then real failure data |
 | 7 | Adaptive tool selection | 🟡 Python-only Stage 2 built (2026-11-02): eligibility filter, utility ranking, verified history, fallback. One real provider, so no real comparison. Target not met in simulation, and the breaker is not built | Docker for the deferred tests |
-| 8 | GitHub, Google Drive and n8n integrations, with document retrieval | 🟡 Milestone 1 (2026-11-02): public repository discovery, evaluation and safe import, multi-stack plans and framework recipes, offline-tested with fixtures; live GitHub not reached and recipes never executed. Google Drive and n8n not started | `codeload.github.com` in the egress allowlist, approvals, a read-only token or a lower search limit; Google OAuth client; n8n container |
+| 8 | GitHub, Google Drive and n8n integrations, with document retrieval | 🟡 Milestone 1 (2026-11-02): public repository discovery, evaluation and safe import, multi-stack plans and framework recipes, offline-tested with fixtures; live GitHub not reached and recipes never executed. Google Drive offline (Milestone 6). n8n adapter built and offline-tested (2026-11-04): signed triggers, signed callback, health check; never run against a real n8n | `codeload.github.com` in the egress allowlist, approvals, a read-only token or a lower search limit; Google OAuth client; n8n container |
 | 9 | React frontend | 🟡 Stage 4: a read-only dashboard in plain HTML and JavaScript at `/ui`, no packages. No React app | — |
 | 10 | Evaluation and competition demonstration | 🟡 Stage 4: offline demonstration (six scenarios) and a pre-registered simulated evaluation. No real model, no Docker in this stage | Docker and model approval for a real demonstration |
 
@@ -1238,3 +1238,41 @@ The source is GitHub's release of BurntSushi/ripgrep, the version OpenCode 1.19.
 **Real clean-checkout run:** a copy of exactly what git would hold (tracked plus untracked-not-ignored: 384 files, no `.env`, `.venv`, `node_modules` or data) with a throwaway `DEVPILOT_HOME` and a **fake** key in the environment. `.\setup.cmd --key-from-env --model gpt-6.1-sol --input-price 2 --output-price 10 --yes` installed the pinned dependencies, downloaded and hash-verified ripgrep (GitHub) and OpenCode (npm), built the image, audited it (user 65534:65534, six layers matching their hashes, last layer only `rg` with the pinned SHA-256, `libstdc++` and `libgcc_s` present) and passed `devpilot doctor` **17 of 17**. A second `setup` took 13.6 s and skipped everything. `devpilot --help`, `doctor`, a declined approval, a mismatched `--approve-spend`, an unsupported request and an over-limit cap all behaved and spent nothing. The fake key was in no file; the real `%LOCALAPPDATA%\DevPilot` was never created; the existing `devpilot/opencode-runtime:1.19.5` and `devpilot/opencode-check:1.19.5` images were unchanged.
 
 **Not verified:** a real build through `devpilot build`: it needs your key and your approval to spend. The test-start of the real containers (the "dry launch") was not run, because it needs the live-coding approval flag. FastAPI, React and full-stack remain unsupported, declined at the prompt. Not tried: a machine with Docker's classic image store, a non-Windows OS, or a Docker Desktop that cannot reach the Alpine mirrors.
+
+### n8n integration: signed triggers, signed callbacks, health check (2026-11-04)
+
+**Offline only.** No n8n instance was started or contacted, no paid call was made, and the real `.env` was never opened. Until now, n8n existed only as a planned selector profile.
+
+**New:**
+- `app/n8n/`:
+  - `workflows.py` loads the registry in `config/n8n_workflows.yaml`. Each entry is a key, a one-segment webhook path, a description and the input names the workflow takes. A malformed file stops the app.
+  - `signing.py` implements HMAC-SHA256 over `timestamp.body`, a five-minute window on either side, a constant-time compare, and a replay guard that fails closed when full.
+  - `client.py` holds the `N8nClient` Protocol and `HttpN8nClient`. Every request goes through the egress allowlist's `n8n` entry. Redirects are never followed, and answers are size-limited. The public API is read-only: workflows (paged) and executions.
+  - `fixtures.py` provides the simulated n8n.
+  - `runtime.py` names configuration problems and runs the health check.
+- `trigger_workflow` (EXTERNAL_NETWORK) and `get_workflow_result` (READ) in `app/tools/adapters/n8n.py`:
+  - GPT names a registered key and exactly its inputs, and never supplies a URL.
+  - The trigger is committed before the webhook is sent, so a callback that arrives at once still matches.
+  - Workflow output reaches GPT only as labelled untrusted data.
+- `N8N_AUTO_APPROVE` is enforced in code. `ToolSpec.auto_approved` is honoured by the PolicyEngine only for EXTERNAL_NETWORK, and the registry refuses it on any other risk, so GIT_PUSH and DESTRUCTIVE still always wait for a person.
+- Routes:
+  - `POST /integrations/n8n/callback` (HMAC, not the bearer token). It verifies the signature before parsing anything. It requires a trigger that this project's run made, for a workflow registered to report back, and accepts one callback per trigger. Bodies are at most 64 KB, and stored results at most 8,000 characters.
+  - `GET /api/v1/integrations/n8n/status` (bearer token) checks each registered workflow against n8n's own list: present, active, recent executions.
+  - Both routes answer 404 while `N8N_ENABLED=false`, the default.
+- Templates and guide: `n8n/workflows/devpilot-echo.json` (round trip) and `devpilot-notify.json`, with setup steps in `n8n/README.md`.
+- Settings: `N8N_ENABLED`, `N8N_WORKFLOWS_FILE`, `N8N_CALLBACK_URL`, `N8N_TIMEOUT_SECONDS`, `N8N_MAX_RESPONSE_BYTES`.
+
+**Tests:** `test_n8n.py` has 52 tests, covering the registry, signing, the client over `httpx.MockTransport`, egress refusals, the runtime, the policy exception, the tools through the real orchestrator and approval queue, and the callback route. Two of them deserve a note:
+- **Round trip:** GPT is scripted. It triggers `echo`, a simulated n8n verifies the signature and posts a signed callback to the real FastAPI route on the same database, and GPT's next call reads `success` and the echoed text.
+- **Templates in Node.js:** the templates' JavaScript runs in Node.js. It accepts DevPilot's signature, including non-ASCII and quoted text, and refuses forged and stale ones. Its reply passes DevPilot's verification.
+
+**Also in this commit:** the uncommitted static-website pipeline from earlier on 2026-11-04. Four existing tests still asserted that websites were declined, which that change deliberately lifts. They were updated to the new contract:
+- OpenCode declares `static-html` at weight 0.6.
+- A self-tested verifier lets a static site be accepted, while React stays declined.
+- Submitting a site with no website backend still fails closed.
+- The CLI help names the new limits.
+
+The claim in `verification/recipes.py` that the Docker website pipeline passed was not re-run in this session.
+
+**Not done:** a real n8n instance, so the templates have never been imported. Forwarding `approval.requested`, `run.completed` and `run.failed` to the notify workflow. The `opencode_via_n8n` coding provider, which stays PLANNED.
+

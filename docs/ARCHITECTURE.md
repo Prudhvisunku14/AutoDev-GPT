@@ -350,6 +350,8 @@ The catalog loader validates everything at startup. Every image must exist, ever
 
 ### 8.1 n8n
 
+> **Status (2026-11-04):** built and offline-tested against a simulated n8n: `app/n8n/`, `trigger_workflow`, `get_workflow_result`, the signed callback and `GET /api/v1/integrations/n8n/status`. It has not run against a real n8n instance. Event forwarding to the notification workflow and `opencode_via_n8n` are not built yet.
+
 - **Deployment:** the `n8nio/n8n` container at `127.0.0.1:5678`.
 - **DevPilot → n8n:**
   - `N8nClient.trigger(key, payload)` posts only to webhook URLs registered in `config/n8n_workflows.yaml`.
