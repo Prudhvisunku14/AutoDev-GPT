@@ -131,3 +131,33 @@ def setup_command(
     checks = run_checks(paths, config)
     io.say(render(checks))
     return 1 if blockers(checks) else 0
+
+
+def setup_extras(paths: Paths, *, web_runtime: bool, github: bool, rebuild: bool = False, interactive: bool = True, io: IO | None = None,
+                 ask_secret: Callable[[str], str] = secret_prompt, run: runtime.Runner = subprocess.run) -> int:  # fmt: skip
+    """`setup --github-token` and `setup --web`. Neither makes an OpenAI request."""
+    from app.cli import github_token, sources, webruntime
+
+    io = io or ConsoleIO()
+    paths.ensure()
+    if github:
+        if not interactive:
+            io.say(f"Setup stopped: a token is typed hidden in a terminal; otherwise set the {github_token.ENV_VARS[0]} environment variable.")
+            return 1
+        io.say("A GitHub token lets DevPilot read your private repositories. Use a fine-grained token with access to only the repositories")
+        io.say("you will build from, and the permission Contents: Read-only. It is stored encrypted for your Windows account and sent only")
+        io.say("to api.github.com. Create one at https://github.com/settings/personal-access-tokens/new")
+        token = ask_secret("GitHub token (input is hidden): ").strip()
+        try:
+            github_token.store(paths.github_credentials, token)
+        except credentials.CredentialError as exc:
+            io.say(f"Setup stopped: {exc}")
+            return 1
+        io.say("  token stored.")
+    if web_runtime:
+        try:
+            webruntime.setup_web(paths, sources.egress(), run=run, rebuild=rebuild, say=io.say)
+        except Exception as exc:  # noqa: BLE001 - every failure (build, self-test, Docker) is reported, and nothing is approved
+            io.say(f"\nSetup stopped: the website verifier was not approved: {exc}")
+            return 1
+    return 0

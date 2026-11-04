@@ -17,26 +17,23 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from app.cli import credentials, runtime
+from app.cli import credentials, runtime, sources, webruntime
 from app.cli.doctor import blockers, render, run_checks
 from app.cli.engine import API, EngineRefused, LiveEngine, Session
 from app.cli.paths import Paths
+from app.cli.request import Decision, classify, decide
 from app.cli.userconfig import MAX_CAP_USD, UserConfig
+from app.repos.github_access import Checkout, RepoAccessError
+from app.repos.github_url import RepoUrlError
+from app.repos.importer import ImportRefused, import_files
 from app.stacks.catalog import StackCatalog
-from app.verification import artifact
+from app.verification import artifact, web
 from app.verification.recipes import readiness
 
 MIN_PROMPT, MAX_PROMPT = 15, 19_000
 DEFAULT_STACK = "python-cli"
 POLL_SECONDS = 1.0
 HOW_TO_RUN = "DEVPILOT-HOW-TO-RUN.txt"
-
-# Only Python command-line applications have been verified end to end. Another kind of request is declined, never built as something else.
-_OTHER_KINDS = re.compile(
-    r"\b(react|vue|angular|svelte|next\.?js|fastapi|flask|django|express|node\.?js|website|web\s?site|web\s?app(lication)?|web\s?page|landing page|frontend|front-end|mobile app|android|ios|swift|kotlin|flutter)\b",
-    re.IGNORECASE,
-)
-
 
 class IO(Protocol):
     def ask(self, prompt: str) -> str: ...
@@ -56,13 +53,19 @@ def secret_prompt(prompt: str) -> str:
 
 
 def unsupported_request(prompt: str) -> str | None:
-    match = _OTHER_KINDS.search(prompt)
-    if match is None:
+    """Why a request without a repository cannot be built now, or None. With a repository, its files decide (see build_command)."""
+    try:
+        request = classify(prompt)
+    except RepoUrlError as exc:
+        return f"Refused: {exc}."
+    if request.repo is not None:
         return None
-    return f"“{match.group(0)}” applications cannot be built yet: DevPilot currently builds and verifies Python command-line applications only."
+    decision = decide(request)
+    return None if decision.accepted else f"Not built: {decision.reason}."
 
 
 def validate_prompt(prompt: str) -> str | None:
+    """Length only. What is asked for is decided by `classify` and `decide`, from the request and any repository's own files."""
     text = prompt.strip()
     if not text:
         return "Describe the application you want to build."
@@ -70,7 +73,7 @@ def validate_prompt(prompt: str) -> str | None:
         return f"Add a little more detail: at least {MIN_PROMPT} characters."
     if len(text) > MAX_PROMPT:
         return f"That is {len(text):,} characters; the limit is {MAX_PROMPT:,}."
-    return unsupported_request(text)
+    return None
 
 
 def project_name(prompt: str) -> str:
@@ -310,9 +313,48 @@ def package(session: Session, run: dict[str, Any], output: Path, io: IO) -> Buil
     return BuildResult(run["state"], cost, zip_path=zip_path, folder=folder, verification=artifact.verification_level(report))
 
 
-def run_build(session: Session, prompt: str, stack: str, cap: float, output: Path, io: IO, *, sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic) -> BuildResult:
+_INTENT_WORDS = {
+    "adapt": "Start from this existing project and adapt it to the request. Keep its working files, structure and assets; change only what the request needs.",
+    "modify": "Modify this existing project as the request asks. Keep everything the request does not ask to change.",
+    "rebuild": "Rebuild this project as the request asks. Reuse its assets, content and any files that still fit; replace what the request asks to replace.",
+}
+MAX_REQUIREMENT = 20_000  # the API's limit for requirement_text
+
+
+def source_context(source: Checkout, intent: str, *, room: int = 6_000) -> str:
+    """What the planner is told about an imported repository: facts from Python (its URL, commit and file names), never text
+    from inside the repository, which is untrusted."""
+    files = sorted(source.files)
+    head = (f"\n\nExisting project: {source.info.url} at commit {source.commit}, already imported into the workspace ({len(files)} files). "
+            f"{_INTENT_WORDS.get(intent, _INTENT_WORDS['adapt'])}\nFiles:")  # fmt: skip
+    listed: list[str] = []
+    for name in files:
+        if len(head) + sum(len(x) + 3 for x in listed) + len(name) + 40 > room:
+            listed.append(f"… and {len(files) - len(listed)} more")
+            break
+        listed.append(name)
+    return head + "".join(f"\n  {x}" for x in listed)
+
+
+def import_source(session: Session, project_id: str, source: Checkout) -> int:
+    """The pinned commit's files into the project's workspace, through the jail; nothing existing is overwritten, nothing is run."""
+    record = import_files(session.app.state.workspace_fs, project_id, source.files, full_name=source.info.full_name, url=source.info.url, commit=source.commit,
+                          license=source.info.license or "not stated", attribution="the person's own repository, supplied by them for this build", source="github")  # fmt: skip
+    return len(record.files)
+
+
+def run_build(session: Session, prompt: str, stack: str, cap: float, output: Path, io: IO, *, sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic,
+              source: Checkout | None = None, intent: str = "new") -> BuildResult:  # fmt: skip
     requirement = f"{prompt.strip()}\n\nTechnology stack selected by the user: {stack}. Use this stack exactly."
-    project = _json(session.client.post(f"{API}/projects", json={"name": project_name(prompt), "requirement_text": requirement, "stack": stack}, headers=session.headers), "saving the project")
+    if source is not None:
+        requirement += source_context(source, intent, room=max(500, MAX_REQUIREMENT - len(requirement)))
+    project = _json(session.client.post(f"{API}/projects", json={"name": project_name(prompt), "requirement_text": requirement[:MAX_REQUIREMENT], "stack": stack}, headers=session.headers), "saving the project")
+    if source is not None:
+        try:
+            count = import_source(session, project["id"], source)
+        except ImportRefused as exc:
+            raise BuildError(f"the repository could not be imported: {exc}") from exc
+        io.say(f"Imported {count} file(s) from {source.info.full_name} at {source.commit[:12]} into the project (nothing in it was run).")
     run = _json(session.client.post(f"{API}/projects/{project['id']}/runs", headers=session.headers), "creating the run")
     _json(session.client.post(f"{API}/runs/{run['id']}/start", json={"approved_max_usd": cap}, headers=session.headers), "starting the build")
     io.say("\nBuild started. Progress:")
@@ -326,6 +368,16 @@ def run_build(session: Session, prompt: str, stack: str, cap: float, output: Pat
     if not result.ok and final["state"] != "COMPLETED":
         result.reason = final.get("status_detail") or final.get("outcome") or result.reason
     return result
+
+
+def load_web_approval(paths: Paths, io: IO | None = None) -> str | None:
+    """Approve the self-tested website verifier for this process, if it was set up and is unchanged. Its absence is not an error."""
+    if not paths.approved_web_runtime.is_file():
+        return None
+    image_id, why = webruntime.load_approval(paths, web.WebVerifier(sources.egress(), work_dir=paths.work))
+    if image_id is None and io is not None:
+        io.say(f"Website verifier: {why}")
+    return image_id
 
 
 def summarise(result: BuildResult, io: IO) -> None:
@@ -360,6 +412,9 @@ def build_command(
     io: IO | None = None,
     engine_factory: EngineFactory = _default_engine,
     interactive: bool = True,
+    ref: str | None = None,
+    look: Callable[[Paths, Any, Callable[[str], None]], Any] = sources.access,
+    fetch: Callable[[Any, Any], Checkout] = sources.fetch,
 ) -> int:
     io = io or ConsoleIO()
     cap = max_usd if max_usd is not None else config.run_cap_usd
@@ -383,7 +438,7 @@ def build_command(
                 io.say("Refused: no application description was given.")
                 return 2
             text = io.ask("\nWhat application should DevPilot build? ")
-        problem = validate_prompt(text)
+        problem = validate_prompt(text) or unsupported_request(text)  # a request naming a repository is decided after reading it
         if problem is None:
             break
         io.say(problem)
@@ -391,9 +446,31 @@ def build_command(
             return 2
         text = None
 
-    chosen = choose_stack(stack, io, interactive)
-    if chosen is None:
+    assert text is not None  # the loop above only exits with a valid description
+    try:
+        request = classify(text)
+        repo = request.repo.with_ref(ref) if request.repo is not None and ref is not None else request.repo
+    except RepoUrlError as exc:
+        io.say(f"Refused: {exc}.\nNothing was started or spent.")
         return 2
+    if ref is not None and repo is None:
+        io.say("Refused: --branch/--commit was given, but the request names no GitHub repository.")
+        return 2
+    gh = remote = None
+    if repo is not None:
+        found = look(paths, repo, io.say)
+        if found is None:
+            io.say("\nNothing was started or spent.")
+            return 2
+        gh, remote = found
+        io.say(remote.describe())
+    load_web_approval(paths, io)
+    decision = decide(request, remote.profile if remote is not None else None, chosen_stack=stack)
+    if not decision.accepted or decision.stack is None:
+        io.say(f"\nNot built: {decision.reason}.\nNothing was started or spent.")
+        return 2
+    chosen = decision.stack
+    io.say(f"\nStack: {chosen} ({decision.stack_name})" + (f"; starting from the repository ({request.intent})" if remote is not None else ""))
     if not confirm_spend(config, cap, io, approve_spend):
         io.say("\nNot approved: nothing was started, contacted or spent.")
         return 0
@@ -404,10 +481,17 @@ def build_command(
         io.say(f"Refused: {why or 'the OpenAI key is missing'}.")
         return 1
     out_dir = output or (Path(config.output_dir) if config.output_dir else Path.cwd() / "devpilot-output")
-    assert text is not None  # the loop above only exits with a valid description
+    source = None
+    if remote is not None:
+        io.say(f"Downloading {remote.info.full_name} at {remote.commit[:12]} (free; nothing in it is run)…")
+        try:
+            source = fetch(gh, remote)
+        except RepoAccessError as exc:
+            io.say(f"\nNothing was spent. {sources.explain(exc, has_token=bool(gh and gh.authorized))}")
+            return 1
     try:
         with engine_factory(paths, config, key, image_id, runtime.opencode_manifest(paths), cap, io) as session:
-            result = run_build(session, text, chosen, cap, out_dir, io)
+            result = run_build(session, text, chosen, cap, out_dir, io, source=source, intent=request.intent)
     except EngineRefused as exc:
         io.say(f"\nNothing was spent. {exc}")
         return 1

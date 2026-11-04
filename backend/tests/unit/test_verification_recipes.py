@@ -39,7 +39,7 @@ VITEST_OUTPUT = json.dumps({"numTotalTests": 2, "numPassedTests": 1, "numFailedT
 def test_each_stack_has_its_recipe_and_only_the_built_runtime_is_approved() -> None:
     assert {s: recipes.readiness(s)[0] for s in ("python-cli", "python-fastapi", "react-vite", "static-html")} == {"python-cli": True, "python-fastapi": False, "react-vite": False, "static-html": False}
     assert "devpilot/verify-fastapi:1" in recipes.readiness("python-fastapi")[1] and "defined but not built or approved" in recipes.readiness("react-vite")[1]
-    assert recipes.readiness("static-html")[1] == "no verification recipe exists for stack static-html"
+    assert "has not been built and self-tested on this computer" in recipes.readiness("static-html")[1]  # verified by app.verification.web, not a recipe
 
 
 def test_every_recipe_declares_its_whole_contract() -> None:

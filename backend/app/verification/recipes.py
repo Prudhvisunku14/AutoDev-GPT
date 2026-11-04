@@ -115,8 +115,30 @@ def recipe_for(stack: str) -> Recipe | None:
     return RECIPES.get(stack)
 
 
+# A static site has no one-container recipe: it is verified by app.verification.web (DevPilot's server, HTTP and asset checks
+# and a real browser, with no network). Generating one also needs the engine to run that path in its VERIFYING step and an
+# independent acceptance suite for pages; until both exist and have passed a real build, the stack stays unavailable, with
+# the exact missing piece named. React + Vite keeps its react-vitest recipe below (its runtime is not built or approved);
+# existing React + Vite sites can still be checked end to end with app.verification.web (`devpilot verify-site`).
+WEB_ENGINE_WIRED = False
+WEB_STACKS = ("static-html",)
+
+
+def _web_readiness(stack: str) -> tuple[bool, str]:
+    from app.verification.web import approved_image_ids
+
+    if not approved_image_ids():
+        return False, "the website verifier (devpilot/verify-web) has not been built and self-tested on this computer: run `devpilot setup --web`"
+    if not WEB_ENGINE_WIRED:
+        return False, ("the website verifier is self-tested here, but the build engine cannot yet run it as its verification step (it runs one no-network test job "
+                       "per component), so generated websites could not be verified. Existing sites can be checked with `devpilot verify-site`")  # fmt: skip
+    return True, f"website verification for {stack} runs in the self-tested devpilot/verify-web image"
+
+
 def readiness(stack: str) -> tuple[bool, str]:
     """Whether this stack's work can be verified now, and if not, exactly why."""
+    if stack in WEB_STACKS:
+        return _web_readiness(stack)
     recipe = RECIPES.get(stack)
     if recipe is None:
         return False, f"no verification recipe exists for stack {stack}"

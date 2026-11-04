@@ -6,3 +6,6 @@
 # The Docker build reads this file inside a Linux builder: keep it LF.
 Dockerfile* text eol=lf
 *.sh text eol=lf
+# Files copied into Linux images (the website verifier): keep LF.
+backend/sandbox_images/** text eol=lf
+backend/edge/*.py text eol=lf

@@ -51,7 +51,7 @@ def test_help_lists_the_commands_and_the_honest_limits(capsys: pytest.CaptureFix
         cli_main.main(["--help"])
     out = capsys.readouterr().out
     assert stop.value.code == 0
-    for text in ("build", "doctor", "setup", "devpilot build", "Only Python command-line applications are built and", "--approve-spend"):
+    for text in ("build", "doctor", "setup", "devpilot build", "Builds are accepted only for stacks DevPilot can", "website generation is not enabled", "--approve-spend", "verify-site", "inspect"):
         assert text in out
     assert "D:\\" not in out
 

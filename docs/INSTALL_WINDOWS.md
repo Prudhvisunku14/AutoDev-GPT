@@ -124,7 +124,8 @@ To see which of these applies without starting a build, run `.\devpilot.cmd doct
 
 ## Limits
 
-- **Python command-line applications only.** React, websites, FastAPI and full-stack generation are declined: their verification runtimes have not passed a real end-to-end test, and a Python-only success is not evidence for them.
+- **Generation: Python command-line applications only**, new or starting from your own GitHub repository. Website, FastAPI and full-stack generation are declined with the reason, before any approval: the build engine cannot yet run the website verifier as its verification step, and a Python-only success is not evidence for them.
+- **Websites can be inspected and verified, free:** `.\devpilot.cmd setup --web` once (about 2.5 GB), then `.\devpilot.cmd inspect <GitHub URL>` and `.\devpilot.cmd verify-site <GitHub URL or folder>`. Private repositories need `.\devpilot.cmd setup --github-token`. Details and status: [WEBSITES_AND_REPOSITORIES.md](WEBSITES_AND_REPOSITORIES.md).
 - The first generation from a fresh install is not yet proven on every machine; what is proven is listed in `docs/PROGRESS.md`.
 - Costs are computed from the prices *you* entered; OpenAI's invoice is the authority.
 - Windows only for now (the encrypted key store, the guard process and the installer).

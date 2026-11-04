@@ -35,6 +35,14 @@ class Paths:
         return self.home / "approved-runtime.json"
 
     @property
+    def approved_web_runtime(self) -> Path:
+        return self.home / "approved-web-runtime.json"  # the website verifier's image, recorded only after its self-test passed
+
+    @property
+    def github_credentials(self) -> Path:
+        return self.home / "github-token.bin"  # encrypted for this Windows user (DPAPI); never plain text
+
+    @property
     def tools(self) -> Path:
         return self.home / "tools"
 

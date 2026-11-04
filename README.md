@@ -40,7 +40,8 @@ cd AutoDev-GPT
 
 ### What is supported, and what is verified
 
-- **Supported: Python command-line applications**, generated, tested in Docker and verified. A request for anything else (React, websites, FastAPI or other web APIs, mobile apps, full-stack) is declined at the prompt, not quietly built as something else; those workflows have not passed real end-to-end tests.
+- **Generated and verified: Python command-line applications**, new or starting from your own GitHub repository (public, or private with your token). A request is matched to a stack from its words or, when it names a repository, from that repository's own files; a stack DevPilot cannot yet verify is declined with the exact reason, before any approval or spending, and is never built as something else.
+- **Websites (static HTML, React + Vite + TypeScript): inspected and verified, not yet generated.** `devpilot inspect <GitHub URL>` profiles a repository (framework, pages, routes, components, assets). `devpilot verify-site <folder or GitHub URL>` installs its dependencies through a registry-only proxy, type checks, builds, serves and checks it in a real headless browser, in Docker. Generating a website is declined until the build engine can run that verification itself: see [docs/WEBSITES_AND_REPOSITORIES.md](docs/WEBSITES_AND_REPOSITORIES.md) for exactly what works, what was verified and what remains. React + FastAPI, Next.js, Vue, Angular and mobile apps are declined.
 - **Verified so far:** the engine and the installer, offline. The installer was run from a clean checkout and `devpilot doctor` passed 17 of 17. Real GPT and OpenCode generated, Docker-tested and independently verified a Python application from the older terminal scripts (the second of two paid runs, $0.51 in all; the first failed and led to fixes).
 - **Not yet verified: a real paid build through the new `devpilot build` command.** Its flow is covered by offline tests with GPT scripted, the coding engine simulated and tests replayed, and it has never been run against the real OpenAI API. Treat your first build as that test: start with the default $0.50 limit.
 - "Verified" for a free-form request means the generated project's own tests passed in the no-network Docker sandbox. There is no independent acceptance suite for it, and the ZIP's manifest says so.
@@ -57,6 +58,14 @@ cd AutoDev-GPT
 .\devpilot.cmd build "..." --approve-spend 0.50   # approve without typing; the figure must equal the limit exactly
 .\devpilot.cmd setup --rebuild               # build and audit the Docker image again
 .\devpilot.cmd forget-key                    # delete the stored key
+
+# GitHub repositories and websites (free: no OpenAI request)
+.\devpilot.cmd setup --github-token          # for private repositories: a fine-grained token, Contents read-only (typed hidden, stored encrypted)
+.\devpilot.cmd inspect https://github.com/<owner>/<repo>            # framework, stack, pages, components, assets
+.\devpilot.cmd setup --web                   # once: build the website verifier and prove it on known good and broken sites (~2 GB download)
+.\devpilot.cmd verify-site https://github.com/<owner>/<repo>        # install, type check, build, serve and browser-check it in Docker
+.\devpilot.cmd verify-site C:\path\to\site   # the same for a folder (never modified: a disposable copy is checked)
+.\devpilot.cmd build "Add a --verbose flag to this tool https://github.com/<owner>/<repo>" --branch main
 ```
 
 More: [docs/INSTALL_WINDOWS.md](docs/INSTALL_WINDOWS.md) (troubleshooting, where files live, how the Docker image is verified) and [examples/prompts.md](examples/prompts.md).
@@ -228,6 +237,7 @@ Details: [docs/MILESTONE_1_GITHUB.md](docs/MILESTONE_1_GITHUB.md).
 - [docs/PROGRESS.md](docs/PROGRESS.md): phase tracker, acceptance criteria and phase log
 - [docs/COMPETITION.md](docs/COMPETITION.md): the offline demonstration, what is real and what is simulated, and feature status
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): the four ways to run DevPilot and the proposed cloud architecture (not deployed)
+- [docs/WEBSITES_AND_REPOSITORIES.md](docs/WEBSITES_AND_REPOSITORIES.md): your own GitHub repositories (public and private), repository inspection, the website verifier and its network controls, and the capability status of website generation
 - [docs/MILESTONE_1_GITHUB.md](docs/MILESTONE_1_GITHUB.md): GitHub-assisted development (repository discovery, evaluation and safe import, offline-tested with fixtures), the weather application's specification, and what a first real run needs
 - [CLAUDE.md](CLAUDE.md): rules for the AI development assistant used to build this project
 

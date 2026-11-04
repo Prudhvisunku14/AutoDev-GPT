@@ -86,7 +86,8 @@ def test_the_prompt_must_be_a_real_description_of_something_that_can_be_built() 
     assert build.validate_prompt(PROMPT) is None
     assert build.validate_prompt("Create a weather forecast application") is None
     for other in ("Create a React dashboard for my sales data", "Build a FastAPI service for bookings", "I need a website for my shop", "Make an Android app for habits"):
-        assert "cannot be built yet" in (build.validate_prompt(other) or ""), other
+        assert build.validate_prompt(other) is None, other  # length only: what is asked for is decided from the request and readiness
+        assert "cannot be built" in (build.unsupported_request(other) or ""), other  # none of these stacks is ready (or exists), so each is declined
 
 
 def test_a_project_is_named_from_the_first_sentence() -> None:

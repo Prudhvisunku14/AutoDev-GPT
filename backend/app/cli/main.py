@@ -17,9 +17,14 @@ examples:
   devpilot build                                   asks what to build, then for your spending approval
   devpilot build "a python tool that converts csv files to json, with unit tests"
   devpilot build "..." --approve-spend 0.50        approve non-interactively (the figure must equal the limit)
+  devpilot inspect https://github.com/<owner>/<repo>     what a repository is (framework, pages, assets); free
+  devpilot verify-site https://github.com/<owner>/<repo>  build and check an existing website in Docker; free
+  devpilot setup --web                             one-time: build and self-test the website verifier
+  devpilot setup --github-token                    store a GitHub token for private repositories (typed hidden)
 
-A build spends your own OpenAI credit, never more than the limit you approve. Only Python command-line applications are built and
-verified so far; requests for other kinds (React, websites, full-stack) are declined.
+A build spends your own OpenAI credit, never more than the limit you approve. Builds are accepted only for stacks DevPilot can
+verify: today, Python command-line applications (new, or starting from your GitHub repository). Websites can be inspected and
+verified (static HTML, React + Vite + TypeScript), but website generation is not enabled until the engine can verify it.
 """
 
 
@@ -33,7 +38,9 @@ def _parser() -> argparse.ArgumentParser:
 
     build = sub.add_parser("build", help="build an application (asks for a description and your spending approval)", formatter_class=argparse.RawDescriptionHelpFormatter)
     build.add_argument("prompt", nargs="?", help="what to build; if omitted you are asked")
-    build.add_argument("--stack", help="the technology stack (only python-cli is available)")
+    build.add_argument("--stack", help="the technology stack; normally chosen from the request or the repository")
+    build.add_argument("--branch", help="with a GitHub repository in the request: the branch or tag to start from")
+    build.add_argument("--commit", help="with a GitHub repository in the request: the exact commit SHA to start from")
     build.add_argument("--max-usd", type=float, help="the most this build may spend, GPT and OpenCode together (default: your configured limit)")
     build.add_argument("--output", type=Path, help="where to save the project folder and ZIP (default: ./devpilot-output)")
     build.add_argument("--approve-spend", type=float, metavar="USD", help="approve the spending limit without typing it; must equal the limit exactly")
@@ -50,7 +57,23 @@ def _parser() -> argparse.ArgumentParser:
     setup.add_argument("--yes", action="store_true", help="do not ask before approving the image that passed its audit")
     setup.add_argument("--skip-downloads", action="store_true", help="only configure; do not download tools or build the image")
 
+    setup.add_argument("--web", action="store_true", help="build and self-test the website verifier (Docker; downloads about 2 GB once)")
+    setup.add_argument("--github-token", action="store_true", help="store a GitHub token for reading private repositories (typed hidden)")
+
     sub.add_parser("forget-key", help="delete the stored OpenAI key")
+    sub.add_parser("forget-github-token", help="delete the stored GitHub token")
+
+    inspect = sub.add_parser("inspect", help="describe a GitHub repository: framework, stack, pages, components, assets (free)")
+    inspect.add_argument("url", help="https://github.com/<owner>/<repository>")
+    inspect.add_argument("--branch", help="a branch or tag")
+    inspect.add_argument("--commit", help="an exact commit SHA")
+
+    verify = sub.add_parser("verify-site", help="install, build and check an existing website in Docker with a real browser (free)")
+    verify.add_argument("target", help="a folder, or https://github.com/<owner>/<repository>")
+    verify.add_argument("--branch", help="a branch or tag (GitHub only)")
+    verify.add_argument("--commit", help="an exact commit SHA (GitHub only)")
+    verify.add_argument("--component", help="the folder holding the site, when the project has several")
+    verify.add_argument("--output", type=Path, help="where to save the report (default: ./devpilot-output)")
     return parser
 
 
@@ -82,6 +105,14 @@ def main(argv: list[str] | None = None) -> int:
         checks = run_checks(where, config, check_key=args.check_key)
         print(render(checks))
         return 1 if blockers(checks) else 0
+    ref = getattr(args, "commit", None) or getattr(args, "branch", None)
+    if getattr(args, "commit", None) and getattr(args, "branch", None):
+        print("Give --branch or --commit, not both.")
+        return 2
+    if args.command == "setup" and (args.web or args.github_token):
+        from app.cli.setup import setup_extras
+
+        return setup_extras(where, web_runtime=args.web, github=args.github_token, rebuild=args.rebuild, interactive=sys.stdin.isatty())
     if args.command == "setup":
         from app.cli.setup import setup_command
 
@@ -92,11 +123,24 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "forget-key":
         print("The stored key was deleted." if credentials.forget(where.credentials) else "No key was stored.")
         return 0
+    if args.command == "forget-github-token":
+        from app.cli import github_token
+
+        print("The stored GitHub token was deleted." if github_token.forget(where.github_credentials) else "No GitHub token was stored.")
+        return 0
+    if args.command == "inspect":
+        from app.cli.inspect_cmd import inspect_command
+
+        return inspect_command(where, args.url, ref=ref)
+    if args.command == "verify-site":
+        from app.cli.verify_site import verify_site_command
+
+        return verify_site_command(where, args.target, ref=ref, component=args.component, output=args.output)
     from app.cli.build import build_command
 
     return build_command(
         where, config, prompt=args.prompt, stack=args.stack, max_usd=args.max_usd, output=args.output, approve_spend=args.approve_spend,
-        interactive=sys.stdin.isatty(),
+        interactive=sys.stdin.isatty(), ref=ref,
     )  # fmt: skip
 
 

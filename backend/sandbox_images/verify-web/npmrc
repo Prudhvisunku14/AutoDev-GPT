@@ -1,0 +1,8 @@
+# DevPilot's npm configuration for dependency installs. A project's own .npmrc is removed before install.
+registry=https://registry.npmjs.org/
+ignore-scripts=true
+audit=false
+fund=false
+update-notifier=false
+strict-ssl=true
+engine-strict=false

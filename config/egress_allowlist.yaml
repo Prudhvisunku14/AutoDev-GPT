@@ -12,6 +12,7 @@ components:
   github:             # GitHub adapter and import (Phase 8)
     - github.com
     - api.github.com
+    - codeload.github.com  # where GitHub redirects a commit's archive download
   google_drive:       # Google Drive OAuth and file export (Phase 8)
     - accounts.google.com
     - oauth2.googleapis.com
