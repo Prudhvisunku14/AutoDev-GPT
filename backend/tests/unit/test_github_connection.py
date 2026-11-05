@@ -79,7 +79,8 @@ def test_look_alike_or_malformed_drive_links_are_refused(url: str) -> None:
 
 
 def test_a_github_link_with_credentials_is_reported_never_echoed() -> None:
-    found = discover("use https://ghp_SECRETSECRETSECRETSECRETSECRET1234@github.com/acme/app please")
+    fake = "ghp_" + "SECRET" * 5 + "1234"  # built here, so no token-shaped literal is committed
+    found = discover(f"use https://{fake}@github.com/acme/app please")
     assert found.resources == () and found.problems and "SECRET" not in " ".join(found.problems)
 
 

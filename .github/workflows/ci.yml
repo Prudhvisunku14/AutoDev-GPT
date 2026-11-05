@@ -4,7 +4,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "feature/**"]  # a feature branch is checked on every push, before its pull request exists
   pull_request:
 
 permissions:
