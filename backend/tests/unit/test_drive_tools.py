@@ -147,7 +147,7 @@ def test_with_no_embedding_provider_the_recovery_engine_stops_the_run_by_policy(
     app = made([*INDEXED, pause()], embedders=False)
     _, run_id = app.start()
     run = app.run(run_id)
-    assert run["state"] == "STOPPED_BY_POLICY" and run["outcome"] == "embedding_unavailable" and "openai_embeddings" in run["status_detail"]
+    assert run["state"] == "STOPPED_BY_POLICY" and run["outcome"] == "embedding_unavailable" and "RAG_EMBEDDER=openai" in run["status_detail"]
     decided = app.events(run_id, "recovery.decided")
     assert decided[-1]["for"] == "embedding" and decided[-1]["category"] == "TOOL_UNAVAILABLE" and decided[-1]["action"] == "STOP"
     assert app.events(run_id, "rag.indexed") == []

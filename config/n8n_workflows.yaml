@@ -22,3 +22,9 @@ workflows:
     inputs: [text]
     callback: true
     effect: read_only
+  run-events:
+    path: devpilot-run-events
+    description: Forward one run event (what happened and a one-line summary) to the team's channel configured in this workflow, for example when a build is delivered, fails or waits for approval.
+    inputs: [event, summary]
+    callback: false
+    effect: notify

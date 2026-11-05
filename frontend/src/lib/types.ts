@@ -385,3 +385,24 @@ export interface GitHubStatus {
   connected_at: number | null;
   requested_scopes: string[];
 }
+
+export interface N8nWorkflowHealth {
+  key: string;
+  path: string;
+  description: string;
+  effect: string;
+  found: boolean | null;
+  active: boolean | null;
+  name?: string | null;
+  recent_executions?: Array<{ id: string; status: string; mode: string; started_at: string | null; stopped_at: string | null }>;
+}
+
+export interface N8nHealth {
+  source: string;
+  simulated: boolean;
+  problems: string[];
+  reachable: boolean;
+  ready: boolean;
+  error: string | null;
+  workflows: N8nWorkflowHealth[];
+}

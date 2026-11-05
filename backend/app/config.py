@@ -188,6 +188,7 @@ class Settings(BaseSettings):
     github_oauth_redirect_uri: str = "http://127.0.0.1:8000/oauth/github/callback"
     github_oauth_scopes: str = "repo"  # read private repositories the person chooses, and open approved pull requests
     credentials_dir: Path = Path("data/credentials")
+    dashboard_url: str = "http://localhost:5173"  # where the launcher's one-time sign-in link points
     google_oauth_client_id: str | None = None  # public identifier; its secret is google_oauth_client_secret
     google_oauth_redirect_uri: str = "http://127.0.0.1:8000/oauth/google/callback"
     drive_max_files: int = Field(default=200, ge=1, le=5_000)  # discovered, and ingested in one call
@@ -196,6 +197,14 @@ class Settings(BaseSettings):
     drive_max_depth: int = Field(default=3, ge=0, le=10)  # folders opened below an approved one
     drive_page_size: int = Field(default=100, ge=1, le=1_000)
     rag_max_embedding_tokens: int = Field(default=2_000_000, gt=0)  # estimated, before anything is embedded
+    # Real semantic retrieval (app/rag/openai_embedder.py): off by default. "openai" embeds with OPENAI_EMBEDDING_MODEL, bounded by
+    # RAG_EMBEDDING_MAX_USD at OPENAI_EMBEDDING_PRICE_PER_MTOK (both required), and keeps vectors in SQLite under RAG_INDEX_DIR.
+    rag_embedder: Literal["none", "openai"] = "none"
+    openai_embedding_model: str = "text-embedding-3-small"
+    openai_embedding_dimensions: int = Field(default=512, ge=64, le=3072)
+    openai_embedding_price_per_mtok: float | None = Field(default=None, gt=0)
+    rag_embedding_max_usd: float = Field(default=0.10, gt=0, le=5)
+    rag_index_dir: Path = Path("data/rag")
 
     # --- Credentials used by later phases ---------------------------------
     # Declared here only so the redactor knows their values. Phase 1 never uses them.
@@ -239,6 +248,7 @@ class Settings(BaseSettings):
         "recovery_max_attempt_timeout_seconds",
         "history_dir",
         "github_oauth_client_id",
+        "openai_embedding_price_per_mtok",
         mode="before",
     )
     @classmethod
@@ -288,6 +298,7 @@ class Settings(BaseSettings):
         self.n8n_workflows_file = _from_repo_root(self.n8n_workflows_file)
         self.tool_catalog_file = _from_repo_root(self.tool_catalog_file)
         self.credentials_dir = _from_repo_root(self.credentials_dir)
+        self.rag_index_dir = _from_repo_root(self.rag_index_dir)
         self.coding_checkpoints_dir = _from_repo_root(self.coding_checkpoints_dir)
         self.coding_work_dir = _from_repo_root(self.coding_work_dir)
         return self

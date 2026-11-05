@@ -655,6 +655,19 @@ workspaces/  data/ (gitignored, runtime)
 | [n8n](https://github.com/n8n-io/n8n) | Webhook triggers, HTTP Request nodes and credentials for event-driven integration |
 | [n8n-nodes-opencode](https://github.com/ssccio/n8n-nodes-opencode) | OpenCode as a chat model inside n8n agent workflows; used as the `opencode_via_n8n` provider |
 
+## 12a. General-purpose platform additions (2026-11-05)
+
+| Concern | Module | Rule it enforces in code |
+|---|---|---|
+| Tool catalog | `app/toolcatalog/`, `config/tool_catalog.yaml`, `compare_tools` | Facts are reviewed; readiness is computed from the running backend; a tool with no adapter is "unknown", never compared |
+| Resources in a request | `app/sources/` | GitHub and Drive links are parsed strictly; repositories the person names are read at a pinned commit; a 404 never means "private" |
+| GitHub connection | `app/repos/github_oauth.py`, `app/core/secret_store.py` | OAuth web flow with state, PKCE and browser binding; token encrypted with Fernet; nothing exchanged without the cipher |
+| GitHub writes | `app/repos/github_write.py`, `publish_repository_changes` | GIT_PUSH approval; only the verified tree; a pull request on a new branch with only the run's changes; never moves a branch |
+| Gap analysis | `submit_gap_analysis` | A plan for existing code waits for an analysis checked against the real file list; licences kept; no blind rewrite |
+| Stack choice | `StackCatalog.describe`, `POST /runs/{id}/start` | GPT chooses; a full build with no verifiable stack is refused before spending |
+| Retrieval | `app/rag/openai_embedder.py`, `app/rag/sqlite_index.py` | Dollar-bounded embeddings; per-project, per-grant SQL scoping; one model per index |
+| Sessions | `app/core/sessions.py` | HttpOnly SameSite=Strict cookie, hashed at rest; CSRF header for writes; one-time sign-in links |
+
 ## 13. Known design limitations
 
 - **Single-user design.** One bearer token and one run at a time. It is not multi-tenant.

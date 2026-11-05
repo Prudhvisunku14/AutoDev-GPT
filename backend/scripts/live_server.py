@@ -139,8 +139,10 @@ def main(argv: list[str] | None = None, *, settings_for: Callable[..., Settings]
         print(f"Website builds: {_load_web_approval(settings)}")
     sandbox = DockerSandbox.from_settings(settings)
     app = create_app(settings, sandbox=sandbox, coding=selector, start_policy=budget, **integrations_for(settings, sandbox))
-    print(f"\nServing on http://{settings.devpilot_host}:{settings.devpilot_port} until {args.hours:g} hours have passed. Open the dashboard at "
-          "http://localhost:5173 and connect with DEVPILOT_API_TOKEN from .env. Stop with Ctrl-C.")  # fmt: skip
+    from app.api.session import login_url
+
+    print(f"\nServing on http://{settings.devpilot_host}:{settings.devpilot_port} until {args.hours:g} hours have passed. Stop with Ctrl-C.")
+    print(f"Open this link once to sign the dashboard in (it works once, for ten minutes; no token to paste):\n  {login_url(app.state.web_sessions, settings.dashboard_url)}")
     (serve or _serve)(app, settings)
     return 0
 

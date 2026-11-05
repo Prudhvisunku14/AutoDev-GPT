@@ -215,6 +215,39 @@ function GitHubConnectionCard() {
   );
 }
 
+/** n8n's real activity, read from n8n itself: is each registered workflow imported and active, and how did it last run. */
+function N8nActivity() {
+  const api = useApi();
+  const health = useQuery({ queryKey: ["integrations", "n8n"], queryFn: api.n8nStatus, retry: false, refetchInterval: 15_000 });
+  if (!health.data) return null; // n8n is off on this backend (404), or not reachable yet
+  const data = health.data;
+  return (
+    <section aria-label="n8n activity" className="mb-6 rounded-2xl border border-line bg-white px-5 py-4 shadow-soft">
+      <div className="flex items-center gap-2">
+        <h2 className="text-sm font-semibold">n8n workflows</h2>
+        <StatusPill status={data.simulated ? "simulated" : data.ready ? "ready" : "blocked"} />
+      </div>
+      {data.error && <p className="mt-1 text-[13px] text-rose-600">{data.error}</p>}
+      {data.problems.map((problem) => (
+        <p key={problem} className="mt-1 text-[13px] text-amber-800">{problem}</p>
+      ))}
+      <ul className="mt-2 space-y-1 text-[13px]">
+        {data.workflows.map((workflow) => {
+          const last = workflow.recent_executions?.[0];
+          return (
+            <li key={workflow.key} className="flex flex-wrap gap-x-2">
+              <span className="font-medium">{workflow.key}</span>
+              <span className="text-muted">({workflow.effect})</span>
+              <span>{workflow.found === null ? "not checked" : !workflow.found ? "not imported" : workflow.active ? "active" : "imported, not active"}</span>
+              {last && <span className="text-muted">last run {last.status}{last.started_at ? ` at ${last.started_at}` : ""}</span>}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
 export function Tools() {
   const api = useApi();
   const tools = useTools();
@@ -232,6 +265,7 @@ export function Tools() {
     <div className="mx-auto max-w-5xl pt-8">
       <PageTitle title="Tools" subtitle="What each development tool does, whether it is usable on this backend now, and what has really been shown. Asking costs nothing: the catalog answers, not a model." />
       <GitHubConnectionCard />
+      <N8nActivity />
       <form onSubmit={submit} className="mb-6 flex gap-2">
         <label htmlFor="tool-question" className="sr-only">
           Ask about tools

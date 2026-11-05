@@ -62,3 +62,22 @@ describe("Tools page", () => {
     expect(await screen.findByRole("heading", { name: "Tools" })).toBeInTheDocument();
   });
 });
+
+describe("Tools page: n8n activity", () => {
+  it("shows each registered workflow as n8n reports it, with its last execution", async () => {
+    const n8nStatus = vi.fn(() =>
+      Promise.resolve({
+        source: "n8n", simulated: false, problems: [], reachable: true, ready: false, error: null,
+        workflows: [
+          { key: "notify", path: "devpilot-notify", description: "d", effect: "notify", found: true, active: true, recent_executions: [{ id: "7", status: "success", mode: "webhook", started_at: "2026-11-05T10:00:00Z", stopped_at: null }] },
+          { key: "run-events", path: "devpilot-run-events", description: "d", effect: "notify", found: false, active: false },
+        ],
+      }),
+    );
+    renderApp({ api: stubApi({ listTools: vi.fn(() => Promise.resolve(LISTING)), n8nStatus }), route: "/tools" });
+    const panel = await screen.findByRole("region", { name: "n8n activity" });
+    expect(within(panel).getByText("active")).toBeInTheDocument();
+    expect(within(panel).getByText(/last run success/)).toBeInTheDocument();
+    expect(within(panel).getByText("not imported")).toBeInTheDocument();
+  });
+});

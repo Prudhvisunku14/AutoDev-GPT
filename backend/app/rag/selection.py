@@ -24,10 +24,18 @@ PROFILES = {
     HashingEmbedder.name: ToolProfile(HashingEmbedder.name, ToolStatus.IMPLEMENTED, {EMBEDDING: 0.2}, {}, _KINDS, environment=IN_PROCESS, quality=0.1, seconds=0.0, cost_usd=0.0,
                                       min_cost_usd=0.0, memory_mb=16),
 }  # fmt: skip
-PLANNED_EMBEDDERS = (
-    ToolProfile("openai_embeddings", ToolStatus.PLANNED, {EMBEDDING: 1.0}, {}, _KINDS, environment="openai-api", credentials=frozenset({OPENAI_KEY_NAME}), network=frozenset({OPENAI_HOST})),
-    ToolProfile("local_embedding_model", ToolStatus.PLANNED, {EMBEDDING: 0.8}, {}, _KINDS, environment="local-model"),
-)
+OPENAI_API = "openai-api"
+PLANNED_EMBEDDERS = (ToolProfile("local_embedding_model", ToolStatus.PLANNED, {EMBEDDING: 0.8}, {}, _KINDS, environment="local-model"),)
+
+
+def _profile(embedder: Embedder) -> ToolProfile:
+    """A real OpenAI model (rag/openai_embedder.py) is semantic and paid; the hashing double is lexical and free."""
+    if embedder.name in PROFILES:
+        return PROFILES[embedder.name]
+    worst = getattr(embedder, "max_usd", None)  # its own hard limit: it never spends more (rag/openai_embedder.py)
+    floor = getattr(embedder, "price_per_mtok", 0.0) * 1_000 / 1_000_000  # one small batch
+    return ToolProfile(embedder.name, ToolStatus.IMPLEMENTED, {EMBEDDING: 1.0}, {}, _KINDS, environment=OPENAI_API, quality=0.9, cost_usd=worst, min_cost_usd=floor,
+                       credentials=frozenset({OPENAI_KEY_NAME}), network=frozenset({OPENAI_HOST}))  # fmt: skip
 
 
 @dataclass(frozen=True)
@@ -41,8 +49,11 @@ class _Ready:
 
 
 def build_embedding_selector(embedders: Sequence[Embedder]) -> AdaptiveSelector:
-    options = [ProviderOption(e.name, _Ready(e), frozenset({EMBEDDING}), simulated=e.simulated, profile=PROFILES[e.name]) for e in embedders]  # type: ignore[arg-type]
-    return AdaptiveSelector(options, policy=EligibilityPolicy(approved_environments=frozenset({IN_PROCESS})), planned=PLANNED_EMBEDDERS)
+    options = [ProviderOption(e.name, _Ready(e), frozenset({EMBEDDING}), simulated=e.simulated, profile=_profile(e)) for e in embedders]  # type: ignore[arg-type]
+    real = any(not e.simulated for e in embedders)  # a real embedder is configured only with its key and the egress entry (tools/adapters/drive.py)
+    policy = EligibilityPolicy(approved_environments=frozenset({IN_PROCESS, OPENAI_API}), configured_credentials=frozenset({OPENAI_KEY_NAME}) if real else frozenset(),
+                               approved_network=frozenset({OPENAI_HOST}) if real else frozenset())  # fmt: skip
+    return AdaptiveSelector(options, policy=policy, planned=PLANNED_EMBEDDERS)
 
 
 def chosen_embedder(selection: object) -> Embedder:

@@ -17,6 +17,8 @@ hashes, locations, flags). The discovered and ingested documents and the index l
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Annotated, Any
@@ -35,9 +37,11 @@ from app.drive.source import DriveSource, GoogleDriveSource
 from app.orchestrator.run_control import end_run
 from app.rag.blueprint import blueprint
 from app.rag.chunking import ChunkingError
-from app.rag.embeddings import Embedder, estimated_tokens
+from app.rag.embeddings import Embedder, EmbeddingUnavailable, estimated_tokens
 from app.rag.extract import ExtractedDocument, ExtractionRefused, ParserUnavailable
-from app.rag.index import AccessScope
+from app.rag.index import AccessScope, VectorIndex
+from app.rag.openai_embedder import OpenAIEmbedder
+from app.rag.sqlite_index import SqliteVectorIndex
 from app.rag.parsers import PARSER_IMAGE, DocumentParser, IsolatedParser
 from app.rag.knowledge import BudgetExceeded, KnowledgeBase
 from app.rag.selection import EMBEDDING, build_embedding_selector, chosen_embedder
@@ -69,6 +73,8 @@ class DriveRuntime:
     authorizer: Authorizer
     embedders: tuple[Embedder, ...] = ()
     parser: DocumentParser = field(default_factory=IsolatedParser)
+    # Where an embedder's vectors are kept: None keeps them in memory (fixtures); RAG_EMBEDDER=openai keeps them in SQLite.
+    index_factory: Callable[[Embedder], VectorIndex] | None = None
     grants: GrantStore = field(default_factory=GrantStore)
     simulated: bool = False
     discovered: dict[tuple[str, str], Discovery] = field(default_factory=dict)  # (project, grant) -> what discovery reached
@@ -426,6 +432,7 @@ class _IndexPlan:
     chunk_chars: int
     chunk_overlap: int
     max_tokens: int
+    index: VectorIndex | None = None
 
 
 def _stop_no_embedder(ctx: ToolContext, refused: NoProvider) -> None:
@@ -435,7 +442,8 @@ def _stop_no_embedder(ctx: ToolContext, refused: NoProvider) -> None:
                       RecoveryConfig.from_settings(s))  # fmt: skip
     _record(ctx, "recovery.decided", {**decision.to_dict(), "for": EMBEDDING})
     if not ctx.run.is_terminal:
-        end_run(ctx.session, ctx.run, RunState.STOPPED_BY_POLICY, ctx.events, outcome="embedding_unavailable", detail=str(refused), reason="embedding_unavailable")
+        detail = f"{refused}. Real semantic embeddings (OpenAI) are off: set RAG_EMBEDDER=openai and OPENAI_EMBEDDING_PRICE_PER_MTOK in the backend's .env"
+        end_run(ctx.session, ctx.run, RunState.STOPPED_BY_POLICY, ctx.events, outcome="embedding_unavailable", detail=detail, reason="embedding_unavailable")
 
 
 def _begin_index(runtime: DriveRuntime, ctx: ToolContext, args: BuildRagIndexArgs) -> _IndexPlan:
@@ -454,15 +462,17 @@ def _begin_index(runtime: DriveRuntime, ctx: ToolContext, args: BuildRagIndexArg
     tokens = estimated_tokens([sec.text for d in documents for sec in d.sections])
     if tokens > s.rag_max_embedding_tokens:
         raise ToolError(ErrorClass.VALIDATION_FAILED, f"embedding these documents needs about {tokens} tokens, over the {s.rag_max_embedding_tokens} limit; ingest fewer")
-    return _IndexPlan(ctx.project.id, chosen_embedder(selection), selection, documents, args.chunk_chars, args.chunk_overlap, s.rag_max_embedding_tokens)
+    embedder = chosen_embedder(selection)
+    index = runtime.index_factory(embedder) if runtime.index_factory is not None else None
+    return _IndexPlan(ctx.project.id, embedder, selection, documents, args.chunk_chars, args.chunk_overlap, s.rag_max_embedding_tokens, index)
 
 
 def _run_index(plan: _IndexPlan, _cancel: object, _progress: Progress) -> KnowledgeBase:
-    base = KnowledgeBase(plan.embedder, chunk_chars=plan.chunk_chars, chunk_overlap=plan.chunk_overlap, max_embedding_tokens=plan.max_tokens)
+    base = KnowledgeBase(plan.embedder, chunk_chars=plan.chunk_chars, chunk_overlap=plan.chunk_overlap, max_embedding_tokens=plan.max_tokens, index=plan.index)
     try:
         for doc in plan.documents:
             base.add(doc, owner=plan.project_id)
-    except (ChunkingError, BudgetExceeded) as exc:
+    except (ChunkingError, BudgetExceeded, EmbeddingUnavailable) as exc:
         raise ToolError(ErrorClass.VALIDATION_FAILED, str(exc)) from exc
     return base
 
@@ -568,4 +578,23 @@ def build_drive_runtime(settings: Settings, egress: EgressPolicy, sandbox: Sandb
     cipher, why = build_cipher(settings.devpilot_token_key)
     provider = GoogleOAuthProvider(egress, settings.google_oauth_client_id, settings.google_oauth_client_secret) if settings.google_oauth_client_id else None
     authorizer = GoogleOAuthAuthorizer(settings.google_oauth_client_id, settings.google_oauth_redirect_uri, provider=provider, cipher=cipher, cipher_problem=why)
-    return DriveRuntime(GoogleDriveSource(egress, authorizer), authorizer, parser=IsolatedParser(sandbox, image=PARSER_IMAGE, settings=settings))
+    embedders, index_factory = real_embedding(settings, egress)
+    return DriveRuntime(GoogleDriveSource(egress, authorizer), authorizer, embedders, parser=IsolatedParser(sandbox, image=PARSER_IMAGE, settings=settings), index_factory=index_factory)
+
+
+def real_embedding(settings: Settings, egress: EgressPolicy) -> tuple[tuple[Embedder, ...], Callable[[Embedder], VectorIndex] | None]:
+    """RAG_EMBEDDER=openai: OpenAI's embeddings, bounded in dollars, with vectors kept in one SQLite file per model. Otherwise
+    no embedder, so indexing stops the run with the reason (the hashing test double is for fixtures only)."""
+    if settings.rag_embedder != "openai" or settings.openai_api_key is None:
+        return (), None
+    try:
+        embedder = OpenAIEmbedder(egress, settings.openai_api_key.get_secret_value(), model=settings.openai_embedding_model, dimensions=settings.openai_embedding_dimensions,
+                                  price_per_mtok=settings.openai_embedding_price_per_mtok, max_usd=settings.rag_embedding_max_usd)  # fmt: skip
+    except EmbeddingUnavailable:  # no price: spending could not be bounded, so there is no embedder and indexing stops with the reason
+        return (), None
+
+    def index_for(chosen: Embedder) -> VectorIndex:
+        name = re.sub(r"[^a-z0-9.-]+", "-", chosen.name.lower())
+        return SqliteVectorIndex(settings.rag_index_dir / f"{name}-{chosen.dimensions}.sqlite3", chosen.name, chosen.dimensions)
+
+    return (embedder,), index_for

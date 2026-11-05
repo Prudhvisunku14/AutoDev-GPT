@@ -1420,3 +1420,79 @@ Frontend: `PermissionDialog.test.tsx` (2), plus a Composer test showing that not
 - The **FastAPI and React images are defined but not built**. Building them pulls base images and packages, which needs approval. Until then those stacks, and React + FastAPI projects, are planned but stopped before coding.
 
 **Tests:** `tests/unit/test_stack_choice.py` (3); frontend `prompt.test.ts` and `readiness.test.ts` rewritten; 4 Composer tests updated. Backend 4240 passed, 20 skipped. Frontend 121 passed; the keyword tests were removed, so there are fewer than before.
+
+### General-purpose platform, Phase 6: real embeddings and a persistent, isolated vector index (2026-11-05)
+
+**Built (offline, against an in-process OpenAI endpoint):**
+- **`OpenAIEmbedder`** (`app/rag/openai_embedder.py`), used when `RAG_EMBEDDER=openai`:
+  - It calls `POST /v1/embeddings` with `OPENAI_EMBEDDING_MODEL` (default `text-embedding-3-small`) at `OPENAI_EMBEDDING_DIMENSIONS`.
+  - The key goes only to api.openai.com, through the `backend` egress entry.
+  - Every batch's estimated cost is charged against `RAG_EMBEDDING_MAX_USD` at `OPENAI_EMBEDDING_PRICE_PER_MTOK` before it is sent, and a batch that could pass the limit is not sent. Both settings are required, so spending is never unbounded.
+  - There are no retries, and every returned vector is checked for its length.
+  - The adaptive selector now prefers it over the hashing test double, which stays for fixtures only.
+- **`SqliteVectorIndex`** (`app/rag/sqlite_index.py`). One file per embedder and dimension, under `RAG_INDEX_DIR`, so vectors survive restarts.
+  - Every read filters on the project and its *active* grant IDs in SQL, then again in Python.
+  - An index built by another model is refused.
+  - A re-ingested document replaces its chunks, and revoking a grant deletes them.
+- Wired into `build_drive_runtime`: real embedder plus persistent index when configured. Otherwise the run stops at indexing and says how to enable it.
+
+**Tests:** `tests/unit/test_rag_production.py` (12):
+- the request shape and where the key goes;
+- the pre-send bound, the required price, and no retry;
+- refused or malformed answers;
+- real-over-double selection;
+- persistence and isolation across projects and revoked grants, and refusal of another model's index;
+- retrieval by meaning with the fake's concept vectors;
+- document updates, revocation, oversized input, and the wiring.
+
+Two older tests that listed `openai_embeddings` as "planned" were updated, since it is now implemented.
+
+**Limits:**
+- The fake endpoint proves the pipeline, not a real model's retrieval quality. No real embedding was requested.
+- The generated RAG chatbot's answers are still the extractive, cited answers of `KnowledgeBase.answer`. GPT-written answers grounded in the retrieved chunks are part of the generated application's blueprint, and have not been built or run here.
+- Real Drive documents still need the user's Google OAuth client and the approved parser image (`document-parser` is not built).
+
+### General-purpose platform, Phase 7: dashboard sessions and the run timeline (2026-11-05)
+
+**Built:**
+- **Sessions** (`app/core/sessions.py`, `app/api/session.py`, table `web_sessions`):
+  - The dashboard signs in once and then holds only an **HttpOnly, SameSite=Strict** cookie (Secure over https). Only the cookie's SHA-256 is stored.
+  - Sessions end after 12 hours idle and 7 days in any case. Without "remember", the cookie ends with the browser session.
+  - A cookie-authenticated write must send `X-DevPilot-Request: 1` (CSRF guard). CORS allows that header and credentials only from the configured origins.
+  - Ten wrong tokens in a minute lock sign-in for the rest of that minute.
+  - Bearer tokens (CLI, scripts, tests) work as before.
+- **No token to paste:** `python -m app` and `scripts/live_server.py` print a **one-time sign-in link** (`DASHBOARD_URL/#login=<code>`), valid once for ten minutes.
+  - The dashboard redeems it, removes it from the address bar, and is signed in.
+  - Only a Bearer token can mint a new link; a session cannot.
+  - The token form remains as a fallback. The token typed there goes once to `POST /session` and is never stored in the browser, which keeps only a non-secret marker.
+  - "Disconnect" ends the backend session.
+- **Timeline:** the run page now names the new events: existing code compared, publishing to GitHub, pull request opened or repository created, documents indexed (and whether the embedder is the test double), Google Drive permission needed or granted, and n8n workflow started or reported.
+
+**Tests:**
+- `tests/unit/test_web_sessions.py` (7): cookie flags; only the hash stored; the CSRF header; one-time links; lockout; logout and idle expiry; forged cookies; Bearer unchanged.
+- Frontend: layout tests for cookie sign-in, the link and an existing session, plus a timeline test.
+
+Frontend 124 passed, typecheck and lint clean.
+
+### General-purpose platform, Phase 5: n8n, ready for a real instance (2026-11-05)
+
+**Built (offline):**
+- **`run-events` workflow** (`n8n/workflows/devpilot-run-events.json`, effect `notify`). It verifies DevPilot's signature and formats one run event as a line for a team channel. It is registered in `config/n8n_workflows.yaml`, and is auto-approvable only with `N8N_AUTO_APPROVE=true`.
+- **`scripts/n8n-local.ps1`**:
+  - starts n8n on `127.0.0.1:5678`, with its data on D:;
+  - passes the webhook secret from `.env` without printing it;
+  - imports every template;
+  - prints the image digest so the version can be pinned.
+- **`tests/live/test_n8n_live.py`** (`live_n8n`, opt-in). Against the real local n8n:
+  - every registered workflow is imported and active;
+  - signed `notify` and `run-events` triggers each produce a successful n8n execution.
+  - It reads the secret and the API key from the terminal's environment, never from `.env`.
+- **Dashboard:** the Tools page shows n8n's own report for each registered workflow (imported, active, last execution), from the read-only health route. It is hidden while n8n is off.
+- **Fixed a pre-existing test defect.** The test that runs the templates' signing code in Node read Node's output with the Windows codepage. On a machine with Node on PATH, it failed for non-ASCII text; that is reproduced on `main` at `e120238`. The PowerShell runs had skipped it because Node was not on their PATH. It now decodes UTF-8, and the templates themselves were always correct.
+
+**Tests:** n8n 57 passed with Node present, including the new template test.
+
+**Not done, and why:**
+- **No real n8n has been run.** Pulling `n8nio/n8n` (about 600 MB) and creating its owner account and API key are the person's steps, so the live test has not run.
+- `opencode_via_n8n` stays planned in the catalog: nothing calls OpenCode through n8n.
+- A delayed n8n callback still does not resume a paused run (A08).

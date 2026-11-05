@@ -51,3 +51,22 @@ describe("buildTimeline", () => {
     expect(buildTimeline([ev("something.new")]).map((i) => i.title)).toEqual(["something.new"]);
   });
 });
+
+describe("buildTimeline: the platform's own milestones", () => {
+  it("shows the gap analysis, the GitHub publish and the indexing in plain words", () => {
+    const items = buildTimeline([
+      ev("analysis.gap_recorded", { missing_features: [1, 2], similarities: [1], files: [1, 2, 3], tests: [1, 2] }),
+      ev("github.published", { repository: "octo/calc", pull_request_url: "https://github.com/octo/calc/pull/1" }),
+      ev("rag.indexed", { documents: 2, chunks: 9, simulated: false, embedder: "openai:text-embedding-3-small" }),
+      ev("drive.authorized", { status: "pending_consent" }),
+    ]);
+    expect(items.map((item) => item.title)).toEqual([
+      "Existing code compared with the requirements: 2 to build, 1 already there",
+      "Pull request opened on octo/calc",
+      "Documents indexed: 2 documents, 9 chunks",
+      "Google Drive permission needed",
+    ]);
+    expect(items[1]?.detail).toBe("https://github.com/octo/calc/pull/1");
+    expect(items[2]?.detail).toBe("Embedder openai:text-embedding-3-small");
+  });
+});
