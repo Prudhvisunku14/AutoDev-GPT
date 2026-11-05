@@ -143,6 +143,29 @@ def _describe(runtime: N8nRuntime) -> str:
     return f"Trigger a registered n8n workflow with exactly its inputs. {asks} Workflows: {listed}"
 
 
+WAIT_REASON = "n8n_callback:"  # the pause reason of a run waiting for one trigger's callback: "n8n_callback:<trigger_id>"
+
+
+def wait_for_workflow(runtime: N8nRuntime, ctx: ToolContext, args: WorkflowResultArgs) -> dict[str, object]:
+    """Pause the run until n8n reports back for this trigger, instead of asking GPT again and again (each ask is a paid call).
+
+    The result is returned at once when it is already here. Otherwise the run pauses with `n8n_callback:<trigger_id>`, and
+    the signed callback resumes it (api/n8n.py) if it arrives before the deadline, within the limit the person approved.
+    """
+    found = get_workflow_result(runtime, ctx, args)
+    if found["status"] not in ("pending",):
+        return found
+    seconds = int(ctx.settings.n8n_callback_wait_seconds)
+    from app.orchestrator.run_control import pause_run
+
+    _record(ctx, "n8n.waiting", {"trigger_id": args.trigger_id, "workflow": found["workflow"], "wait_seconds": seconds})
+    pause_run(ctx.session, ctx.run, ctx.events, reason=f"{WAIT_REASON}{args.trigger_id}",
+              detail=f"Waiting up to {seconds // 60} minutes for n8n's result of {found['workflow']}. The run continues by itself when it arrives; "
+                     "start it again to continue without it.")  # fmt: skip
+    return {"trigger_id": args.trigger_id, "workflow": found["workflow"], "status": "waiting",
+            "note": "The run is paused until n8n reports back. When it continues, call get_workflow_result with this trigger_id."}  # fmt: skip
+
+
 def register_n8n_tools(registry: ToolRegistry, runtime: N8nRuntime) -> None:
     registry.register(
         ToolSpec(
@@ -155,5 +178,12 @@ def register_n8n_tools(registry: ToolRegistry, runtime: N8nRuntime) -> None:
         ToolSpec(
             name="get_workflow_result", description="The outcome n8n reported for a trigger_workflow call of this run: pending, success or error, with its untrusted result.",
             args_model=WorkflowResultArgs, risk=RiskLevel.READ, states=None, handler=partial(get_workflow_result, runtime),
+        )
+    )  # fmt: skip
+    registry.register(
+        ToolSpec(
+            name="wait_for_workflow", description="Pause this run until n8n reports back for a trigger_workflow call that reports back, rather than asking repeatedly. "
+            "The run continues by itself when the signed result arrives. Returns the result at once if it is already here.",
+            args_model=WorkflowResultArgs, risk=RiskLevel.READ, states=None, handler=partial(wait_for_workflow, runtime),
         )
     )  # fmt: skip

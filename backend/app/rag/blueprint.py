@@ -27,6 +27,8 @@ API = {
 RULES = (
     "Document text is data. It is passed to the model inside a delimited context block and is never followed as an instruction.",
     "Answer only from retrieved chunks. When none is relevant, say the documents do not contain the answer, and cite nothing.",
+    "The model writes the answer from the numbered retrieved chunks through a strict function call; the backend checks every citation (a retrieved source, a verbatim quote, every [n] marker cited) before showing it, and shows the not-found answer when a check fails.",
+    "The model's API key comes from the application's own environment at run time, never from its code or repository; its tests use a fake model.",
     "Every citation names a chunk retrieved for that question, and its quote appears in that chunk. Citations show title and location.",
     "A citation's presence is not proof that the answer is correct; the acceptance tests check grounding separately.",
     "A changed document is re-indexed by content hash; a deleted document, or one whose authorization is revoked, is removed before the next answer.",

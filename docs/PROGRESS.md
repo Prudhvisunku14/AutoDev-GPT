@@ -1496,3 +1496,30 @@ Frontend 124 passed, typecheck and lint clean.
 - **No real n8n has been run.** Pulling `n8nio/n8n` (about 600 MB) and creating its owner account and API key are the person's steps, so the live test has not run.
 - `opencode_via_n8n` stays planned in the catalog: nothing calls OpenCode through n8n.
 - A delayed n8n callback still does not resume a paused run (A08).
+
+### Review fixes: n8n callbacks resume runs; GPT-written RAG answers (2026-11-05)
+
+The branch was pushed. CI ran on GitHub for the first time (run `41976410351`): the backend on Windows and the frontend on Ubuntu both passed. Before the push, every added line was scanned for credentials. Nothing real was found; one fake token-shaped literal in a test is now built at runtime.
+
+**A08 fixed: an n8n callback resumes a waiting run.**
+- New GPT function `wait_for_workflow(trigger_id)`. It returns the result at once if it has arrived. Otherwise it pauses the run as `n8n_callback:<trigger_id>`, so GPT is not asked again and again; each ask would be a paid call.
+- The orchestrator now makes no GPT call while a tool's pause is in place.
+- The signed callback resumes the run only when every rule holds:
+  - the run waits for exactly that trigger;
+  - the callback arrives before the wait's deadline (`N8N_CALLBACK_WAIT_SECONDS`, 15 minutes by default);
+  - `N8N_RESUME_ON_CALLBACK=true`;
+  - `REQUIRE_SPEND_APPROVAL=false`;
+  - the session's spending policy still admits the run.
+- The run's own enforced limit still binds. Otherwise the run stays paused and says why (`n8n.resume_refused`), for a person to continue it.
+- Tests: `tests/unit/test_n8n_resume.py` (5), end to end through the app, the run manager and the callback route. They cover resumed, approval required, late, not waiting, and the result already there.
+
+**GPT-written RAG answers** (`app/rag/grounded.py`, `POST /api/v1/projects/{id}/knowledge/ask`):
+- GPT answers from numbered, delimited, untrusted chunks through a strict `submit_answer` function.
+- Code checks every citation: a retrieved source, a verbatim quote, every `[n]` marker cited, every citation used. An answer that fails is replaced by the not-found answer, with the reasons.
+- Nothing is sent when nothing relevant is retrieved.
+- The worst case of the one call must fit the amount approved for that question.
+- The event records chunk IDs and cost, never document text.
+- The RAG blueprint now requires the same of generated chatbots: model-written answers, code-checked citations, and the key read from the application's environment at run time.
+- Tests: `tests/unit/test_rag_grounded.py` (13).
+
+**Review:** `docs/FEATURE_STATUS.md` sorts every feature by its strongest evidence, and lists the ten requirements still missing. The most important is that Google consent is kept in memory, so it does not survive a restart. `docs/LIVE_TEST_PLAN.md` is the step-by-step plan for A–H.

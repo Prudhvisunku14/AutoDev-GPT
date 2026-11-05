@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api import approvals, artifacts, budget, capabilities, github, health, history, integrations, n8n, projects, resources, runs, session, tools
+from app.api import approvals, artifacts, budget, capabilities, github, health, history, integrations, knowledge, n8n, projects, resources, runs, session, tools
 from app.coding.attempt_store import SqlAttemptStore
 from app.coding.candidate import CandidateWorkspaces
 from app.config import Settings, get_settings
@@ -193,6 +193,7 @@ def create_app(
     app.state.orchestrator = orchestrator
     app.state.run_manager = run_manager
     app.state.llm_problem = llm_problem
+    app.state.llm_provider = llm_provider  # the same GPT client and limits for grounded answers (api/knowledge.py)
     app.state.sandbox = sandbox
     app.state.drive = drive
     app.state.n8n = n8n_runtime
@@ -245,6 +246,7 @@ def create_app(
     app.include_router(history.router, prefix=API_PREFIX)
     app.include_router(tools.router, prefix=API_PREFIX)
     app.include_router(session.router, prefix=API_PREFIX)
+    app.include_router(knowledge.router, prefix=API_PREFIX)
     app.include_router(resources.router, prefix=API_PREFIX)
     app.include_router(github.router)  # its own paths: GitHub's OAuth callback is not under the API prefix
     app.include_router(integrations.router)  # its own paths: the OAuth callback is not under the API prefix

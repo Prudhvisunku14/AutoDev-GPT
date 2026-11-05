@@ -548,7 +548,7 @@ def post(client: TestClient, body: bytes, *, secret: str = SECRET, now: float | 
 def test_a_signed_callback_is_stored_once(site: Any) -> None:
     client, project, run = site()
     body = reply(project, run)
-    assert post(client, body).json() == {"accepted": True, "trigger_id": TRIGGER_ID}
+    assert post(client, body).json() == {"accepted": True, "trigger_id": TRIGGER_ID, "resumed": False}  # the run was not waiting for it
     again = post(client, reply(project, run, execution_id="2"))  # a new signature for a second report of the same trigger
     assert again.status_code == 409 and "already has its callback" in again.json()["detail"]
     with client.app.state.session_factory() as s:  # type: ignore[attr-defined]

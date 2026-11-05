@@ -1,5 +1,7 @@
 # Competition scenarios: what is ready, what has really run, and what each still needs
 
+The step-by-step plan for running them live is [LIVE_TEST_PLAN.md](LIVE_TEST_PLAN.md). Feature by feature status: [FEATURE_STATUS.md](FEATURE_STATUS.md).
+
 Status as of 2026-11-05, branch `feature/general-purpose-platform`.
 
 **None of the eight scenarios below has been run live in this branch.** Each needs at least one of the following, and none of them has been given:
@@ -31,7 +33,7 @@ Everything listed as "built" is tested offline with scripted GPT and in-process 
 | C | Simple playable game | As a static site (HTML, CSS, JS) under A's checks | No | As A |
 | D | Search GitHub, compare with a requirement | Search, licence-aware evaluation, automatic inspection of named repositories, code-checked gap analysis given to GPT | No live GitHub request yet | `REPOSITORY_SOURCE=github`; a GitHub connection for private repositories; one approved paid run |
 | E | Modify a repository, open an approved PR | Import at a pinned commit, gap analysis, verification, `publish_repository_changes` (GIT_PUSH approval, new branch, only the run's changes) | No | A GitHub OAuth App (`GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`), `DEVPILOT_TOKEN_KEY`, a connection from the Tools page, a test repository, one approved paid run |
-| F | Google Drive RAG application | Consent with PKCE and encrypted refresh tokens, scoped grants, OpenAI embeddings with a dollar bound, persistent SQLite index isolated per project and grant, cited answers | No | A Google OAuth client; the `document-parser` image built and approved; `RAG_EMBEDDER=openai` with `OPENAI_EMBEDDING_PRICE_PER_MTOK`; FastAPI and React verifiers for the generated app |
+| F | Google Drive RAG application | Consent with PKCE and encrypted refresh tokens, scoped grants, OpenAI embeddings with a dollar bound, persistent SQLite index isolated per project and grant, GPT-written answers whose every citation is checked in code (`POST /projects/{id}/knowledge/ask`) | No | A Google OAuth client; the `document-parser` image built and approved; `RAG_EMBEDDER=openai` with `OPENAI_EMBEDDING_PRICE_PER_MTOK`; FastAPI and React verifiers for the generated app |
 | G | Compare OpenCode, n8n and another tool | Tools page and `compare_tools` answer from the catalog with recorded evidence; unknown tools (Cloudflare, Zapier) are reported as unknown | Answers are local and free; the evidence they cite is as recorded | Nothing to compare *live*; n8n's evidence stays "offline tests" until the live n8n test passes |
 | H | Download the ZIP and run it in a clean environment | ZIP only for verified runs, with the same packaging rules as `devpilot build`; manifest and report included | No | A delivered run, then unzipping it on a clean machine and running its tests by hand |
 

@@ -173,6 +173,10 @@ class Settings(BaseSettings):
     # Reviewed facts about each development tool (app/toolcatalog). Readiness is computed, never read from this file.
     tool_catalog_file: Path = Path("config/tool_catalog.yaml")
     n8n_auto_approve: bool = False
+    # A run that called wait_for_workflow is resumed by the signed callback only within this many seconds, only within the limit
+    # the person already approved, and never when REQUIRE_SPEND_APPROVAL=true (then the person starts it again).
+    n8n_callback_wait_seconds: float = Field(default=900.0, ge=30, le=86_400)
+    n8n_resume_on_callback: bool = True
     n8n_callback_url: str | None = None  # where n8n should post results, as n8n sees DevPilot; None: no callback is offered
     n8n_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
     n8n_max_response_bytes: int = Field(default=64_000, ge=1_024, le=1_000_000)

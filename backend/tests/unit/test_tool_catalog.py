@@ -143,7 +143,7 @@ def test_fixture_backed_tools_are_simulated_never_ready(tmp_path: Path) -> None:
         tools = {tool["id"]: tool for tool in client.get("/api/v1/tools", headers=HEADERS).json()["tools"]}
     for tool_id in ("gpt", "opencode", "docker", "n8n", "github", "google_drive"):
         assert tools[tool_id]["readiness"]["status"] == "simulated", (tool_id, tools[tool_id]["readiness"])
-    assert tools["n8n"]["functions"] == ["trigger_workflow", "get_workflow_result"]
+    assert tools["n8n"]["functions"] == ["trigger_workflow", "get_workflow_result", "wait_for_workflow"]
 
 
 def test_a_real_drive_without_encryption_is_blocked_and_says_why(tmp_path: Path) -> None:

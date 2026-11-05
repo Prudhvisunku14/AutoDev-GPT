@@ -314,6 +314,8 @@ class Orchestrator:
             assert run is not None
             if run.is_terminal or run.state is RunState.AWAITING_APPROVAL:
                 return None
+            if run.pause_reason:  # a tool paused the run (wait_for_workflow): no further GPT call until it is resumed
+                return None
             if run.state not in self._orchestrated:
                 needed = REQUIRED_PHASE.get(run.state, "a later phase")
                 pause_run(

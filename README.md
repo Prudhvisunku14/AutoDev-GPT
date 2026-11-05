@@ -243,6 +243,8 @@ Details: [docs/MILESTONE_1_GITHUB.md](docs/MILESTONE_1_GITHUB.md).
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): the four ways to run DevPilot and the proposed cloud architecture (not deployed)
 - [docs/WEBSITES_AND_REPOSITORIES.md](docs/WEBSITES_AND_REPOSITORIES.md): your own GitHub repositories (public and private), repository inspection, the website verifier and its network controls, and the capability status of website generation
 - [docs/MILESTONE_1_GITHUB.md](docs/MILESTONE_1_GITHUB.md): GitHub-assisted development (repository discovery, evaluation and safe import, offline-tested with fixtures), the weather application's specification, and what a first real run needs
+- [docs/FEATURE_STATUS.md](docs/FEATURE_STATUS.md): every feature by its strongest evidence (tested live, tested offline, blocked here, not built), and the requirements still missing
+- [docs/LIVE_TEST_PLAN.md](docs/LIVE_TEST_PLAN.md): the step-by-step live test plan for scenarios A–H, cheapest first, with what each needs and what counts as a pass
 - [docs/COMPETITION_SCENARIOS.md](docs/COMPETITION_SCENARIOS.md): the truthful capability matrix. For each competition scenario: what is built, what has run live, and what it still needs
 - [docs/ADDING_A_STACK.md](docs/ADDING_A_STACK.md): how a new framework is added (catalog entry, recipe, runtime image, approval) and which stacks are verifiable here
 - [n8n/README.md](n8n/README.md): the signed n8n workflows, and running them on a local n8n

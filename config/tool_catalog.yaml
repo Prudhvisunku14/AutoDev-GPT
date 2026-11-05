@@ -119,12 +119,12 @@ tools:
       Runs registered automation workflows through signed webhooks, and receives their results through a signed callback.
       Each workflow declares its effect, and anything that writes waits for a person's approval.
     tasks: [workflow_automation, notifications]
-    functions: [trigger_workflow, get_workflow_result]
+    functions: [trigger_workflow, get_workflow_result, wait_for_workflow]
     advantages:
       - Hundreds of ready-made service connectors without writing integration code
       - Signed requests both ways, with a replay guard and an egress allowlist
     limitations:
-      - A delayed callback is stored but does not resume a run
+      - A waiting run is resumed by its callback only before the deadline and within the approved limit; with REQUIRE_SPEND_APPROVAL a person continues it
       - It cannot write code; OpenCode through n8n is not implemented
     requirements: [a running n8n instance, N8N_ENABLED, N8N_WEBHOOK_SECRET, the workflows imported and active]
     evidence:

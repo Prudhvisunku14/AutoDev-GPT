@@ -141,6 +141,12 @@ function describe(event: RunEvent): Omit<TimelineItem, "key" | "ts"> | null {
       return { kind: "tool", title: `n8n workflow ${text(p.workflow)} started`, tone: "neutral" };
     case "n8n.callback":
       return { kind: "tool", title: `n8n workflow reported ${text(p.status)}`, tone: p.status === "success" ? "good" : "warn" };
+    case "n8n.waiting":
+      return { kind: "info", title: `Waiting for n8n's result of ${text(p.workflow)}`, detail: "The run continues by itself when n8n reports back", tone: "neutral" };
+    case "n8n.resumed_run":
+      return { kind: "state", title: `n8n reported back: the run continues`, tone: "good" };
+    case "n8n.resume_refused":
+      return { kind: "info", title: "n8n reported back; start the run again to continue", detail: text(p.reason) || undefined, tone: "warn" };
     case "repository.searched":
       return { kind: "tool", title: "Searched public repositories", tone: "neutral" };
     case "repository.imported":
