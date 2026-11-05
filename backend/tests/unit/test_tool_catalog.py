@@ -41,7 +41,11 @@ def everything_app(tmp_path: Path) -> Any:
     drive, _source = rag.fixture_runtime(drive_fixtures.FixtureDrive.research(), settings)
     n8n = build_n8n_runtime(settings, EGRESS, client=FakeN8n.with_active("devpilot-echo", "devpilot-notify"))
     selector = build_selector(settings, EGRESS, [_simulated("simulated", [])])
-    return create_app(settings, llm=FakeLLM(), sandbox=ReplaySandbox.load(), coding=selector, repositories=FixtureSource(), drive=drive, n8n_runtime=n8n)
+    from tests.github_fake import FakeGitHub
+    from tests.unit.test_github_connection import connection
+
+    github = connection(tmp_path, FakeGitHub())
+    return create_app(settings, llm=FakeLLM(), sandbox=ReplaySandbox.load(), coding=selector, repositories=FixtureSource(), drive=drive, n8n_runtime=n8n, github_connection=github)
 
 
 def write(tmp_path: Path, text: str) -> Path:

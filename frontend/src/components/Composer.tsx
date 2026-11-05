@@ -8,8 +8,9 @@ import { decideStack, requestedStack, validatePrompt, DEFAULT_STACK_ID } from ".
 import { assessReadiness } from "../lib/readiness";
 import { keys, useBudget, useCapabilities, useStatus } from "../lib/queries";
 import { cn } from "../lib/cn";
-import type { Project, Run } from "../lib/types";
+import type { Project, ResourceCheck, Run } from "../lib/types";
 import { BuildStatus } from "./BuildStatus";
+import { PermissionDialog } from "./PermissionDialog";
 
 const MAX_HEIGHT = 320;
 
@@ -26,6 +27,8 @@ export function Composer({ initialPrompt = "", onCreated }: { initialPrompt?: st
   const [confirming, setConfirming] = useState(false);
   const [spendApproved, setSpendApproved] = useState(false);
   const [busy, setBusy] = useState(false);
+  // A project whose request names a repository or document DevPilot cannot read yet: the run waits for the person's permission.
+  const [gate, setGate] = useState<{ project: Project; run: Run; limit: number; checked: ResourceCheck } | null>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const dialog = useRef<HTMLElement>(null);
   const submissionLock = useRef(false);
@@ -111,19 +114,15 @@ export function Composer({ initialPrompt = "", onCreated }: { initialPrompt?: st
       }
       const project = await api.createProject({ name: projectNameFrom(prompt), requirement_text: requirementForStack(prompt, stack), stack: stack.id });
       const run = await api.createRun(project.id);
-      try {
-        await api.startRun(run.id, freshBudget.run_limit_usd);
-      } catch (failure) {
-        const message = failure instanceof Error ? failure.message : "The run could not be started.";
-        await Promise.all([client.invalidateQueries({ queryKey: keys.projects }), client.invalidateQueries({ queryKey: keys.runs })]);
+      // Repositories and documents the request names are read now, so GPT starts from what they contain. One that needs the
+      // person's permission pauses here, before anything is spent.
+      const checked = await api.checkResources(project.id).catch(() => null);
+      if (checked && checked.needs_permission.length > 0) {
         setConfirming(false);
-        onCreated?.(project, run, message);
+        setGate({ project, run, limit: freshBudget.run_limit_usd, checked });
         return;
       }
-      await Promise.all([client.invalidateQueries({ queryKey: keys.projects }), client.invalidateQueries({ queryKey: keys.runs })]);
-      setPrompt("");
-      setConfirming(false);
-      onCreated?.(project, run);
+      await begin(project, run, freshBudget.run_limit_usd);
     } catch (failure) {
       if (failure instanceof ApiError && [0, 401, 503].includes(failure.status)) {
         await Promise.all([
@@ -135,6 +134,34 @@ export function Composer({ initialPrompt = "", onCreated }: { initialPrompt?: st
       setError(failure instanceof Error ? failure.message : "The build could not be prepared.");
     } finally {
       submissionLock.current = false;
+      setBusy(false);
+    }
+  }
+
+  async function begin(project: Project, run: Run, limit: number) {
+    try {
+      await api.startRun(run.id, limit);
+    } catch (failure) {
+      const message = failure instanceof Error ? failure.message : "The run could not be started.";
+      await Promise.all([client.invalidateQueries({ queryKey: keys.projects }), client.invalidateQueries({ queryKey: keys.runs })]);
+      setConfirming(false);
+      onCreated?.(project, run, message);
+      return;
+    }
+    await Promise.all([client.invalidateQueries({ queryKey: keys.projects }), client.invalidateQueries({ queryKey: keys.runs })]);
+    setPrompt("");
+    setConfirming(false);
+    onCreated?.(project, run);
+  }
+
+  async function continueAfterPermission() {
+    if (!gate) return;
+    const { project, run, limit } = gate;
+    setGate(null);
+    setBusy(true);
+    try {
+      await begin(project, run, limit);
+    } finally {
       setBusy(false);
     }
   }
@@ -194,6 +221,20 @@ export function Composer({ initialPrompt = "", onCreated }: { initialPrompt?: st
           <BuildStatus readiness={readiness} />
         </div>
       </form>
+
+      {gate && (
+        <PermissionDialog
+          projectId={gate.project.id}
+          initial={gate.checked}
+          onReady={() => void continueAfterPermission()}
+          onSkip={() => void continueAfterPermission()}
+          onCancel={() => {
+            const { project, run } = gate;
+            setGate(null);
+            onCreated?.(project, run, "The build was not started: permission for a named resource was not granted.");
+          }}
+        />
+      )}
 
       {confirming && budget.data && (
         // The overlay never scrolls the page behind it. The dialog is as tall as the viewport allows: its body scrolls,

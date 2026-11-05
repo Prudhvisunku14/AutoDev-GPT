@@ -73,6 +73,34 @@ describe("Composer", () => {
     expect(api.createProject).not.toHaveBeenCalled();
   });
 
+  it("pauses before spending when the request names a repository it cannot read, and starts once the person decides", async () => {
+    const project = makeProject({ id: "p7", stack: "python-cli" });
+    const run = makeRun({ id: "r7", project_id: "p7" });
+    const needs = {
+      resources: [{ kind: "github" as const, key: "github:acme/secret@", url: "https://github.com/acme/secret", label: "acme/secret", full_name: "acme/secret",
+                    status: "authorization_required", message: "It may be private, or the name may be wrong.", action: "connect_github" as const }],
+      problems: [],
+      needs_permission: ["github:acme/secret@"],
+    };
+    const api = stubApi({
+      createProject: vi.fn(() => Promise.resolve(project)),
+      createRun: vi.fn(() => Promise.resolve(run)),
+      startRun: vi.fn(() => Promise.resolve(makeRun({ ...run, state: "ANALYZING" }))),
+      checkResources: vi.fn(() => Promise.resolve(needs)),
+    });
+    const onCreated = vi.fn();
+    renderWithProviders(<Composer onCreated={onCreated} />, { api });
+    await openDialog("Create a Python tool that improves https://github.com/acme/secret");
+    await userEvent.click(screen.getByRole("checkbox", { name: APPROVE }));
+    await userEvent.click(screen.getByRole("button", { name: "Approve and start build" }));
+    expect(await screen.findByRole("dialog", { name: "Permission needed" })).toBeInTheDocument();
+    expect(api.checkResources).toHaveBeenCalledWith("p7");
+    expect(api.startRun).not.toHaveBeenCalled(); // nothing is spent while the person decides
+    await userEvent.click(screen.getByRole("button", { name: "Build without it" }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(project, run));
+    expect(api.startRun).toHaveBeenCalledWith("r7", DEFAULT_BUDGET.run_limit_usd);
+  });
+
   it("builds a weather forecast request on the Python stack after explicit approval", async () => {
     const project = makeProject({ id: "p9", stack: "python-cli" });
     const run = makeRun({ id: "r9", project_id: "p9" });

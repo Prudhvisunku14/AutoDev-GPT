@@ -1,4 +1,4 @@
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, CircleDashed, CircleSlash, FlaskConical, Search, Wrench } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { Notice } from "../components/Notice";
@@ -169,6 +169,52 @@ function Answer({ answer, names }: { answer: ToolAnswer; names: Record<string, s
   );
 }
 
+/** The person's GitHub connection: the backend runs the OAuth flow and keeps the token; this card never sees it. */
+function GitHubConnectionCard() {
+  const api = useApi();
+  const client = useQueryClient();
+  const status = useQuery({ queryKey: ["integrations", "github"], queryFn: api.githubStatus, refetchInterval: (query) => (query.state.data?.connected ? false : 5_000) });
+  const refresh = () => client.invalidateQueries({ queryKey: ["integrations", "github"] });
+  const connect = useMutation({
+    mutationFn: async () => {
+      const opened = window.open("about:blank", "devpilot-consent", "popup,width=640,height=760");
+      const { url } = await api.connectGitHub();
+      if (opened) opened.location.href = url;
+      else window.location.assign(url);
+    },
+  });
+  const disconnect = useMutation({ mutationFn: api.disconnectGitHub, onSuccess: refresh });
+  const data = status.data;
+  if (!data) return null;
+  return (
+    <section aria-label="GitHub connection" className="mb-6 flex flex-wrap items-center gap-3 rounded-2xl border border-line bg-white px-5 py-4 shadow-soft">
+      <div className="min-w-0 flex-1">
+        <h2 className="text-sm font-semibold">GitHub connection</h2>
+        <p className="text-[13px] text-muted">
+          {data.connected
+            ? `Connected as ${data.login}. Private repositories you name can be read, and every write waits for your approval.`
+            : data.configured
+              ? "Not connected. Public repositories are read without it; connect to read private ones and to open pull requests."
+              : `Not available on this backend: ${data.blocker}`}
+        </p>
+        {disconnect.data && <p className="mt-1 text-[13px] text-muted">Disconnected (GitHub revocation: {disconnect.data.remote_revocation}).</p>}
+        {(connect.isError || disconnect.isError) && <p role="alert" className="mt-1 text-[13px] text-rose-600">{(connect.error ?? disconnect.error)?.message}</p>}
+      </div>
+      {data.connected ? (
+        <button type="button" onClick={() => disconnect.mutate()} disabled={disconnect.isPending} className="rounded-xl border border-line px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
+          Disconnect
+        </button>
+      ) : (
+        data.configured && (
+          <button type="button" onClick={() => connect.mutate()} disabled={connect.isPending} className="rounded-xl bg-slate-900 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50">
+            Connect GitHub
+          </button>
+        )
+      )}
+    </section>
+  );
+}
+
 export function Tools() {
   const api = useApi();
   const tools = useTools();
@@ -185,6 +231,7 @@ export function Tools() {
   return (
     <div className="mx-auto max-w-5xl pt-8">
       <PageTitle title="Tools" subtitle="What each development tool does, whether it is usable on this backend now, and what has really been shown. Asking costs nothing: the catalog answers, not a model." />
+      <GitHubConnectionCard />
       <form onSubmit={submit} className="mb-6 flex gap-2">
         <label htmlFor="tool-question" className="sr-only">
           Ask about tools

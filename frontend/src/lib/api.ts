@@ -5,6 +5,8 @@ import type {
   BackendStatus,
   Budget,
   Capabilities,
+  GitHubStatus,
+  ResourceCheck,
   ToolAnswer,
   ToolsListing,
   Criterion,
@@ -122,6 +124,13 @@ export function createApiClient({ baseUrl, getToken, fetchImpl }: ApiClientOptio
     getBudget: () => json<Budget>("/budget"),
     getCapabilities: () => json<Capabilities>("/capabilities"),
     listTools: () => json<ToolsListing>("/tools"),
+    /** Reads what the requirement names: public repositories at once, private ones through the GitHub connection. */
+    checkResources: (projectId: string) => json<ResourceCheck>(`/projects/${id(projectId)}/resources/check`, { method: "POST" }),
+    githubStatus: () => json<GitHubStatus>("/integrations/github"),
+    /** The GitHub consent URL; the backend keeps the token, the dashboard never sees it. */
+    connectGitHub: () => json<{ url: string }>("/integrations/github/connect", { method: "POST" }),
+    disconnectGitHub: () => json<{ local_deleted: boolean; remote_revocation: string; note?: string }>("/integrations/github/disconnect", { method: "POST" }),
+    authorizeGoogle: (projectId: string) => json<{ url: string; grant_id: string }>(`/projects/${id(projectId)}/resources/google/authorize`, { method: "POST" }),
     /** Answered from the backend's tool catalog: no model is called and nothing is spent. */
     askTools: (question: string) => json<ToolAnswer>("/tools/compare", { method: "POST", body: { question } }),
     getProject: (projectId: string) => json<Project>(`/projects/${id(projectId)}`),

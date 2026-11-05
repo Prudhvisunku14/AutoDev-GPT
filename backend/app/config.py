@@ -182,6 +182,12 @@ class Settings(BaseSettings):
     # until cryptography is installed and DEVPILOT_TOKEN_KEY is set, and has never run against Google. Tests and the
     # offline demonstration pass a fixture runtime to create_app; no setting selects fixtures or the embedding test double.
     drive_source: Literal["off", "google"] = "off"
+    # The person's GitHub connection (app/repos/github_oauth.py): an OAuth App they register at github.com/settings/developers,
+    # with this callback. The token is stored encrypted with DEVPILOT_TOKEN_KEY under CREDENTIALS_DIR; nobody pastes one.
+    github_oauth_client_id: str | None = None  # public identifier; its secret is github_oauth_client_secret
+    github_oauth_redirect_uri: str = "http://127.0.0.1:8000/oauth/github/callback"
+    github_oauth_scopes: str = "repo"  # read private repositories the person chooses, and open approved pull requests
+    credentials_dir: Path = Path("data/credentials")
     google_oauth_client_id: str | None = None  # public identifier; its secret is google_oauth_client_secret
     google_oauth_redirect_uri: str = "http://127.0.0.1:8000/oauth/google/callback"
     drive_max_files: int = Field(default=200, ge=1, le=5_000)  # discovered, and ingested in one call
@@ -200,6 +206,7 @@ class Settings(BaseSettings):
     github_token: SecretStr | None = None
     google_oauth_client_secret: SecretStr | None = None
     devpilot_token_key: SecretStr | None = None
+    github_oauth_client_secret: SecretStr | None = None
 
     @field_validator(
         "openai_api_key",
@@ -209,6 +216,7 @@ class Settings(BaseSettings):
         "github_token",
         "google_oauth_client_secret",
         "devpilot_token_key",
+        "github_oauth_client_secret",
         mode="before",
     )
     @classmethod
@@ -230,6 +238,7 @@ class Settings(BaseSettings):
         "openai_price_output_per_mtok",
         "recovery_max_attempt_timeout_seconds",
         "history_dir",
+        "github_oauth_client_id",
         mode="before",
     )
     @classmethod
@@ -278,6 +287,7 @@ class Settings(BaseSettings):
         self.egress_allowlist_file = _from_repo_root(self.egress_allowlist_file)
         self.n8n_workflows_file = _from_repo_root(self.n8n_workflows_file)
         self.tool_catalog_file = _from_repo_root(self.tool_catalog_file)
+        self.credentials_dir = _from_repo_root(self.credentials_dir)
         self.coding_checkpoints_dir = _from_repo_root(self.coding_checkpoints_dir)
         self.coding_work_dir = _from_repo_root(self.coding_work_dir)
         return self

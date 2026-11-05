@@ -134,17 +134,19 @@ tools:
     role: source discovery, reuse and publishing
     aliases: [github, "github.com", git, repository, repositories, repo]
     description: >-
-      Finds public repositories, reads a named repository at a pinned commit, imports approved code into an isolated
-      workspace.
-    tasks: [repository_search, source_reuse]
-    functions: [search_repositories, import_repository]
+      Finds public repositories, reads a repository the user names at a pinned commit (public ones automatically,
+      private ones through the user's GitHub connection), imports approved code into an isolated workspace, and publishes
+      the verified project as a pull request on a new branch or as a new repository, after the user's approval.
+    tasks: [repository_search, source_reuse, repository_publish]
+    functions: [search_repositories, import_repository, publish_repository_changes]
     advantages:
       - Reuses working code and keeps its licence and attribution
       - Every write waits for a person's approval
     limitations:
-      - Private repositories need the user to connect their GitHub account
+      - Private repositories and every write need the user to connect their GitHub account
+      - A pull request carries only added and changed files; deletions are listed, never pushed
       - Imported code is untrusted and is never run outside the sandbox
-    requirements: [REPOSITORY_SOURCE=github, the GitHub egress entries, a GitHub connection for private repositories and writes]
+    requirements: [REPOSITORY_SOURCE=github, the GitHub egress entries, a GitHub OAuth App and DEVPILOT_TOKEN_KEY for private repositories and writes]
     evidence:
       - {level: offline_test, outcome: passed, date: 2026-11-02, summary: "Discovery, evaluation, licence checks and safe import, against recorded fixtures", source: docs/MILESTONE_1_GITHUB.md}
 

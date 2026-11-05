@@ -8,13 +8,14 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api import approvals, artifacts, budget, capabilities, health, history, integrations, n8n, projects, runs, tools
+from app.api import approvals, artifacts, budget, capabilities, github, health, history, integrations, n8n, projects, resources, runs, tools
 from app.coding.attempt_store import SqlAttemptStore
 from app.coding.candidate import CandidateWorkspaces
 from app.config import Settings, get_settings
@@ -22,6 +23,7 @@ from app.core.egress import EgressPolicy
 from app.core.events import EventRecorder
 from app.core.logging import configure_logging
 from app.core.redaction import Redactor
+from app.core.secret_store import EncryptedFileStore
 from app.db.session import create_db_engine, create_session_factory, init_db
 from app.orchestrator.fake_llm import FakeLLM
 from app.orchestrator.llm_client import LLMClient, OpenAIResponsesClient, llm_config_problem
@@ -29,7 +31,9 @@ from app.orchestrator.loop import Orchestrator
 from app.orchestrator.run_manager import RunManager
 from app.orchestrator.start_policy import StartPolicy
 from app.orchestrator.state_machine import FULL_RUN_STATES, ORCHESTRATED_STATES
+from app.drive.oauth import build_cipher
 from app.n8n.runtime import N8nRuntime
+from app.repos.github_oauth import GitHubConnection
 from app.repos.source import RepositorySource
 from app.sandbox.docker_cli import SandboxError
 from app.sandbox.runner import SandboxRunner
@@ -40,6 +44,7 @@ from app.toolcatalog.model import load_facts
 from app.tools.adapters.catalog import register_catalog_tools
 from app.tools.adapters.coding import CodingRuntime, recover_attempts, register_coding_tools
 from app.tools.adapters.drive import DriveRuntime, register_drive_tools
+from app.tools.adapters.github_publish import PublishRuntime, register_publish_tool
 from app.tools.adapters.n8n import register_n8n_tools
 from app.tools.adapters.repositories import RepositoryRuntime, register_repository_tools
 from app.tools.adapters.sandbox import register_sandbox_tools
@@ -68,6 +73,8 @@ def create_app(
     gpt_label: str | None = None,
     start_policy: StartPolicy | None = None,
     web_verifier: WebVerifier | None = None,
+    github_connection: GitHubConnection | None = None,
+    github_http: Any = None,
 ) -> FastAPI:
     """Build the app. `llm` replaces the OpenAI client (tests and the offline demo use FakeLLM). `gpt_label` names
     what `llm` really is in reports, for a real client wrapped in a guard (app/plan_cli.py). `start_policy` may refuse
@@ -79,6 +86,8 @@ def create_app(
     approval-gated search and import of public code in PLANNING (fixtures offline; GitHub once approved).
     `drive` enables the Google Drive and RAG knowledge-base tools (a fixture Drive offline; off by default).
     `n8n_runtime` enables `trigger_workflow`, `get_workflow_result` and the n8n routes (a simulated n8n offline; off by default).
+    `github_connection` is the person's GitHub connection (built from settings when None); once it is configured and a coding
+    runtime exists, `publish_repository_changes` is offered. `github_http` replaces the HTTP client GitHub reads use (tests).
     """
     settings = settings or get_settings()
     redactor = Redactor(settings.secret_values())
@@ -119,6 +128,13 @@ def create_app(
         register_drive_tools(registry, drive)
     if n8n_runtime is not None:
         register_n8n_tools(registry, n8n_runtime)
+    if github_connection is None:
+        cipher, cipher_problem = build_cipher(settings.devpilot_token_key)
+        github_connection = GitHubConnection(egress, EncryptedFileStore(settings.credentials_dir, cipher, problem=cipher_problem),
+                                             client_id=settings.github_oauth_client_id, client_secret=settings.github_oauth_client_secret,
+                                             redirect_uri=settings.github_oauth_redirect_uri, scopes=tuple(settings.github_oauth_scopes.split()))  # fmt: skip
+    if runtime is not None and github_connection.blocker() is None:
+        register_publish_tool(registry, PublishRuntime(runtime.candidates, github_connection, egress, redactor, client=github_http))
     tool_catalog = ToolCatalog(load_facts(settings.tool_catalog_file))  # a malformed catalog stops the app here
     register_catalog_tools(registry, tool_catalog)
     executor = ToolExecutor(registry, PolicyEngine(), redactor, max_output_chars=settings.tool_output_max_chars)
@@ -180,6 +196,8 @@ def create_app(
     app.state.scripted_llm = isinstance(llm, FakeLLM)  # scripted GPT spends nothing; any other client may, so its starts need approval
     app.state.coding_selector = coding if runtime is not None else None
     app.state.repositories = repositories
+    app.state.github = github_connection
+    app.state.github_http = github_http
     app.state.tool_catalog = tool_catalog
     tool_catalog.attach(app.state)
     app.state.start_policy = start_policy
@@ -220,6 +238,8 @@ def create_app(
     app.include_router(capabilities.router, prefix=API_PREFIX)
     app.include_router(history.router, prefix=API_PREFIX)
     app.include_router(tools.router, prefix=API_PREFIX)
+    app.include_router(resources.router, prefix=API_PREFIX)
+    app.include_router(github.router)  # its own paths: GitHub's OAuth callback is not under the API prefix
     app.include_router(integrations.router)  # its own paths: the OAuth callback is not under the API prefix
     app.include_router(n8n.router)  # its own paths: n8n's signed callback is not under the API prefix
     if UI_DIR.is_dir():

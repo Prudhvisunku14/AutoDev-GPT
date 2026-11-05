@@ -1341,3 +1341,48 @@ Branch `feature/general-purpose-platform`, from `main` at `e120238`. Baseline be
 **Tests:** `tests/unit/test_tool_catalog.py` (25) and `src/pages/Tools.test.tsx` (3). The two tests that pin the analysis-state tool list now include `compare_tools`. Backend after the phase: 4173 passed, 20 skipped, then 146 of 146 in the affected files after the fixes.
 
 **Limitations:** recommendations come from task words in the question plus the catalog's facts; they explain, they do not choose the build. GPT chooses, and code checks. The catalog cannot compare tools DevPilot has no adapter for, by design.
+
+### General-purpose platform, Phase 2: GitHub and Google Drive resources, the GitHub connection, approved writes (2026-11-05)
+
+**Built (offline, against an in-process GitHub: `tests/github_fake.py`):**
+- **Discovery** (`app/sources/discover.py`). GitHub repositories and Google Drive files, folders, Docs, Sheets and Slides named in free text. Exact hosts only. Look-alike hosts, plain http, credentials in a link and short IDs are refused with the reason. A link carrying a token is never echoed.
+- **Access check** (`app/sources/check.py`, `POST /api/v1/projects/{id}/resources/check`):
+  - A repository the person named is read automatically at a pinned commit, with the same reading as `devpilot inspect`: metadata, file list and small manifests, nothing downloaded or run.
+  - A 404 without a connection is reported as "may be private, or the name may be wrong", never as "private", and asks for a GitHub connection. With a connection, a 404 is "not visible to your account".
+  - A Drive item is readable only under an active grant of this project.
+  - The result is recorded (`resources.checked`) and given to GPT in its first message as an untrusted `<resources>` block.
+- **The person's GitHub connection** (`app/repos/github_oauth.py`, `app/api/github.py`). GitHub's OAuth web flow, managed by the backend; the dashboard never sees a token.
+  - The flow uses a single-use `state` with a 10-minute expiry, PKCE S256, and a browser-binding cookie scoped to the callback.
+  - A narrower scope than asked is refused, and the account is confirmed through `/user` before anything is stored.
+  - The token is stored encrypted with Fernet (`DEVPILOT_TOKEN_KEY`) under `CREDENTIALS_DIR`, via `app/core/secret_store.py`. Without the key or the client secret, nothing is exchanged.
+  - Disconnecting deletes the local token first, then revokes the grant, and reports the two outcomes separately.
+- **`cryptography` 49.0.0 is now installed** in the venv and declared in `pyproject.toml`. Fernet, the approved cipher, can therefore be built, and Drive refresh tokens can be stored too.
+- **Approved GitHub writes**:
+  - `app/repos/github_write.py`, through the Git Data API: a new repository, or a pull request on a **new branch**. Its tree starts from the base tree, so every file it does not name is kept. A taken branch name is refused, and the default branch is never written.
+  - **`publish_repository_changes`** (GIT_PUSH: the approval queue holds every call) is offered in DOCUMENTING once a coding engine and a configured GitHub connection exist.
+  - It publishes only after a passed verification, and only the tree whose digest equals the verified one.
+  - A pull request carries only the run's added and changed files; deletions are listed, never pushed.
+  - A new repository gets the whole project, with the imported licence and notices when code was reused.
+  - The packaging rules of the ZIP apply.
+  - The approval shows the account, the target, the branch and every file.
+- **Dashboard:**
+  - After a project is created, its resources are checked. A resource that needs permission opens a small **Permission needed** popup, and the run is not started meanwhile.
+  - "Connect GitHub" or "Allow Google Drive access" opens the consent page in its own window. The popup polls, re-checks, and the build then continues by itself. "Build without it" is also offered.
+  - The Tools page has a GitHub connection card (connect and disconnect).
+- **Google:** `POST /api/v1/projects/{id}/resources/google/authorize` creates a pending grant for the Drive items the requirement names, and returns its consent URL. The existing callback activates it.
+
+**Tests:** `tests/unit/test_github_connection.py` (36):
+- discovery, and the encrypted store;
+- the OAuth flow's refusals (replayed state, wrong browser, expired state, GitHub error, bad code, narrower scope, missing cipher or secret);
+- disconnect and revocation;
+- the HTTP flow end to end, the public, private and not-visible checks, and where the token is sent (only `api.github.com`);
+- writes that keep other files and never move a branch;
+- the publish tool through a real run and approval: approved, denied, files changed after verification, no connection, and a pull request with only the run's changes.
+
+Frontend: `PermissionDialog.test.tsx` (2), plus a Composer test showing that nothing starts while permission is pending. Backend: 4221 passed, 20 skipped. Frontend: 129 passed, typecheck and lint clean.
+
+**Not verified live:**
+- No real GitHub OAuth App exists yet. The person registers one, with callback `http://127.0.0.1:8000/oauth/github/callback`, and sets `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET` and `DEVPILOT_TOKEN_KEY`.
+- No request reached GitHub.
+- Real Google consent still needs the person's Google OAuth client.
+- A run paused inside PLANNING by an `import_repository` authorization error is not resumed by the connection. It is resumed from the run page, as before.

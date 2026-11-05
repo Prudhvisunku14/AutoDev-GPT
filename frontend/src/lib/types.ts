@@ -350,3 +350,38 @@ export interface ToolAnswer {
   recommendation?: ToolRecommendation;
   note?: string | null;
 }
+
+// --- Resources a request names, and the GitHub connection ---------------------------------------------------------------
+
+export type ResourceAction = "connect_github" | "connect_google" | null;
+
+export interface ResourceItem {
+  kind: "github" | "drive";
+  key: string;
+  url: string;
+  label: string;
+  status: string;
+  message: string;
+  action: ResourceAction;
+  full_name?: string;
+  visibility?: "public" | "private";
+  license?: string | null;
+  stack?: string | null;
+  summary?: string;
+}
+
+export interface ResourceCheck {
+  resources: ResourceItem[];
+  problems: string[];
+  needs_permission: string[];
+}
+
+export interface GitHubStatus {
+  configured: boolean;
+  blocker: string | null;
+  connected: boolean;
+  login: string | null;
+  scopes: string[];
+  connected_at: number | null;
+  requested_scopes: string[];
+}
