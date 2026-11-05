@@ -1,255 +1,810 @@
-# DevPilot AI
+# DevPilot AI (AutoDev-GPT)
 
-**A GPT-orchestrated platform for autonomous software development.**
+**GPT-orchestrated software development with OpenCode, isolated Docker execution, verification-guided delivery and bounded recovery.**
 
-You describe the software you want in plain language. DevPilot AI then:
-- plans the work and picks a technology stack
-- writes the code with OpenCode
-- runs it in an isolated sandbox
-- tests it against acceptance criteria derived from your requirement
-- diagnoses and repairs failures within strict limits
-- delivers the source code, documentation, test results and a final report
+**Repository:** https://github.com/Prudhvisunku14/AutoDev-GPT  
+**Documented branch:** [`feature/evaluation-upgrade`](https://github.com/Prudhvisunku14/AutoDev-GPT/tree/feature/evaluation-upgrade)  
+**Documentation checked against the source:** 6 November 2026
 
-> **Status.** The engine is verified offline, and a Python command-line application has been generated, tested in Docker and independently verified end to end by real GPT and OpenCode, from the terminal scripts (the second of two paid runs, $0.51 in all; the first failed and led to fixes). The new `devpilot` command drives that same engine; its flow is offline-tested and its installer was tried from a clean checkout, but **a real paid build through `devpilot build` has not been run yet**. Only **Python command-line applications** are supported: React, websites and full-stack generation are not, until they pass real end-to-end tests.
-> See [docs/PROGRESS.md](docs/PROGRESS.md) for exactly what has been built and verified.
+DevPilot AI turns a plain-language request into a tested, packaged application. A GPT model analyses the request, plans the work and calls tools; **OpenCode** writes the code inside a locked-down container; separate **Docker** sandboxes run the tests; and the **FastAPI** backend decides, in code, what may run, what it may spend and whether the result can be delivered. Everything is driven from a Windows command line (`devpilot.cmd`) or a React dashboard.
 
-## Quick start (Windows)
+## Contents
 
-```powershell
-git clone https://github.com/Prudhvisunku14/AutoDev-GPT.git
-cd AutoDev-GPT
-.\setup.cmd
-.\devpilot.cmd doctor
-.\devpilot.cmd build
+1. [Overview and objectives](#1-overview-and-objectives)
+2. [Capabilities and verification status](#2-capabilities-and-verification-status)
+3. [System architecture](#3-system-architecture)
+4. [Technologies and their responsibilities](#4-technologies-and-their-responsibilities)
+5. [End-to-end development pipeline](#5-end-to-end-development-pipeline)
+6. [OpenCode integration and the coding lifecycle](#6-opencode-integration-and-the-coding-lifecycle)
+7. [Docker sandbox and security](#7-docker-sandbox-and-security)
+8. [Adaptive tool selection](#8-adaptive-tool-selection)
+9. [Failure detection, recovery and retry policy](#9-failure-detection-recovery-and-retry-policy)
+10. [Verification-guided development](#10-verification-guided-development)
+11. [GitHub, Google Drive, RAG and n8n integrations](#11-github-google-drive-rag-and-n8n-integrations)
+12. [Installation on Windows 10/11](#12-installation-on-windows-1011)
+13. [OpenAI API key, spending limits and approvals](#13-openai-api-key-spending-limits-and-approvals)
+14. [CLI usage and examples](#14-cli-usage-and-examples)
+15. [React frontend and FastAPI backend](#15-react-frontend-and-fastapi-backend)
+16. [Testing and CI](#16-testing-and-ci)
+17. [Troubleshooting](#17-troubleshooting)
+18. [Repository structure](#18-repository-structure)
+19. [Roadmap](#19-roadmap)
+20. [Competition examples](#20-competition-examples)
+21. [Reference documentation](#21-reference-documentation)
+
+---
+
+## 1. Overview and objectives
+
+DevPilot AI is a tool-using **software-development agent** built around one engineering loop:
+
+**Understand → inspect resources → plan → define acceptance criteria → implement → verify → repair → document → deliver.**
+
+Its objectives:
+
+- **Real engineering, not text generation.** Every build is planned as tasks, written by a coding agent, tested in Docker and packaged only when the checks pass.
+- **The backend is the authority.** GPT chooses tools; deterministic code validates every call, enforces phases, permissions and budgets, and decides delivery.
+- **Bounded spending.** Nothing is sent to a paid model before the person approves a limit, and the limit is enforced before every model request.
+- **Isolation by default.** Generated code never runs on the Windows host during a build: it is written in a container and tested in a no-network sandbox.
+- **Evidence for every result.** Each run records its state changes, tool calls, costs, test results and verification report.
+
+Example requests:
+
+- "Create a Python command-line expense tracker with persistent storage and unit tests."
+- "Add a `--verbose` option to this tool https://github.com/OWNER/REPOSITORY and add tests."
+- "Inspect this GitHub repository and describe its framework, pages and components."
+- "Verify this existing static website in Docker with a real browser."
+
+---
+
+## 2. Capabilities and verification status
+
+Each capability is labelled with the strongest evidence recorded for it in [docs/PROGRESS.md](docs/PROGRESS.md) and [docs/FEATURE_STATUS.md](docs/FEATURE_STATUS.md):
+
+- **Live-tested:** ran against the real service, model or containers, with the result recorded.
+- **Offline-tested:** covered by automated tests with fakes (scripted GPT, in-process GitHub, Drive, OpenAI and n8n); runs in CI.
+- **Opt-in:** implemented and offline-tested; becomes active once you supply the credential, runtime image or service it uses.
+- **Planned:** on the [roadmap](#19-roadmap).
+
+| Capability | Status | How to use it |
+|---|---|---|
+| GPT requirement analysis and planning through strict function calls and code gates | **Live-tested** (real model: analysis 2026-10-29; a 32-requirement, 9-task plan 2026-11-03) | `devpilot.cmd build`, dashboard |
+| Docker sandbox isolation: no network, timeout kill, memory limit | **Live-tested** (real containers, 2026-10-30) | Every build |
+| OpenCode in real containers behind DevPilot's API filter and model gateway | **Live-tested** with a scripted model (2026-11-01) | Every build |
+| Website verification: frozen browser checks in real Chromium, repair, delivery | **Live-tested** with scripted GPT and coding (2026-11-04) | `devpilot.cmd verify-site`, website builds |
+| Continuous integration: Windows backend job, Ubuntu frontend job | **Live-tested** on GitHub Actions | Every push |
+| Python command-line application builds, end to end (plan → OpenCode → Docker tests → verified ZIP) | **Offline-tested** end to end; each stage above live-tested | `devpilot.cmd build "..."` |
+| Static website builds (HTML, CSS, JavaScript) judged by frozen browser acceptance | **Opt-in** after `setup --web` | `devpilot.cmd build "..."` |
+| Existing website verification (install, type check, build, serve, browser checks) | **Opt-in** after `setup --web` | `devpilot.cmd verify-site <folder or URL>` |
+| GitHub repository inspection and pinned-snapshot import | **Offline-tested** | `devpilot.cmd inspect <URL>`, a URL in a build request |
+| Private repositories with a fine-grained token | **Opt-in** | `devpilot.cmd setup --github-token` |
+| GitHub OAuth, approval-gated writes and draft pull requests of verified runs | **Opt-in** (GitHub OAuth App) | Dashboard |
+| Google Drive OAuth with PKCE, read-only grants, consent persisted across restarts | **Opt-in** (Google OAuth client) | Dashboard, Drive links in requests |
+| Grounded RAG answers with every citation checked in code | **Offline-tested** | `POST /api/v1/projects/{id}/knowledge/ask` |
+| PDF and DOCX parsing in an isolated parser container | **Opt-in** (`document-parser` image) | Drive ingestion |
+| OpenAI embeddings for the per-project SQLite index | **Opt-in** (`RAG_EMBEDDER=openai` and its price) | Drive ingestion |
+| n8n signed triggers and callbacks; a waiting run resumed by its callback | **Opt-in** (an n8n instance) | `scripts/n8n-local.ps1` |
+| Adaptive tool selection and deterministic recovery policy | **Offline-tested** | Every build |
+| Tool catalog, comparisons and recommendations | **Offline-tested** | Dashboard Tools page, `compare_tools` |
+| Source-to-requirement gap triage and document-version diff | **Offline-tested** | Evaluation tools |
+| Dashboard sessions: HttpOnly cookie, CSRF header, one-time sign-in link | **Offline-tested** | Dashboard |
+
+---
+
+## 3. System architecture
+
+### 3.1 Complete system architecture
+
+```mermaid
+flowchart TB
+    subgraph Laptop["Windows laptop"]
+        CLI["devpilot.cmd CLI - backend/app/cli"]
+        UI["React + Vite dashboard - frontend/"]
+    end
+    subgraph Backend["FastAPI backend - backend/app"]
+        API["REST API, auth and approvals - app/api"]
+        ORCH["GPT orchestrator and run loop - app/orchestrator"]
+        EXEC["Tool registry, executor and policy engine - app/tools"]
+        SEL["Adaptive selector - app/selection"]
+        REC["Recovery policy - app/recovery"]
+        VER["Verification and delivery - app/verification"]
+        DB[("SQLite via SQLAlchemy - app/db")]
+    end
+    subgraph Containers["Docker Desktop"]
+        FILTER["OpenCode API filter"]
+        OC["OpenCode 1.19.5 server"]
+        GW["Metered model gateway"]
+        SBX["No-network test sandbox"]
+    end
+    OPENAI["OpenAI API"]
+    INTEG["GitHub, Google Drive, n8n"]
+    ZIP["Verified folder, ZIP and report"]
+
+    CLI --> API
+    UI --> API
+    API --> DB
+    API --> ORCH
+    ORCH -->|"Responses API, strict function calls"| OPENAI
+    ORCH --> EXEC
+    EXEC --> SEL
+    SEL --> FILTER
+    FILTER --> OC
+    OC --> GW
+    GW --> OPENAI
+    EXEC --> SBX
+    SBX --> VER
+    VER --> REC
+    REC --> EXEC
+    EXEC --> INTEG
+    VER --> ZIP
 ```
 
-### Requirements
+**Trust boundary:** GPT *requests* tools. The FastAPI executor validates each call's schema, checks the run's phase, applies the policy engine's risk classes and approvals, reserves the budget, and decides what actually runs. GPT never holds a credential and cannot reach GitHub, Docker, Google Drive or a secret on its own.
+
+### 3.2 Components and responsibilities
+
+| Layer | Source | Responsibility |
+|---|---|---|
+| Windows bootstrap | `setup.cmd`, `setup.ps1`, `devpilot.cmd` | Python environment, pinned dependencies, launcher |
+| CLI | `backend/app/cli/` | `setup`, `doctor`, `build`, `inspect`, `verify-site`, encrypted key store |
+| API | `backend/app/main.py`, `backend/app/api/` | Projects, runs, approvals, budget, capabilities, artifacts, integrations |
+| Orchestration | `backend/app/orchestrator/` | GPT client, run loop, state machine, prompts, budget reservations |
+| Tools and policy | `backend/app/tools/` | Strict tool schemas, phase gates, risk classes, adapters |
+| Coding | `backend/app/coding/`, `backend/edge/` | OpenCode launcher, container policy, API filter, model gateway, checkpoints |
+| Sandbox | `backend/app/sandbox/` | Isolated command execution with resource limits |
+| Verification | `backend/app/verification/` | Test recipes, frozen acceptance suites, browser acceptance, artifact gate |
+| Recovery | `backend/app/recovery/` | Failure diagnosis and the deterministic recovery decision |
+| Selection | `backend/app/selection/` | Eligibility, utility scoring and verified outcome history |
+| Persistence | `backend/app/db/` | Runs, events, invocations, approvals, attempts |
+| Integrations | `backend/app/repos/`, `sources/`, `drive/`, `rag/`, `n8n/`, `evaluation/` | GitHub, link discovery, Drive, retrieval, workflows, draft PRs |
+| Dashboard | `frontend/src/` | Composer, run timeline, approvals, budget, files, tools, publishing |
+
+### 3.3 Run state machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> CREATED
+    CREATED --> ANALYZING
+    ANALYZING --> PLANNING
+    PLANNING --> DEFINING_CRITERIA
+    DEFINING_CRITERIA --> IMPLEMENTING
+    IMPLEMENTING --> VERIFYING
+    VERIFYING --> DOCUMENTING: verified
+    VERIFYING --> REPAIRING: repair allowed
+    REPAIRING --> VERIFYING
+    DOCUMENTING --> COMPLETED
+    COMPLETED --> [*]
+```
+
+The forward transitions are defined in `backend/app/orchestrator/state_machine.py`. In addition, every working state can move to `AWAITING_APPROVAL` and return to the state it left once a person decides, and every non-terminal state can end in `FAILED`, `CANCELLED` or `STOPPED_BY_POLICY`.
+
+---
+
+## 4. Technologies and their responsibilities
+
+### Backend and AI
+
+| Technology | Responsibility | Where |
+|---|---|---|
+| **Python 3.12** | Backend, CLI and tests | `backend/` |
+| **FastAPI** | REST API and application lifecycle | `backend/app/main.py`, `backend/app/api/` |
+| **Pydantic v2, pydantic-settings** | Request schemas, tool arguments, configuration | `backend/app/schemas/`, `backend/app/config.py` |
+| **OpenAI Responses API** | GPT orchestration with strict function calling and chained responses | `backend/app/orchestrator/llm_client.py` |
+| **OpenCode 1.19.5** | The coding agent that edits project files, pinned by hash | `backend/app/coding/`, `backend/scripts/fetch_opencode.py` |
+| **SQLAlchemy 2.0 + SQLite** | Run state, events, approvals and attempt history | `backend/app/db/` |
+| **SQLite FTS5 and optional embeddings** | Per-project retrieval index | `backend/app/rag/sqlite_index.py` |
+| **httpx** | HTTP clients for GitHub, Drive, n8n and the gateway checks | Adapters |
+| **cryptography (Fernet), Windows DPAPI** | Encrypted tokens and the CLI key store | `backend/app/core/`, `backend/app/cli/credentials.py` |
+| **PyYAML** | Stack, egress, tool-catalog and workflow configuration | `config/`, `backend/app/stacks/` |
+
+### Frontend
+
+| Technology | Responsibility |
+|---|---|
+| React 19 and TypeScript | Dashboard components and typed API client |
+| Vite 7 | Development server and production build |
+| Tailwind CSS 4 | Styling |
+| React Router 7 | Pages |
+| TanStack Query 5 | Server state and caching |
+| Vitest and Testing Library | Component and unit tests |
+
+### Runtime and tooling
+
+| Technology | Responsibility |
+|---|---|
+| Docker Desktop with WSL2 | Coding containers, test sandboxes and the website verifier |
+| `python:3.12-alpine` | Base of the sandbox and the OpenCode runtime image |
+| Chromium | Browser acceptance in the `verify-web` image |
+| ripgrep 15.1.0 | Code search for OpenCode, hash-verified by setup |
+| GitHub REST API and OAuth | Repository discovery, import and approval-gated writes |
+| Google Drive API and OAuth 2.0 | Read-only document discovery and import |
+| n8n | Signed workflow triggers and callbacks |
+| pytest, GitHub Actions | Backend tests and CI |
+
+DevPilot uses its own orchestration state machine, SQLite and an in-process run worker.
+
+---
+
+## 5. End-to-end development pipeline
+
+### 5.1 From requirement to delivery
+
+```mermaid
+flowchart LR
+    REQ["User requirement"] --> APPROVE{"Spending limit approved?"}
+    APPROVE -->|no| NONE["Nothing is sent or spent"]
+    APPROVE -->|yes| ANALYZE["ANALYZING: GPT submits the analysis"]
+    ANALYZE --> PLAN["PLANNING: tasks and stack"]
+    PLAN --> CRIT["DEFINING_CRITERIA: acceptance criteria"]
+    CRIT --> IMPL["IMPLEMENTING: OpenCode edits a disposable copy"]
+    IMPL --> TEST["VERIFYING: tests in the Docker sandbox"]
+    TEST -->|pass| DOC["DOCUMENTING: report and how-to-run"]
+    TEST -->|fail| REPAIR["REPAIRING: diagnosis and bounded repair"]
+    REPAIR --> TEST
+    DOC --> DONE["COMPLETED: verified folder and ZIP"]
+```
+
+### 5.2 Sequence
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant UI as CLI or dashboard
+    participant API as FastAPI backend
+    participant GPT as GPT orchestrator
+    participant Tools as Tool executor
+    participant OC as OpenCode and gateway
+    participant Box as Docker sandbox
+    participant DB as SQLite
+
+    User->>UI: Describe the application
+    UI->>API: Create project and run
+    API->>DB: Save requirement and run
+    API-->>User: Show the spending limit
+    User->>UI: Approve the limit
+    UI->>API: Start the run with the approved amount
+    API->>GPT: Analyse the requirement and named resources
+    GPT->>Tools: submit_analysis, submit_plan, submit_criteria
+    Tools->>DB: Persist the accepted analysis, plan and criteria
+    GPT->>Tools: generate_code for a task
+    Tools->>OC: Start an attempt on a disposable copy
+    OC-->>Tools: Changed files and usage
+    Tools->>Box: Run the tests
+    Box-->>Tools: Results
+    alt A test fails and a repair is allowed
+        Tools->>GPT: Failure evidence and diagnosis
+        GPT->>Tools: Repair request
+        Tools->>OC: Bounded repair attempt
+        Tools->>Box: Run the tests again
+    end
+    Tools->>DB: Costs, results, final state
+    API-->>UI: Report, files and verified ZIP
+```
+
+### 5.3 Stages
+
+1. **Preflight.** The CLI checks Docker, the audited runtime image, the hash-verified OpenCode binary, the model and prices, and free disk space. A named repository is inspected without any model call. The request is matched to a stack DevPilot can verify.
+2. **Analysis.** GPT lists the features, inputs, outputs, constraints and assumptions through `submit_analysis`; the gate tool validates and stores them.
+3. **Planning.** GPT submits ordered tasks with dependencies and chooses the stack from the catalog of stacks this backend can verify.
+4. **Acceptance criteria.** Requirements become testable criteria. Website builds freeze independent browser checks before any code exists.
+5. **Implementation.** `generate_code` starts an OpenCode attempt on a disposable copy, through the API filter and the metered gateway.
+6. **Verification.** The project's tests (and, for websites, the frozen browser checks) run in a no-network sandbox, and their evidence is recorded.
+7. **Diagnosis and recovery.** A failure is classified, and the recovery policy chooses a bounded repair, retry, tool switch or stop.
+8. **Documentation and delivery.** A verified run is packaged as a folder and ZIP with a manifest, a verification report and a how-to-run file. Secrets, `.env` files, caches and Git metadata are filtered out.
+
+---
+
+## 6. OpenCode integration and the coding lifecycle
+
+OpenCode is the coding agent; GPT is the planner. DevPilot runs OpenCode 1.19.5 (binary pinned by SHA-512) as a server in a hardened container, reachable only through DevPilot's own API filter, and gives it model access only through DevPilot's metered gateway.
+
+```mermaid
+flowchart LR
+    subgraph Host["Windows host"]
+        BE["DevPilot backend"]
+        COPY["Disposable copy of the project"]
+    end
+    subgraph Internal["Docker internal networks"]
+        FILTER["API filter: the only published port, on loopback"]
+        OC["OpenCode server: no published port"]
+        GW["Model gateway: per-attempt token, budget, ledger"]
+    end
+    SBX["Test sandbox: network none"]
+    OPENAI["api.openai.com"]
+
+    BE -->|"per-attempt filter token"| FILTER
+    FILTER -->|"allowed operations only"| OC
+    COPY -.->|"the only writable mount"| OC
+    OC -->|"gateway token, never the real key"| GW
+    GW -->|"real key over TLS"| OPENAI
+    BE -->|"candidate files"| SBX
+    SBX -->|"test results"| BE
+```
+
+The lifecycle of one coding attempt:
+
+1. **Prepare.** The launcher copies the project to a disposable folder outside the repository, writes a managed `opencode.json` (one provider, one model, project configuration off), and creates fresh secrets for the attempt.
+2. **Start.** Three containers start on internal Docker networks: the gateway, OpenCode and the API filter. Each container is checked against its definition before use.
+3. **Work.** The backend drives OpenCode through the filter. Every model request passes the gateway, which checks the route and body, caps output tokens, reserves the worst-case cost and records actual usage.
+4. **Collect.** Changed files are audited, and the kept changes are checkpointed.
+5. **Stop.** The writer is stopped first, then the edge containers and networks; the stop is confirmed by an independent read. A guard process stops the containers if the backend itself ends.
+
+---
+
+## 7. Docker sandbox and security
+
+| Control | What it does |
+|---|---|
+| Spending approval | A run starts only with a person's approval of its limit; the backend refuses any request whose worst case could pass it |
+| Tool policy | Strict schemas, phase gates and risk classes; a `GIT_PUSH` action waits for a person's approval |
+| Workspace isolation | Imported and generated code lives in a jailed workspace and a disposable copy, never in the real project folder |
+| Container hardening | Non-root user, all capabilities dropped, read-only root filesystem, `no-new-privileges`, memory, CPU and process limits |
+| No-network tests | The test sandbox runs with `network none`, a timeout and a memory limit |
+| Egress allowlist | `config/egress_allowlist.yaml` lists every host each component may reach |
+| Credential separation | The real model key stays in the gateway; OpenCode receives only a per-attempt gateway token; the dashboard never receives a key |
+| Encrypted secrets | CLI keys are encrypted with Windows DPAPI; OAuth tokens are encrypted with Fernet |
+| Artifact filtering | The delivered ZIP excludes credential-like files, `.env`, caches, databases and Git metadata |
+| Audit trail | State changes, approvals, tool calls, costs and refusals are recorded as run events |
+
+---
+
+## 8. Adaptive tool selection
+
+When GPT asks for a capability, a deterministic selector (`backend/app/selection/adaptive.py`) decides which authorized tool does the work.
+
+```mermaid
+flowchart TD
+    ASK["GPT asks for a capability, such as code_generation"] --> CANDS["Registered coding tools"]
+    CANDS --> ELIG{"Eligibility: status, capability, stack, task kind, environment, credentials, network, budget, memory"}
+    ELIG -->|"a mandatory check fails"| OUT["Excluded, with its reasons"]
+    ELIG -->|"all checks pass"| SCORE["Utility score"]
+    SCORE --> PICK["Highest score, ties by configured order, then name"]
+    PICK --> RUN["Coding attempt"]
+    RUN --> HIST[("Verified outcome history")]
+    HIST -->|"reliability"| SCORE
+```
+
+The utility of an eligible tool is
+
+`U = 0.30·capability + 0.25·reliability + 0.15·quality + 0.10·latency + 0.10·cost + 0.10·resource`
+
+Reliability is `(successes + α) / (attempts + α + β)`, counted only from verified outcomes on comparable tasks, so a tool with no history starts at `α / (α + β)`. The same inputs always produce the same choice. `SELECTION_POLICY=fixed` switches back to a fixed preference order.
+
+---
+
+## 9. Failure detection, recovery and retry policy
+
+Every failed attempt or test run is diagnosed (`backend/app/recovery/diagnosis.py`) into a category such as `SYNTAX_ERROR`, `TEST_FAILURE`, `MISSING_DEPENDENCY`, `RUNTIME_EXCEPTION`, `TIMEOUT`, `RESOURCE_EXHAUSTION`, `TOOL_UNAVAILABLE`, `INVALID_CODE`, `SECURITY_VIOLATION` or `AMBIGUOUS_STATE`, with a confidence and the evidence. The recovery policy (`backend/app/recovery/policy.py`) then decides, in code, what may happen next.
+
+```mermaid
+flowchart TD
+    FAIL["Attempt or verification fails"] --> DIAG["Diagnosis: category, confidence, evidence"]
+    DIAG --> SAFE{"Safe to continue?"}
+    SAFE -->|"no: security breach or ambiguous state"| STOP["Stop the run and record why"]
+    SAFE -->|yes| LIMITS{"Attempts, repairs, budget and time allow another try?"}
+    LIMITS -->|no| STOP
+    LIMITS -->|yes| ORDER["Take the first allowed action the diagnosis offers"]
+    ORDER --> REPAIR["REPAIR: GPT asks the coding tool to fix the code"]
+    ORDER --> RETRY["RETRY: fresh attempt from a restored workspace"]
+    ORDER --> SWITCH["SWITCH_TOOL: another eligible tool"]
+    ORDER --> RECONF["RECONFIGURE: adjust one task's attempt time limit"]
+    REPAIR --> VERIFY["Verify again"]
+    RETRY --> VERIFY
+    SWITCH --> VERIFY
+    RECONF --> VERIFY
+    VERIFY -->|pass| NEXT["Continue the pipeline"]
+    VERIFY -->|fail| DIAG
+```
+
+The rules, in order:
+
+1. An unsafe diagnosis stops the run; nothing overrides that.
+2. The bounded limits always hold: maximum attempts per task, maximum repairs, the run budget and the wall clock.
+3. Each offered action is tried in order and the first one allowed is taken. An action needs an eligible tool and the time an attempt takes; the same failure twice leaves only `SWITCH_TOOL`; `RECONFIGURE` needs approved headroom; `REPAIR` is skipped when verified history shows such repairs rarely pass.
+4. If no action is allowed, the run stops and records the reason.
+
+---
+
+## 10. Verification-guided development
+
+- **Acceptance criteria before code.** Criteria are defined and stored before implementation starts.
+- **Frozen acceptance suites.** A project can carry an evaluator's acceptance suite; its SHA-256 is recorded on the run, and a changed suite stops the run. Website builds freeze independent browser checks before any code exists, so the coding agent cannot edit the checks it is judged by.
+- **Stack recipes.** `backend/app/verification/recipes.py` defines how each stack is tested and which approved runtime image runs it. A stack can be built only when its recipe and runtime image are approved.
+- **Delivery gate.** `backend/app/verification/artifact.py` builds the folder and ZIP only from a verified run, with `MANIFEST.txt`, `DEVPILOT-HOW-TO-RUN.txt` and a `devpilot-verification/` report that states how the result was verified: by an independent suite or by the project's own tests.
+
+| Term | Meaning |
+|---|---|
+| Docker test pass | The project's test command passed in the no-network sandbox |
+| Independent acceptance pass | A frozen suite written before implementation passed |
+| Browser acceptance pass | The frozen browser checks passed in Chromium |
+| Verified ZIP | The run passed the delivery gate; the ZIP carries its evidence |
+
+---
+
+## 11. GitHub, Google Drive, RAG and n8n integrations
+
+### 11.1 GitHub repository inspection and authorized draft pull requests
+
+```mermaid
+flowchart TD
+    URL["A request names a GitHub repository"] --> DISC["Link discovery - app/sources"]
+    DISC --> ACCESS{"Readable with the current access?"}
+    ACCESS -->|public| SNAP["Pinned snapshot at one commit SHA"]
+    ACCESS -->|private| PERM["Permission dialog: token or GitHub OAuth"]
+    PERM --> SNAP
+    SNAP --> PROFILE["Inspect: framework, stack, tests, pages, assets"]
+    PROFILE --> BUILD["Build run on a disposable copy"]
+    BUILD --> DELIVERED{"Delivered and verified?"}
+    DELIVERED -->|yes| PREVIEW["Preview of the changes"]
+    DELIVERED -->|no| KEEP["Remote repository unchanged"]
+    PREVIEW --> CONFIRM{"Typed confirmation and GIT_PUSH approval?"}
+    CONFIRM -->|confirmed| PR["New devpilot/ branch, one commit, draft pull request"]
+    CONFIRM -->|declined| KEEP
+```
+
+- `devpilot.cmd inspect <URL>` profiles a repository for free: framework, stack, pages, routes, components and assets.
+- A build request that contains a repository URL starts from a pinned snapshot of it (`--branch` or `--commit` choose the ref).
+- Private repositories use a fine-grained token (`setup --github-token`, Contents: read-only) or the dashboard's GitHub OAuth connection.
+- Publishing is a separate, approved write: a preview, a typed confirmation, then one new `devpilot/*` branch with one commit and a **draft** pull request (`backend/app/evaluation/github_publish.py`). Nothing is merged or deployed.
+
+### 11.2 Google Drive document ingestion and RAG
+
+```mermaid
+flowchart LR
+    LINK["Drive link in a request"] --> CONSENT["Google OAuth consent with PKCE, read-only scope"]
+    CONSENT --> GRANT["Per-project grant, refresh token encrypted at rest"]
+    GRANT --> FETCH["Fetch the authorized documents"]
+    FETCH --> PARSE["Text extraction, PDF and DOCX in the document-parser container"]
+    PARSE --> CHUNK["Chunks with filename and version metadata"]
+    CHUNK --> INDEX[("Per-project SQLite index, optional embeddings")]
+    Q["Question to the knowledge ask endpoint"] --> RET["Retrieve passages"]
+    INDEX --> RET
+    RET --> GPT["GPT answers through submit_answer"]
+    GPT --> CHECK{"Every citation retrieved and quoted verbatim?"}
+    CHECK -->|yes| ANS["Grounded answer with citations"]
+    CHECK -->|no| NF["Not-found answer with the reason"]
+```
+
+Consent and refresh tokens persist across restarts; revoking a grant deletes its chunks from the index. Answers are written by GPT and checked in code (`backend/app/rag/grounded.py`): every citation must name a retrieved source and quote it word for word, and every `[n]` marker must be cited.
+
+### 11.3 n8n workflows
+
+n8n handles signed, opt-in automation: GPT can trigger an allowed workflow (`config/n8n_workflows.yaml`), and a run waiting for a workflow resumes when its signed callback arrives. Start a local instance with `scripts/n8n-local.ps1` and set `N8N_ENABLED` with the n8n settings in `.env`; see [n8n/README.md](n8n/README.md).
+
+---
+
+## 12. Installation on Windows 10/11
+
+### 12.1 Installation and execution workflow
+
+```mermaid
+flowchart TD
+    A["Install Python 3.12, Git and Docker Desktop with WSL2"] --> B["Start Docker Desktop"]
+    B --> C["git clone --branch feature/evaluation-upgrade"]
+    C --> D["Run setup.cmd"]
+    D --> E["Checks Python 3.12 and Docker, creates .venv, installs requirements.lock"]
+    E --> F["devpilot setup: hidden OpenAI key, model and prices"]
+    F --> G["Downloads OpenCode and ripgrep, verified by pinned hashes"]
+    G --> H["Builds the runtime image, audits it offline, records the approval"]
+    H --> I["Readiness checks"]
+    I --> J["devpilot.cmd doctor --check-key"]
+    J --> K["devpilot.cmd build with a description"]
+    K --> L["Type approve 0.50"]
+    L --> M["Verified folder and ZIP in devpilot-output"]
+```
+
+### 12.2 Requirements
 
 | | |
 |---|---|
-| **Operating system** | Windows 10 or 11 (the installer and the encrypted key store are Windows-only for now) |
-| **Python** | **3.12**, exactly: [download](https://www.python.org/downloads/release/python-3129/) (3.13 is not supported) |
-| **Docker Desktop** | installed **and running** (WSL2 backend): [download](https://www.docker.com/products/docker-desktop/). Every build runs the code and its tests in containers |
-| **Git** | to clone and update: [download](https://git-scm.com/download/win) |
-| **OpenAI API key** | **your own**, on an account **with credit**. A build spends your credit; DevPilot has no key and no credit of its own |
-| **Connectivity** | internet during `setup.cmd` (PyPI, the npm registry, GitHub, Docker Hub and Alpine mirrors) and during every build (GPT and the model gateway reach `api.openai.com`). The containers that run the generated code and its tests have **no** network |
-| **Disk** | roughly 2 GB free |
-| **Spending** | every build is capped; the default is **$0.50** per build, GPT and OpenCode together, at most **$2.00** with `--max-usd`. You must type `approve 0.50` before anything is sent. The real cost cannot be known beforehand, only the limit, which is enforced in code before every model request. Your OpenAI invoice is the authority on what was billed |
+| **Operating system** | Windows 10 or 11 |
+| **Python** | 3.12 ([download](https://www.python.org/downloads/release/python-3129/)); tick "Add python.exe to PATH" |
+| **Git** | [Git for Windows](https://git-scm.com/download/win) |
+| **Docker Desktop** | [Docker Desktop](https://www.docker.com/products/docker-desktop/) with the WSL2 backend, started before setup and builds |
+| **OpenAI API key** | Your own key, on an account with API credit ([API keys](https://platform.openai.com/api-keys)) |
+| **Disk** | 5 GB free for images, caches and work folders; about 2 GB more for the website verifier |
+| **Node.js 24** | Only for the React dashboard ([download](https://nodejs.org/)) |
 
-`setup.cmd` checks all of this and tells you what is missing and how to fix it; it never installs system software for you.
+### 12.3 Install Python 3.12, Git and Docker Desktop
 
-### What is supported, and what is verified
+1. **Python 3.12:** run the installer, tick **Add python.exe to PATH**, then open a new PowerShell window and check `python --version` (expect `Python 3.12.x`).
+2. **Git:** run the Git for Windows installer with its defaults; check `git --version`.
+3. **Docker Desktop:** install it, keep **Use WSL 2 instead of Hyper-V** selected, restart if asked, start Docker Desktop and wait until it reports that the engine is running; check `docker version`.
 
-- **Generated and verified: Python command-line applications**, new or starting from your own GitHub repository (public, or private with your token). A request is matched to a stack from its words or, when it names a repository, from that repository's own files; a stack DevPilot cannot yet verify is declined with the exact reason, before any approval or spending, and is never built as something else.
-- **Websites (static HTML, React + Vite + TypeScript): inspected and verified, not yet generated.** `devpilot inspect <GitHub URL>` profiles a repository (framework, pages, routes, components, assets). `devpilot verify-site <folder or GitHub URL>` installs its dependencies through a registry-only proxy, type checks, builds, serves and checks it in a real headless browser, in Docker. Generating a website is declined until the build engine can run that verification itself: see [docs/WEBSITES_AND_REPOSITORIES.md](docs/WEBSITES_AND_REPOSITORIES.md) for exactly what works, what was verified and what remains. React + FastAPI, Next.js, Vue, Angular and mobile apps are declined.
-- **Verified so far:** the engine and the installer, offline. The installer was run from a clean checkout and `devpilot doctor` passed 17 of 17. Real GPT and OpenCode generated, Docker-tested and independently verified a Python application from the older terminal scripts (the second of two paid runs, $0.51 in all; the first failed and led to fixes).
-- **Not yet verified: a real paid build through the new `devpilot build` command.** Its flow is covered by offline tests with GPT scripted, the coding engine simulated and tests replayed, and it has never been run against the real OpenAI API. Treat your first build as that test: start with the default $0.50 limit.
-- "Verified" for a free-form request means the generated project's own tests passed in the no-network Docker sandbox. There is no independent acceptance suite for it, and the ZIP's manifest says so.
+### 12.4 Clone and set up
 
-**`setup.cmd`** (safe to run again) checks those requirements, creates a private Python environment in the folder (`.venv`), installs the pinned dependencies, then asks for your OpenAI key (typed hidden; stored **encrypted for your Windows account**, never in a file in this folder, never printed, sent only to OpenAI), your model name and your own per-token prices (they cap your spending). It then downloads OpenCode and ripgrep (both checked against pinned SHA hashes), builds the Docker runtime image, audits that image's contents offline, and runs the readiness check. It makes no OpenAI request.
+```powershell
+git clone --branch feature/evaluation-upgrade https://github.com/Prudhvisunku14/AutoDev-GPT.git
+cd AutoDev-GPT
+.\setup.cmd
+.\devpilot.cmd doctor
+.\devpilot.cmd doctor --check-key
+```
 
-**`devpilot build`** asks what to build, shows the spending limit and asks you to type `approve 0.50`. It then plans with GPT, writes the code with OpenCode, tests it in a no-network Docker sandbox, repairs failures within strict limits, and saves a verified ZIP and folder under `.\devpilot-output\`. Nothing is spent before you approve; the limit (default **$0.50** per build, at most $2.00 via `--max-usd`) is enforced in code before every model request.
+`setup.cmd` is safe to run again; each finished step is skipped. It checks Python 3.12 and Docker, creates `.venv` in the folder, installs `backend/requirements.lock`, then runs `devpilot setup`, which:
+
+1. asks for your OpenAI key (typed hidden, stored encrypted for your Windows account),
+2. asks for the model and your per-token prices,
+3. downloads OpenCode and ripgrep and checks them against pinned hashes,
+4. pulls `python:3.12-alpine`, builds the runtime image, audits its contents offline and records the approval,
+5. runs the readiness checks.
+
+Useful setup options: `--key-from-env` (use `OPENAI_API_KEY`), `--model`, `--input-price`, `--output-price`, `--rebuild`, `--yes`, `--skip-downloads`, `--web` (website verifier) and `--github-token`. Extra arguments to `setup.cmd` are passed on to `devpilot setup`.
+
+### 12.5 Where DevPilot keeps its files
+
+| Data | Location (default `%LOCALAPPDATA%\DevPilot`) |
+|---|---|
+| Settings | `config.toml` |
+| OpenAI key | `credentials.bin` (DPAPI-encrypted) |
+| GitHub token | `github-token.bin` (DPAPI-encrypted) |
+| OpenCode and ripgrep | `tools\` |
+| Image approvals | `approved-runtime.json`, `approved-web-runtime.json` |
+| Database | `data\devpilot.db` |
+| Workspaces and work copies | `workspaces\`, `checkpoints\`, `work\` |
+| Delivered projects | `.\devpilot-output\` in the folder you run from, or `--output` |
+
+Set `DEVPILOT_HOME` (or pass `--home`) to keep these files elsewhere, for example on another drive:
+
+```powershell
+$env:DEVPILOT_HOME = 'D:\DevPilotRuntime'
+```
+
+Use the same location for setup, doctor and builds.
+
+---
+
+## 13. OpenAI API key, spending limits and approvals
+
+### 13.1 The OpenAI key
+
+- `setup.cmd` asks for the key with hidden input and stores it encrypted with Windows DPAPI in `credentials.bin`; it is never written to a file in the repository and never printed.
+- Alternatively, set `OPENAI_API_KEY` in the environment and run `.\setup.cmd --key-from-env`; the environment variable takes precedence over the stored key.
+- `.\devpilot.cmd doctor --check-key` makes one free request (`GET /v1/models/{model}`, no tokens) to confirm the key can see the model.
+- `.\devpilot.cmd forget-key` deletes the stored key.
+- The CLI never reads the repository's `.env`; the developer backend uses `.env` (see [section 15](#15-react-frontend-and-fastapi-backend)).
+
+### 13.2 Spending limits
+
+| Setting | Value | Where |
+|---|---|---|
+| Build limit | **$0.50** by default, planning and coding together | `run_cap_usd` in `config.toml` |
+| Highest `--max-usd` | **$2.00** | `backend/app/cli/userconfig.py` |
+| Coding attempt limit | `min($0.30, 60% of the build limit)` per attempt | `backend/app/cli/engine.py` |
+| Prices | Your own per-1M-token prices, entered during setup | `config.toml` |
+
+Run limits enforced in code for a CLI build: 12 GPT turns, 12 tool calls, 300,000 tokens, 20 minutes, 2 coding attempts per task, 1 repair, 15 model requests and 4,000 output tokens per request through the gateway.
+
+Before every model request, the backend works out the most that request could cost and does not send it if that could take the build past its limit. A build that reaches its limit stops and is reported as stopped. Your OpenAI usage page is the record of what was billed.
+
+### 13.3 Approvals
+
+```text
+Spending approval
+  Model: <your model>  ($<in> in / $<out> out per 1M tokens: entered by you, not checked by DevPilot)
+  This build may spend at most $0.50, GPT planning and OpenCode coding together.
+Type "approve 0.50" to start the build, or anything else to cancel:
+```
+
+Only the exact phrase starts a paid build. For scripted use, `--approve-spend 0.50` approves non-interactively and must equal the limit exactly. In the dashboard, the spending dialog asks for the same approval, and the backend checks it again when the run starts. Writes to GitHub need their own `GIT_PUSH` approval.
+
+---
+
+## 14. CLI usage and examples
 
 ```powershell
 .\devpilot.cmd --help
-.\devpilot.cmd doctor                        # checks this computer; says how to fix anything missing; never contacts OpenAI
-.\devpilot.cmd build                         # interactive
-.\devpilot.cmd build "a python tool that converts csv files to json, with unit tests"
-.\devpilot.cmd build "..." --approve-spend 0.50   # approve without typing; the figure must equal the limit exactly
-.\devpilot.cmd setup --rebuild               # build and audit the Docker image again
-.\devpilot.cmd forget-key                    # delete the stored key
+.\devpilot.cmd doctor                       # readiness checks, with the fix for each failing item
+.\devpilot.cmd doctor --check-key           # plus one free model-access request
 
-# GitHub repositories and websites (free: no OpenAI request)
-.\devpilot.cmd setup --github-token          # for private repositories: a fine-grained token, Contents read-only (typed hidden, stored encrypted)
-.\devpilot.cmd inspect https://github.com/<owner>/<repo>            # framework, stack, pages, components, assets
-.\devpilot.cmd setup --web                   # once: build the website verifier and prove it on known good and broken sites (~2 GB download)
-.\devpilot.cmd verify-site https://github.com/<owner>/<repo>        # install, type check, build, serve and browser-check it in Docker
-.\devpilot.cmd verify-site C:\path\to\site   # the same for a folder (never modified: a disposable copy is checked)
-.\devpilot.cmd build "Add a --verbose flag to this tool https://github.com/<owner>/<repo>" --branch main
+# Builds
+.\devpilot.cmd build                        # asks for the description
+.\devpilot.cmd build "Create a Python command-line expense tracker with CSV export, persistent storage and automated tests"
+.\devpilot.cmd build "Create a Python CLI todo manager with JSON persistence and unit tests" --max-usd 1.00
+.\devpilot.cmd build "Create a Python CLI calculator with tests" --output .\my-builds
+.\devpilot.cmd build "Create a Python tool that converts CSV files to JSON, with unit tests" --approve-spend 0.50
+
+# Existing GitHub repositories
+.\devpilot.cmd inspect https://github.com/OWNER/REPOSITORY
+.\devpilot.cmd build "Add a --verbose flag to this tool https://github.com/OWNER/REPOSITORY" --branch main
+.\devpilot.cmd setup --github-token         # private repositories: a fine-grained token, Contents read-only
+
+# Websites
+.\devpilot.cmd setup --web                  # once: build and self-test the website verifier
+.\devpilot.cmd build "Create a responsive static website for a bakery with opening hours and a contact form"
+.\devpilot.cmd verify-site https://github.com/OWNER/REPOSITORY
+.\devpilot.cmd verify-site C:\path\to\site  # a folder is checked through a disposable copy
+
+# Keys
+.\devpilot.cmd forget-key
+.\devpilot.cmd forget-github-token
 ```
 
-More: [docs/INSTALL_WINDOWS.md](docs/INSTALL_WINDOWS.md) (troubleshooting, where files live, how the Docker image is verified) and [examples/prompts.md](examples/prompts.md).
+A delivered build:
 
-## How it works
-
-```
-Requirement ─► GPT orchestrator (OpenAI Responses API, function calling)
-                  │  function calls
-                  ▼
-             Tool Executor ── validates · enforces policy · selects tools ·
-                  │             classifies failures · verifies results
-                  ├─► OpenCode (code generation, edit-only)
-                  ├─► Docker sandbox (install · run · pytest · Playwright)
-                  ├─► GitHub (inspect named repos · import · gap analysis · PR or new repo, with approval)
-                  ├─► Google Drive (OAuth, read-only, per-project grants)
-                  ├─► n8n (signed workflow triggers and callbacks · notifications · run events)
-                  └─► Documents: PDF, DOCX, text (parsed in a no-network container, embedded, indexed in SQLite per project)
+```text
+devpilot-output/
+├── <project>-<run>/
+│   ├── source files and tests
+│   ├── DEVPILOT-HOW-TO-RUN.txt
+│   ├── MANIFEST.txt
+│   └── devpilot-verification/     report and evidence
+└── <project>-<run>.zip
 ```
 
-**Prompt only.** Open the one-time sign-in link the launcher prints, type what you want, approve the run's spending limit, and approve anything else in small popups: a GitHub or Google connection the request needs, a pull request, a paid tool. Nobody pastes a token, picks a stack or names a tool. GPT chooses the stack from what this backend can verify, and reads the repositories and documents the request links to. The Tools page compares DevPilot's tools from recorded evidence, at no cost.
+More prompts: [examples/prompts.md](examples/prompts.md).
 
-**GPT decides, code governs.** GPT is the central orchestrator: it plans the work and chooses which actions to take. Deterministic backend code validates every action, enforces safety and limits, and computes the platform's three core algorithms.
+---
 
-## Technical innovations
+## 15. React frontend and FastAPI backend
 
-All three are implemented as measurable algorithms, not as prompt instructions.
+### 15.1 Development dashboard
 
-1. **Adaptive tool selection.** Each candidate tool is scored on task suitability, historical reliability (a Bayesian Beta posterior), latency, cost and an exploration bonus. Every choice is stored with its score breakdown.
-2. **Failure classification and recovery.** Failures are classified into a 13-class taxonomy and fingerprinted. A decision policy then chooses whether to retry, repair, switch tools, roll back, escalate or stop. It detects repeated errors and lack of progress.
-3. **Verification-guided development.** Requirements become prioritized acceptance criteria, and tests are written first and then frozen. A weighted verification score gates completion. Edits to frozen tests are detected and reverted.
-
-Details are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-
-## Technology
-
-| Layer | Technology |
-|---|---|
-| Orchestration | OpenAI Responses API with function calling |
-| Backend | Python 3.12, FastAPI, Pydantic v2, SQLAlchemy 2.0, SQLite |
-| Coding engine | OpenCode (`opencode serve` HTTP API), containerized |
-| Execution and testing | Docker sandbox, pytest, Playwright |
-| Integrations | n8n, GitHub REST API and clone, Google Drive (OAuth 2.0, read-only), SQLite FTS5 retrieval over PDF, DOCX and text |
-| Frontend | React + Vite + TypeScript |
-
-## Prerequisites for development
-
-The command line needs only what the quick start lists. The rest of this README is for developing DevPilot itself:
-
-- Python 3.12, Git, Docker Desktop with WSL2, an OpenAI API key
-- Node.js LTS, for the dashboard in `frontend/`
-- A Google Cloud OAuth client for Google Drive (only for that integration)
-
-The command line never reads `.env`: its settings live in `%LOCALAPPDATA%\DevPilot` (or `DEVPILOT_HOME`). The API server (`python -m app`) and the developer scripts read `.env`; copy [.env.example](.env.example) and fill in your values. **Never commit `.env`.**
-
-## Developer quickstart (Windows, PowerShell, backend only)
-
-Run from the repository root. The commands keep temp files and caches on D:.
+**Terminal A, backend** (from the repository root, after `setup.cmd` created `.venv`):
 
 ```powershell
-# 1. Session environment: TEMP and the pip cache on D:, venv interpreter in $env:DEVPILOT_PYTHON
-. .\scripts\dev-env.ps1
-
-# 2. One-time: create the venv and install pinned dependencies
-py -3.12 -m venv backend\.venv
-& $env:DEVPILOT_PYTHON -m pip install -r backend\requirements.lock -e "backend[dev]"
-
-# 3. One-time: create .env from the template and set a long random API token
 Copy-Item .env.example .env
-& $env:DEVPILOT_PYTHON -c "import secrets; print(secrets.token_urlsafe(32))"   # paste into DEVPILOT_API_TOKEN
-
-# 4. Run the tests
-cd backend; & $env:DEVPILOT_PYTHON -m pytest --cov=app; cd ..
-
-# 5. Start the API on http://127.0.0.1:8000
-cd backend; & $env:DEVPILOT_PYTHON -m app
+.\.venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(32))"
+# put the printed value in DEVPILOT_API_TOKEN in .env
+cd backend
+..\.venv\Scripts\python.exe -m app
 ```
 
-Try it from a second terminal:
+The API listens on http://127.0.0.1:8000; `GET /api/v1/health` answers without a token.
+
+**Terminal B, frontend:**
 
 ```powershell
-$h = @{ Authorization = "Bearer <your DEVPILOT_API_TOKEN>" }
-Invoke-RestMethod http://127.0.0.1:8000/api/v1/health
-Invoke-RestMethod http://127.0.0.1:8000/api/v1/projects -Method Post -Headers $h -ContentType 'application/json' `
-  -Body '{"name":"Demo","requirement_text":"A small todo API"}'
+cd frontend
+npm ci
+npm run dev
 ```
 
-The SQLite database is created at `data/devpilot.db` and project workspaces under `workspaces/`, both in the repo folder on D: and both gitignored. Interactive API docs (`/docs`) are disabled, because every route except `/health` needs the token.
+Open http://localhost:5173 and connect with the backend's `DEVPILOT_API_TOKEN`. The Vite proxy forwards `/api` to the backend. The dashboard holds no model key or other secret. Details: [frontend/README.md](frontend/README.md).
 
-### GPT orchestrator (Phase 2)
+### 15.2 Live dashboard session
 
-Offline demo. It uses a scripted FakeLLM, with no key and no cost:
-
-```powershell
-& $env:DEVPILOT_PYTHON backend\scripts\demo_calculator.py
-```
-
-To use real GPT, edit `.env` yourself:
-- set `OPENAI_API_KEY` and `OPENAI_MODEL`
-- set `OPENAI_PRICE_INPUT_PER_MTOK` and `OPENAI_PRICE_OUTPUT_PER_MTOK`, so the backend can enforce `RUN_BUDGET_USD`
-
-The API refuses to start a run while either price is unknown; a token limit alone is not represented as a dollar spending cap.
-
-Then check that the key can see the model. This uses no tokens:
-
-```powershell
-& $env:DEVPILOT_PYTHON backend\scripts\check_openai_access.py
-```
-
-A run calls GPT only when you start it:
-
-```powershell
-Invoke-RestMethod http://127.0.0.1:8000/api/v1/runs/<run_id>/start -Method Post -Headers $h   # may cost money
-Invoke-RestMethod http://127.0.0.1:8000/api/v1/runs/<run_id> -Headers $h                      # state, pause_reason
-Invoke-RestMethod http://127.0.0.1:8000/api/v1/approvals -Headers $h                          # pending questions
-```
-
-Live events: `GET /api/v1/runs/<run_id>/events/stream` (server-sent events, same bearer header).
-
-Live smoke test, which asks one question: can GPT submit a structured analysis? The default is a dry run that sends nothing. `--send` makes at most 2 calls and uses at most about 8,000 tokens:
-
-```powershell
-& $env:DEVPILOT_PYTHON backend\scripts\live_smoke_test.py           # dry run: shows the exact request
-& $env:DEVPILOT_PYTHON backend\scripts\live_smoke_test.py --send    # paid; run only after approval
-```
-
-Manual planning from your own prompt, in the terminal. It uses the real orchestrator and gate checks, and stops once the plan is accepted. Nothing is generated or run. Run it from the `backend` folder:
+`backend/scripts/live_server.py` serves the dashboard with the real coding engine. Without arguments it runs a free preflight; with `--approve-session <USD>` and a typed `serve live` it checks the key, dry-launches the real containers, starts the guard and serves until `--hours` pass. Each build still needs its own approval in the dashboard, and the session's builds together stay within the approved total.
 
 ```powershell
 cd backend
-& $env:DEVPILOT_PYTHON -m app.plan_cli           # dry run: shows the first request and its worst-case cost; sends nothing
-& $env:DEVPILOT_PYTHON -m app.plan_cli --live    # paid: asks for your prompt, then for a typed "yes"
+..\.venv\Scripts\python.exe scripts\live_server.py
+..\.venv\Scripts\python.exe scripts\live_server.py --approve-session 1.00
 ```
 
-Live mode needs `OPENAI_API_KEY`, `OPENAI_MODEL` and both `OPENAI_PRICE_*` values in `.env`. Its limits are fixed in `app/plan_cli.py`:
-- per run: at most 3 requests, $0.25 and 90,000 tokens, with no retries;
-- across runs: $1.50, tracked in `data/planning/ledger.jsonl`.
+### 15.3 Dashboard features
 
-Each run's full report is written to `data/planning/<run_id>.json`.
+- Composer with the spending dialog and the list of stacks this backend can verify.
+- Permission dialog for repositories and documents a request names.
+- Run timeline with every state change, tool call, test result and cost.
+- Approval decisions, budget indicator and capability readiness.
+- Project files, reports and verified ZIP downloads.
+- Tools page with catalog comparisons.
+- GitHub publishing card for draft pull requests of verified runs.
 
-Docker and WSL2 setup for Phase 3: [docs/SETUP_WINDOWS.md](docs/SETUP_WINDOWS.md).
+---
 
-### Competition demonstration (offline, free)
+## 16. Testing and CI
 
-Six scenarios through the real API, selection, verification, independent acceptance and recovery. GPT, the coding providers and test execution are simulated and labelled as such; no model, key, Docker or network is used. Test results in it are replayed recordings of exact files, not Docker runs.
-
-What is offline-tested, what is scripted or replayed, what was verified on real Docker before Stages 2 to 4, what still awaits Docker or a real model, and what is not built: [docs/COMPETITION.md](docs/COMPETITION.md). Planned integrations (GitHub-assisted development, Google Drive-to-RAG): the product backlog in [docs/PROGRESS.md](docs/PROGRESS.md).
+### Backend
 
 ```powershell
 cd backend
-& $env:DEVPILOT_PYTHON -m app.demo.competition            # reports in data\competition-demo
-& $env:DEVPILOT_PYTHON -m app.demo.competition --serve    # then a local read-only dashboard at /ui
+..\.venv\Scripts\python.exe -m pytest -q
+..\.venv\Scripts\python.exe -m pytest --cov=app
 ```
 
-### GitHub-assisted, multi-stack development (offline-tested)
+The suite runs offline with scripted GPT, simulated coding, replayed sandbox results and in-process GitHub, Drive, OpenAI and n8n fakes. Tests in `backend/tests/live/` run only when their opt-in variables are set.
 
-DevPilot can search public repositories, judge their licences and evidence, import an approved one at a pinned commit into a component's folder, and plan projects with several stacks (for example a FastAPI back end and a React front end). Status, plainly:
-
-- **Offline-tested:** repository discovery, evaluation and safe import (fixtures, never GitHub); multi-stack planning; the FastAPI and React verification recipes' contracts and parsers.
-- **Not yet verified:** live GitHub access (off by default, `REPOSITORY_SOURCE=github`); the FastAPI and React recipes, whose runtime images are not built, so such projects stop with a precise blocked status; real code generation; real Docker execution of this code.
+### Frontend
 
 ```powershell
-cd backend
-& $env:DEVPILOT_PYTHON -m app.demo.fullstack    # the offline React + FastAPI rehearsal; reports in data\fullstack-rehearsal
+cd frontend
+npm ci
+npm run typecheck
+npm run lint
+npm test
+npm run build
 ```
 
-Details: [docs/MILESTONE_1_GITHUB.md](docs/MILESTONE_1_GITHUB.md).
+### CI
 
-## Documentation
+`.github/workflows/ci.yml` runs the backend suite on Windows with Python 3.12 and the locked dependencies, and the frontend type check, lint, tests and production build on Ubuntu with Node 24. CI needs no API keys.
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): system design, orchestration protocol, algorithms, data model and APIs
-- [docs/SECURITY.md](docs/SECURITY.md): threat model, sandboxing and approval policy
-- [docs/PROGRESS.md](docs/PROGRESS.md): phase tracker, acceptance criteria and phase log
-- [docs/COMPETITION.md](docs/COMPETITION.md): the offline demonstration, what is real and what is simulated, and feature status
-- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): the four ways to run DevPilot and the proposed cloud architecture (not deployed)
-- [docs/WEBSITES_AND_REPOSITORIES.md](docs/WEBSITES_AND_REPOSITORIES.md): your own GitHub repositories (public and private), repository inspection, the website verifier and its network controls, and the capability status of website generation
-- [docs/MILESTONE_1_GITHUB.md](docs/MILESTONE_1_GITHUB.md): GitHub-assisted development (repository discovery, evaluation and safe import, offline-tested with fixtures), the weather application's specification, and what a first real run needs
-- [docs/FEATURE_STATUS.md](docs/FEATURE_STATUS.md): every feature by its strongest evidence (tested live, tested offline, blocked here, not built), and the requirements still missing
-- [docs/LIVE_TEST_PLAN.md](docs/LIVE_TEST_PLAN.md): the step-by-step live test plan for scenarios A–H, cheapest first, with what each needs and what counts as a pass
-- [docs/COMPETITION_SCENARIOS.md](docs/COMPETITION_SCENARIOS.md): the truthful capability matrix. For each competition scenario: what is built, what has run live, and what it still needs
-- [docs/ADDING_A_STACK.md](docs/ADDING_A_STACK.md): how a new framework is added (catalog entry, recipe, runtime image, approval) and which stacks are verifiable here
-- [n8n/README.md](n8n/README.md): the signed n8n workflows, and running them on a local n8n
-- [CLAUDE.md](CLAUDE.md): rules for the AI development assistant used to build this project
+---
 
-## Acknowledgements
+## 17. Troubleshooting
 
-The design draws ideas from [OpenHands](https://github.com/OpenHands/OpenHands), [OpenCode](https://github.com/anomalyco/opencode), [n8n](https://github.com/n8n-io/n8n) and [n8n-nodes-opencode](https://github.com/ssccio/n8n-nodes-opencode). OpenCode and n8n are integrated through their documented interfaces. No implementation code was copied from these projects.
+| Symptom | Cause | Fix |
+|---|---|---|
+| `python --version` is not 3.12 | Another Python is first on PATH | Install Python 3.12 with "Add to PATH", open a new terminal, run `setup.cmd` again |
+| Docker daemon not reachable | Docker Desktop is not running | Start Docker Desktop and wait until the engine runs; check `docker version` |
+| Image pulls or builds fail during setup | No internet, a proxy, or little disk space | Restore the connection, free disk space, run `setup.cmd` again |
+| "runtime image not audited" | The image changed or was never approved | Run `.\setup.cmd` again, or `.\setup.cmd --rebuild` |
+| "OpenCode binary verified" fails | The download is incomplete | Run `setup.cmd` again; the hash check stays on |
+| Key missing or malformed | No key stored and no `OPENAI_API_KEY` | Run `setup.cmd` and type the key |
+| Model check answers 401, 403 or 404 | Wrong key, project restrictions, or model name | `.\devpilot.cmd doctor --check-key` names the cause; correct the key or model with `setup.cmd` |
+| Model check answers 429 | Rate limit or no API credit | Check the OpenAI billing page, then try again |
+| "protected folder" when containers start | `DEVPILOT_HOME` overlaps a protected folder | Point `DEVPILOT_HOME` at a dedicated folder, then run setup and doctor in the same terminal |
+| A website build is declined | The website verifier is not approved yet | Run `.\devpilot.cmd setup --web` |
+| A private repository answers 404 | The token or account cannot see it | Accept the collaborator invitation and store a token with access to that repository |
+| The dashboard cannot reach the backend | The backend is not running or the token differs | Start the backend, check http://127.0.0.1:8000/api/v1/health, re-enter the token |
+| No ZIP after a build | The run stopped before verification passed | Read the run report and events in the dashboard or the terminal output |
+
+Diagnostics:
+
+```powershell
+python --version
+docker version
+docker ps -a
+wsl --status
+git branch --show-current
+.\devpilot.cmd doctor --check-key
+Get-ChildItem .\devpilot-output -Filter '*.zip' -Recurse
+```
+
+Never share API keys, `.env`, `credentials.bin` or tokens in screenshots, issues or logs.
+
+---
+
+## 18. Repository structure
+
+```text
+AutoDev-GPT/
+├── .github/workflows/ci.yml     CI: Windows backend, Ubuntu frontend
+├── backend/
+│   ├── app/                     FastAPI app, CLI, orchestrator, coding, sandbox, verification, recovery, selection, tools, integrations, db
+│   ├── edge/                    OpenCode API filter, model gateway, install proxy
+│   ├── sandbox_images/          verify-web, verify-react, verify-fastapi, document-parser
+│   ├── scripts/                 live server, live build, OpenCode fetch and checks
+│   └── tests/                   unit, integration, live (opt-in), fixtures
+├── frontend/src/                React dashboard: components, pages, lib, tests
+├── config/                      egress allowlist, tool catalog, n8n workflows
+├── docs/                        architecture, install, security, status, structure
+├── examples/                    prompts and the competition-2026 summaries
+├── n8n/                         workflow definitions
+├── scripts/                     dev-env.ps1, n8n-local.ps1
+├── setup.cmd, setup.ps1         Windows setup
+└── devpilot.cmd                 CLI launcher
+```
+
+The full tree, entry points and where integrations, security controls, tests and configuration live: [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md).
+
+---
+
+## 19. Roadmap
+
+1. A recorded paid end-to-end CLI build on a fresh Windows installation, published with its report.
+2. React + Vite and FastAPI verification runtimes (`backend/sandbox_images/verify-react`, `verify-fastapi`) built, self-tested and enabled as stacks.
+3. A permission popup inside a running build, with automatic continuation once access is granted.
+4. Drive specifications summarised into GPT's gap analysis, and a dashboard panel for asking a knowledge base.
+5. Automatic forwarding of run events to n8n, and OpenCode through n8n as a second coding tool.
+6. A GitHub App with per-repository installation tokens.
+7. Hosted deployment: remote isolated workers, user accounts, a durable queue, PostgreSQL and object storage ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)).
+
+---
+
+## 20. Competition examples
+
+[examples/competition-2026/](examples/competition-2026/README.md) summarises four LTID 2026 competition packages (a website, a weather forecaster, a RAG assistant and an explicability evidence pack), with their architecture and the offline test results recorded for each. These packages were prepared independently of DevPilot's own runs.
+
+---
+
+## 21. Reference documentation
+
+| Topic | Document |
+|---|---|
+| Repository structure | [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md) |
+| This guide, docs-folder copy | [docs/auto_dev_gpt_complete.md](docs/auto_dev_gpt_complete.md) |
+| Windows installation | [docs/INSTALL_WINDOWS.md](docs/INSTALL_WINDOWS.md) |
+| Architecture | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| Security design | [docs/SECURITY.md](docs/SECURITY.md) |
+| Progress and evidence | [docs/PROGRESS.md](docs/PROGRESS.md), [docs/FEATURE_STATUS.md](docs/FEATURE_STATUS.md) |
+| Live test plan | [docs/LIVE_TEST_PLAN.md](docs/LIVE_TEST_PLAN.md) |
+| Websites and repositories | [docs/WEBSITES_AND_REPOSITORIES.md](docs/WEBSITES_AND_REPOSITORIES.md) |
+| Adding a stack | [docs/ADDING_A_STACK.md](docs/ADDING_A_STACK.md) |
+| Deployment proposal | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
+| Competition context | [docs/COMPETITION.md](docs/COMPETITION.md) |
+| Frontend | [frontend/README.md](frontend/README.md) |
+| n8n | [n8n/README.md](n8n/README.md) |
+| CI | [.github/workflows/ci.yml](.github/workflows/ci.yml) |

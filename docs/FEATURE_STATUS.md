@@ -1,6 +1,6 @@
-# Feature status: implemented, tested offline, tested live, not yet functional
+# Feature status: historical snapshot
 
-Branch `feature/general-purpose-platform`, 2026-11-05. Each feature appears once, under the strongest evidence that exists for it:
+This matrix is a historical snapshot for `feature/general-purpose-platform` dated 2026-11-05; it is not a current status report for `feature/evaluation-upgrade`. Use the root [README](../README.md), current source, and current test results for the checked-out branch. Each feature below appears once, under the strongest evidence recorded in that snapshot:
 
 1. **Tested live:** the real service, model or container ran, and the result is recorded.
 2. **Tested offline:** built, and covered by automated tests with fakes (scripted GPT, in-process GitHub, OpenAI, n8n and Drive). It has never met the real service.
