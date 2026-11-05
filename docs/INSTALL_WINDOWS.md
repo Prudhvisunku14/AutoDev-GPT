@@ -7,6 +7,10 @@ cd AutoDev-GPT
 .\devpilot.cmd build
 ```
 
+Until the platform work is merged into `main`, clone its branch: `git clone --branch feature/evaluation-upgrade https://github.com/Prudhvisunku14/AutoDev-GPT.git`.
+A clone holds no key, database or approval from anyone else's computer: `setup.cmd` downloads and verifies OpenCode, builds and audits the
+Docker runtime image, and stores *your* key encrypted for *your* Windows account (verified from a fresh clone on 2026-11-05).
+
 ## Before you start
 
 | You need | Why | If it is missing |
@@ -124,7 +128,7 @@ To see which of these applies without starting a build, run `.\devpilot.cmd doct
 
 ## Limits
 
-- **Generation: Python command-line applications only**, new or starting from your own GitHub repository. Website, FastAPI and full-stack generation are declined with the reason, before any approval: the build engine cannot yet run the website verifier as its verification step, and a Python-only success is not evidence for them.
+- **Generation: Python command-line applications, and static websites** (HTML, CSS and JavaScript, browser games included) once `.\devpilot.cmd setup --web` has built and self-tested the website verifier on this computer (about 2.5 GB, once). Each can start from your own GitHub repository. React, FastAPI, full-stack and mobile applications are declined with the reason, before any approval: their verification runtimes are not built or approved yet.
 - **Websites can be inspected and verified, free:** `.\devpilot.cmd setup --web` once (about 2.5 GB), then `.\devpilot.cmd inspect <GitHub URL>` and `.\devpilot.cmd verify-site <GitHub URL or folder>`. Private repositories need `.\devpilot.cmd setup --github-token`. Details and status: [WEBSITES_AND_REPOSITORIES.md](WEBSITES_AND_REPOSITORIES.md).
 - The first generation from a fresh install is not yet proven on every machine; what is proven is listed in `docs/PROGRESS.md`.
 - Costs are computed from the prices *you* entered; OpenAI's invoice is the authority.
