@@ -51,7 +51,7 @@ def _github(resource: GitHubResource, client: GitHubRepoClient | None, connected
         "visibility": "private" if found.info.private else "public", "commit": found.commit, "default_branch": found.info.default_branch,
         "archived": found.info.archived, "license": found.info.license, "stack": profile.stack, "summary": profile.summary,
         "components": [{"path": c.path or "(root)", "kind": c.kind, "framework": c.framework} for c in profile.components],
-        "unsupported": list(profile.unsupported), "file_count": profile.file_count, "describe": found.describe()[:4_000],
+        "unsupported": list(profile.unsupported), "file_count": profile.file_count, "describe": found.describe()[:4_000], "paths": list(found.files),
     }  # fmt: skip
 
 
@@ -83,8 +83,9 @@ def for_gpt(results: list[dict[str, Any]]) -> str:
     """The resources block of GPT's first message: what was found, as untrusted data."""
     lines = []
     for item in results:
-        if item["kind"] == "github" and item["status"] == "accessible":
-            lines.append(f"GitHub repository {item['full_name']} ({item['visibility']}, commit {item['commit'][:12]}, licence {item.get('license') or 'none found'}):\n{item['describe']}")
+        if item.get("kind") == "github" and item.get("status") == "accessible":
+            lines.append(f"GitHub repository {item.get('full_name', '?')} ({item.get('visibility', 'visibility unknown')}, commit {str(item.get('commit', ''))[:12] or 'unknown'}, "
+                         f"licence {item.get('license') or 'none found'}):\n{item.get('describe', '')}")  # fmt: skip
         else:
-            lines.append(f"{item['label']}: {item['status']}. {item['message']}")
+            lines.append(f"{item.get('label', item.get('key', 'a resource'))}: {item.get('status', 'unknown')}. {item.get('message', '')}")
     return "\n\n".join(lines)

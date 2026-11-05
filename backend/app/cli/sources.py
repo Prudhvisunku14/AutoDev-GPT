@@ -24,12 +24,16 @@ def client(paths: Paths, policy: EgressPolicy | None = None) -> GitHubRepoClient
     return GitHubRepoClient(policy or egress(), token=github_token.load(paths.github_credentials))
 
 
+MAX_LISTED_PATHS = 5_000
+
+
 @dataclass(frozen=True)
 class RemoteProject:
     repo: RepoRef
     info: RepoInfo
     commit: str
     profile: ProjectProfile
+    files: tuple[str, ...] = ()  # the paths at that commit, sorted; what a gap analysis is checked against
 
     def describe(self) -> str:
         visibility = "private" if self.info.private else "public"
@@ -54,7 +58,7 @@ def look(gh: GitHubRepoClient, repo: RepoRef) -> RemoteProject:
             cache[path] = gh.read_text(repo, commit, path) if files.get(path, 0) <= 200_000 else None
         return cache[path]
 
-    return RemoteProject(repo, info, commit, inspect_project(files, read, truncated=truncated))
+    return RemoteProject(repo, info, commit, inspect_project(files, read, truncated=truncated), tuple(sorted(files))[:MAX_LISTED_PATHS])
 
 
 def fetch(gh: GitHubRepoClient, project: RemoteProject) -> Checkout:

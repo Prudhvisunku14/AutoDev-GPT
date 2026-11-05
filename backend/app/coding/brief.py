@@ -55,6 +55,7 @@ class BriefInput:
     instructions: str  # from GPT
     existing_files: list[str]
     last_failure: str = ""  # what the last verification reported, when this attempt is a repair
+    gap: str = ""  # the accepted gap analysis, when the project starts from existing code (tools/adapters/gap.py)
 
 
 def build_brief(spec: BriefInput) -> str:
@@ -73,6 +74,7 @@ def build_brief(spec: BriefInput) -> str:
         "Orchestrator instructions for this task:\n" + data_block("instructions", spec.instructions),
         "Files already in the project:\n" + data_block("data", file_list),
         *([f"What the last test run reported:\n{data_block('data', spec.last_failure)}"] if spec.last_failure else []),
+        *([f"How this task relates to the existing code (the accepted gap analysis):\n{data_block('data', spec.gap)}"] if spec.gap else []),
         _RULES,
     ]
     if spec.language.casefold() == "python":

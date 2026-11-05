@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_BUDGET, DEFAULT_CAPABILITIES } from "../test/render";
-import { decideStack } from "./prompt";
 import { assessReadiness } from "./readiness";
 
 const STATUS = { status: "ok" as const, version: "1", phase: "t", database: "ok" as const, workspaces_writable: true, egress_components: [], projects: 0, runs: 0 };
@@ -28,7 +27,7 @@ describe("assessReadiness", () => {
   });
 
   it("blocks when the stack cannot be verified, when prices are unknown, or when the backend is unhealthy or unreachable", () => {
-    expect(assessReadiness({ ...ok, stackId: "python-fastapi" }).summary).toBe("Setup required — Python applications cannot be verified yet");
+    expect(assessReadiness({ ...ok, stackId: "python-fastapi" }).summary).toBe("Setup required — Python web API with FastAPI cannot be verified yet");
     expect(assessReadiness({ ...ok, budget: { ...DEFAULT_BUDGET, cost_known: false } }).summary).toBe("Setup required — spending prices are not set");
     expect(assessReadiness({ ...ok, status: { ...STATUS, status: "degraded" } }).summary).toBe("Setup required — the backend is not healthy");
     expect(assessReadiness({ ...ok, failed: { status: new Error("The DevPilot backend could not be reached. Is it running?") } })).toMatchObject({
@@ -39,18 +38,15 @@ describe("assessReadiness", () => {
   });
 });
 
-describe("decideStack against the backend's capabilities", () => {
-  it("lets Python command-line requests through, the weather forecast one included", () => {
-    for (const text of ["Create a weather forecast application", "Create a Python habit tracker with unit tests", "Create a web scraper command-line tool in Python"]) {
-      expect(decideStack(text, DEFAULT_CAPABILITIES.stacks)).toMatchObject({ refusal: null, stack: { id: "python-cli" } });
-    }
+describe("assessReadiness when GPT chooses the stack", () => {
+  it("is ready when at least one stack is verifiable, whatever the request says", () => {
+    expect(assessReadiness({ ...ok, stackId: null })).toMatchObject({ kind: "ready", ready: true });
   });
 
-  it("declines what this backend cannot verify with one plain sentence, never as a Python app", () => {
-    for (const text of ["Create a React dashboard", "Build a FastAPI service", "I need a website for my shop", "Make an Android app", "A web application for bookings"]) {
-      const decision = decideStack(text, DEFAULT_CAPABILITIES.stacks);
-      expect(decision.refusal).toMatch(/not available on this backend yet|no static-html stack|no stack for mobile apps/);
-      expect(decision.stack?.id).not.toBe("python-cli");
-    }
+  it("blocks with every stack's reason when none can be verified", () => {
+    const none = { ...DEFAULT_CAPABILITIES, stacks: DEFAULT_CAPABILITIES.stacks.map((s) => ({ ...s, verifiable: false, reason: `${s.id} runtime is not approved` })) };
+    const result = assessReadiness({ ...ok, capabilities: none, stackId: null });
+    expect(result).toMatchObject({ ready: false, summary: "Setup required — no kind of application can be verified yet" });
+    expect(result.details.join(" ")).toContain("python-cli runtime is not approved");
   });
 });

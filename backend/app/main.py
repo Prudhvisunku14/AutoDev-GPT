@@ -44,6 +44,7 @@ from app.toolcatalog.model import load_facts
 from app.tools.adapters.catalog import register_catalog_tools
 from app.tools.adapters.coding import CodingRuntime, recover_attempts, register_coding_tools
 from app.tools.adapters.drive import DriveRuntime, register_drive_tools
+from app.tools.adapters.gap import register_gap_tool
 from app.tools.adapters.github_publish import PublishRuntime, register_publish_tool
 from app.tools.adapters.n8n import register_n8n_tools
 from app.tools.adapters.repositories import RepositoryRuntime, register_repository_tools
@@ -124,6 +125,8 @@ def create_app(
         register_coding_tools(registry, runtime)
     if repositories is not None:
         register_repository_tools(registry, RepositoryRuntime(repositories))
+    elif settings.repository_source == "github":  # a repository the person names is read, so a run may start from existing code
+        register_gap_tool(registry)
     if drive is not None:
         register_drive_tools(registry, drive)
     if n8n_runtime is not None:

@@ -14,6 +14,7 @@ import pytest
 
 from app.coding.simulated import ScriptedAttempt
 from app.db.models import Run, RunState
+from app.demo.gap import gap_step
 from app.demo import weather
 from app.orchestrator.fake_llm import call
 from app.repos.fixtures import OWNER, FixtureSource
@@ -88,7 +89,7 @@ class Sandbox:
 def opening() -> list[Any]:
     imported = call("import_repository", {"full_name": BACKEND, "commit": COMMIT, "component": "backend"})
     return [call("submit_analysis", weather.ANALYSIS), call("search_repositories", weather.BACKEND_SEARCH), call("search_repositories", weather.FRONTEND_SEARCH), imported,
-            call("submit_plan", weather.FULLSTACK_PLAN), call("submit_criteria", weather.FULL_CRITERIA)]  # fmt: skip
+            gap_step(weather.ANALYSIS, test_path="backend/tests/test_devpilot_contract.py"), call("submit_plan", weather.FULLSTACK_PLAN), call("submit_criteria", weather.FULL_CRITERIA)]  # fmt: skip
 
 
 def rig(tmp_path: Path, steps: list[Any], script: list[ScriptedAttempt], sandbox: Any, suite: acceptance.AcceptanceSuite = weather.ACCEPTANCE_SUITE) -> Rig:

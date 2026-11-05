@@ -1386,3 +1386,37 @@ Frontend: `PermissionDialog.test.tsx` (2), plus a Composer test showing that not
 - No request reached GitHub.
 - Real Google consent still needs the person's Google OAuth client.
 - A run paused inside PLANNING by an `import_repository` authorization error is not resumed by the connection. It is resumed from the run page, as before.
+
+### General-purpose platform, Phase 3: gap analysis of existing code (2026-11-05)
+
+**Built:** `submit_gap_analysis` (`app/tools/adapters/gap.py`, PLANNING, READ). It is registered with the repository tools, and whenever GitHub reading is on.
+- When a run starts from existing code, the plan gate refuses `submit_plan` until a gap analysis is accepted. "Existing code" means a repository imported in this run, or one the person named and the resource check read.
+- **GPT writes the analysis.** It has eight parts: existing functionality, similarities, missing features, conflicts, architecture changes, every file to add, modify, delete or keep, the tests, and why each part is reused, adapted or replaced.
+- **Code decides whether it stands.** It checks that:
+  - every cited requirement exists, and every functional requirement is either already met or listed as missing;
+  - every kept, modified or deleted file exists in the real file list, and every added file does not;
+  - licence, copying and notice files are never deleted;
+  - at most 20% of the existing files are deleted ("adapt, do not blindly overwrite");
+  - a replaced component gives a reason;
+  - every missing feature has a test.
+- Every problem is returned at once.
+- The accepted analysis is recorded (`analysis.gap_recorded`) and added to every coding brief OpenCode receives.
+- The resource check now keeps the inspected file list (up to 5,000 paths) for these checks.
+- The offline demonstrations that import code (weather, full-stack rehearsal) now script a gap step (`app/demo/gap.py`), which passes the same checks.
+
+**Tests:** `tests/unit/test_gap_analysis.py` (16): every rule, the strict schema, the brief, and the plan gate in a run (refused, then accepted; a rejected analysis records nothing; a new project needs none). 15 scripted-flow tests were updated to add the gap step.
+
+### General-purpose platform, Phase 4: GPT chooses the stack; no keyword selection (2026-11-05)
+
+**Changed:**
+- The dashboard no longer maps keywords to a stack. `decideStack` and `requestedStack` were removed. The request is sent as written, with no stack. GPT chooses from the catalog while planning; its prompt lists each stack with "can be built and tested now: yes/no". The backend still never codes or delivers a stack it cannot verify.
+- The approval dialog shows "Builds as: Chosen by GPT from: …", listing the stacks this backend can verify.
+- `POST /runs/{id}/start` for a project with no stack, on a backend with the coding engine, now refuses with 409 before anything is spent when no stack at all can be verified. The refusal gives every stack's reason.
+- `docs/ADDING_A_STACK.md`: the four parts a new framework needs (catalog entry, recipe, runtime image, approval), and the status here.
+
+**Runtimes on this computer:**
+- `python-cli` is verifiable.
+- `static-html` is verifiable once `devpilot setup --web` has self-tested `devpilot/verify-web:1`, which is built.
+- The **FastAPI and React images are defined but not built**. Building them pulls base images and packages, which needs approval. Until then those stacks, and React + FastAPI projects, are planned but stopped before coding.
+
+**Tests:** `tests/unit/test_stack_choice.py` (3); frontend `prompt.test.ts` and `readiness.test.ts` rewritten; 4 Composer tests updated. Backend 4240 passed, 20 skipped. Frontend 121 passed; the keyword tests were removed, so there are fewer than before.

@@ -118,6 +118,13 @@ def start_run(
         if selected is None or not selected.verifiable:
             reason = selected.reason if selected is not None else "the selected stack is not in the backend catalog"
             raise HTTPException(status.HTTP_409_CONFLICT, f"The selected stack cannot be built and verified: {reason}")
+    elif run.started_at is None and request.app.state.coding_selector is not None:
+        # No stack was chosen: GPT chooses one from the catalog while planning. A full build needs at least one stack this
+        # backend can verify, or the run would spend money only to stop before coding.
+        capabilities = get_capabilities(request)
+        if not any(stack.verifiable for stack in capabilities.stacks):
+            reasons = "; ".join(f"{stack.name}: {stack.reason}" for stack in capabilities.stacks)[:900]
+            raise HTTPException(status.HTTP_409_CONFLICT, f"No kind of application can be built and verified on this backend yet: {reasons}")
     policy = request.app.state.start_policy
     refusal = policy.admit(session, run) if policy is not None else None
     if refusal is not None:
