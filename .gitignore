@@ -14,6 +14,8 @@ token*.json
 # DevPilot CLI: what a user's own installation creates. These normally live in %LOCALAPPDATA%\DevPilot, outside this folder,
 # but DEVPILOT_HOME or --home may point inside it, so they are ignored here too.
 devpilot-output/
+.cache/
+/*.zip
 approved-runtime.json
 build-ledger.jsonl
 /tools/

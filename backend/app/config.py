@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ipaddress
 from functools import lru_cache
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -106,8 +107,9 @@ class Settings(BaseSettings):
     opencode_max_attempts_per_task: int = Field(default=3, ge=1, le=10)
     # Pre-images of the workspace, kept while a coding task runs so it can be reverted.
     coding_checkpoints_dir: Path = Path("./data/checkpoints")
-    # A run's disposable copy of the project. Outside the repository: the launcher refuses to mount from it.
-    coding_work_dir: Path = Path("D:/DevPilotCache/work")
+    # A run's disposable copy of the project. Outside the repository: the launcher refuses to mount from it. By default it is
+    # beside the command line's own files (%LOCALAPPDATA%\DevPilot), so a fresh clone works on any Windows computer.
+    coding_work_dir: Path = Field(default_factory=lambda: _per_user_dir("server-work"))
     # How many times a failed verification may go back to REPAIRING. Coding attempts per task are above.
     max_repair_attempts: int = Field(default=2, ge=0, le=5)
 
@@ -355,6 +357,11 @@ class Settings(BaseSettings):
                 if secret:
                     values.append(secret)
         return values
+
+
+def _per_user_dir(name: str) -> Path:
+    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    return Path(base) / "DevPilot" / name
 
 
 def _from_repo_root(path: Path) -> Path:
