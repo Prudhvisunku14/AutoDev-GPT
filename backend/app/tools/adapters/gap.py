@@ -161,6 +161,9 @@ def brief_text(gap: dict[str, Any] | None) -> str:
 
 
 def register_gap_tool(registry: ToolRegistry) -> None:
+    from app.evaluation.agent_tools import register_source_triage  # the evaluation upgrade's candidate-file scan, which GPT uses before writing this
+
+    register_source_triage(registry)
     registry.register(
         ToolSpec(
             name="submit_gap_analysis",

@@ -38,7 +38,7 @@ def ask(project_id: ProjectId, body: AskIn, request: Request) -> dict[str, Any]:
     with state.session_factory() as session:
         if session.get(Project, project_id) is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found")
-    base = runtime.bases.get(project_id)
+    base = runtime.base_for(project_id)  # restored from the persistent index after a restart
     if base is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "this project has no knowledge base yet: a run must ingest and index its documents first")
     problem = state.llm_problem()

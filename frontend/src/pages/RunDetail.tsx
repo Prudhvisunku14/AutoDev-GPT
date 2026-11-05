@@ -5,6 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { ApprovalPanel } from "../components/ApprovalPanel";
 import { ActivityPanel } from "../components/ActivityPanel";
 import { DeliveryCard } from "../components/DeliveryCard";
+import { GitHubPublishCard } from "../components/GitHubPublishCard";
 import { FileBrowser } from "../components/FileBrowser";
 import { Notice } from "../components/Notice";
 import { StatusBadge } from "../components/StatusBadge";
@@ -203,6 +204,7 @@ export function RunDetail() {
 
       <div className="mt-5">
         <DeliveryCard run={r} report={report.data ?? null} projectName={projectName} />
+        <GitHubPublishCard run={r} />
       </div>
 
       <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">

@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api import approvals, artifacts, budget, capabilities, github, health, history, integrations, knowledge, n8n, projects, resources, runs, session, tools
+from app.api import approvals, artifacts, budget, capabilities, evaluation, github, health, history, integrations, knowledge, n8n, projects, resources, runs, session, tools
 from app.coding.attempt_store import SqlAttemptStore
 from app.coding.candidate import CandidateWorkspaces
 from app.config import Settings, get_settings
@@ -25,6 +25,7 @@ from app.core.logging import configure_logging
 from app.core.redaction import Redactor
 from app.core.secret_store import EncryptedFileStore
 from app.core.sessions import CSRF_HEADER, SessionStore
+from app.evaluation.github_publish import PreviewStore
 from app.db.session import create_db_engine, create_session_factory, init_db
 from app.orchestrator.fake_llm import FakeLLM
 from app.orchestrator.llm_client import LLMClient, OpenAIResponsesClient, llm_config_problem
@@ -203,6 +204,7 @@ def create_app(
     app.state.repositories = repositories
     app.state.github = github_connection
     app.state.github_http = github_http
+    app.state.evaluation_preview_store = PreviewStore()  # one-use draft pull request previews (api/evaluation.py)
     app.state.web_sessions = SessionStore(session_factory)  # the dashboard's HttpOnly session cookies (app/core/sessions.py)
     app.state.tool_catalog = tool_catalog
     tool_catalog.attach(app.state)
@@ -247,6 +249,7 @@ def create_app(
     app.include_router(tools.router, prefix=API_PREFIX)
     app.include_router(session.router, prefix=API_PREFIX)
     app.include_router(knowledge.router, prefix=API_PREFIX)
+    app.include_router(evaluation.router, prefix=API_PREFIX)
     app.include_router(resources.router, prefix=API_PREFIX)
     app.include_router(github.router)  # its own paths: GitHub's OAuth callback is not under the API prefix
     app.include_router(integrations.router)  # its own paths: the OAuth callback is not under the API prefix

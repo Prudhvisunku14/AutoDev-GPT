@@ -79,6 +79,8 @@ export function stubApi(overrides: Partial<ApiClient> = {}): ApiClient {
     checkResources: vi.fn(() => Promise.resolve({ resources: [], problems: [], needs_permission: [] })),
     githubStatus: vi.fn(() => Promise.resolve({ configured: false, blocker: "GITHUB_OAUTH_CLIENT_ID is not configured", connected: false, login: null, scopes: [], connected_at: null, requested_scopes: ["repo"] })),
     connectGitHub: vi.fn(notFound),
+    previewGithubPR: vi.fn(notFound),
+    publishGithubPR: vi.fn(notFound),
     n8nStatus: vi.fn(notFound),
     disconnectGitHub: vi.fn(notFound),
     authorizeGoogle: vi.fn(notFound),

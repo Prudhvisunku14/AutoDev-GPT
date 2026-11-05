@@ -124,9 +124,21 @@ class GitHubWriter:
         commit = self._call("POST", f"/repos/{full_name}/git/commits", {"message": message, "tree": tree["sha"], "parents": [parent]})
         return str(commit["sha"])
 
-    def open_pull_request(self, full_name: str, *, files: dict[str, bytes], branch: str, base: str | None, title: str, body: str, message: str) -> Published:
-        check_ref(branch)
+    def checked_repository(self, full_name: str) -> dict[str, Any]:
+        """The repository, refused unless GitHub confirms it is exactly the one named and that this account may push to it."""
         repo = self.repository(full_name)
+        if str(repo.get("full_name", "")).lower() != full_name.lower():
+            raise GitHubWriteError("invalid", "GitHub answered for a repository other than the one requested")
+        permissions = repo.get("permissions")
+        if isinstance(permissions, dict) and not permissions.get("push", False):
+            raise GitHubWriteError("forbidden", f"this GitHub account cannot push to {full_name}")
+        return repo
+
+    def open_pull_request(self, full_name: str, *, files: dict[str, bytes], branch: str, base: str | None, title: str, body: str, message: str,
+                          draft: bool = False) -> Published:  # fmt: skip
+        """The commit is made before the branch exists, so a failed upload never leaves a half-made branch behind."""
+        check_ref(branch)
+        repo = self.checked_repository(full_name)
         base_branch = check_ref(base or str(repo.get("default_branch") or "main"))
         if branch == base_branch:
             raise GitHubWriteError("invalid", "the pull request branch must differ from its base branch")
@@ -135,7 +147,7 @@ class GitHubWriter:
         parent = self._head(full_name, base_branch)
         commit = self._commit(full_name, parent, files, message)
         self._call("POST", f"/repos/{full_name}/git/refs", {"ref": f"refs/heads/{branch}", "sha": commit})
-        pr = self._call("POST", f"/repos/{full_name}/pulls", {"title": title, "head": branch, "base": base_branch, "body": body, "maintainer_can_modify": True})
+        pr = self._call("POST", f"/repos/{full_name}/pulls", {"title": title, "head": branch, "base": base_branch, "body": body, "maintainer_can_modify": True, "draft": draft})
         return Published(full_name, branch, commit, len(files), str(pr.get("html_url") or ""), str(repo.get("html_url") or f"https://github.com/{full_name}"))
 
     def create_repository(self, name: str, *, private: bool, description: str, files: dict[str, bytes], message: str) -> Published:

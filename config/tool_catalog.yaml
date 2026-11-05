@@ -42,7 +42,7 @@ tools:
       The only orchestrator. It analyses the request, plans, writes acceptance criteria and decides which tool runs next,
       through strict function calls that DevPilot's code validates and governs.
     tasks: [requirement_analysis, architecture, tool_selection, acceptance_criteria, gap_analysis]
-    functions: [submit_analysis, submit_plan, submit_criteria, request_human_input, compare_tools, submit_gap_analysis]
+    functions: [submit_analysis, submit_plan, submit_criteria, request_human_input, compare_tools, submit_gap_analysis, find_source_requirement_gaps]
     advantages:
       - Understands free-form requests and explains its choices
       - Every call is bounded by the run's dollar and token limits before it is sent

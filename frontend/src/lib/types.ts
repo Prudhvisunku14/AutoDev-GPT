@@ -406,3 +406,31 @@ export interface N8nHealth {
   error: string | null;
   workflows: N8nWorkflowHealth[];
 }
+
+// --- Draft pull request of a verified delivery (POST /evaluation/github/preview, /publish) ------------------------------
+
+export interface GithubPRPreview {
+  preview_id: string;
+  expires_in_seconds: number;
+  verification_level: string;
+  confirmation_required: string;
+  github_account: string | null;
+  preview: {
+    run_id: string;
+    repository: string;
+    branch: string;
+    base: string;
+    title: string;
+    total_bytes: number;
+    fingerprint: string;
+    files: { path: string; bytes: number; sha256: string }[];
+  };
+}
+
+export interface GithubPRResult {
+  url: string;
+  branch: string;
+  commit: string;
+  repository: string;
+  draft: string;
+}

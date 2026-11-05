@@ -1523,3 +1523,38 @@ The branch was pushed. CI ran on GitHub for the first time (run `41976410351`): 
 - Tests: `tests/unit/test_rag_grounded.py` (13).
 
 **Review:** `docs/FEATURE_STATUS.md` sorts every feature by its strongest evidence, and lists the ten requirements still missing. The most important is that Google consent is kept in memory, so it does not survive a restart. `docs/LIVE_TEST_PLAN.md` is the step-by-step plan for A–H.
+
+### Evaluation upgrade integrated, and Drive consent made persistent (2026-11-05)
+
+Branch `feature/evaluation-upgrade`, from `feature/general-purpose-platform` at `10738ac`. Nothing pushed.
+
+The package `DevPilot_Evaluation_Upgrade` was read in full before anything ran.
+- Its installer only rewrites text, and contacts nothing.
+- Its dry run stopped at the first conflict, because it was written against `main` at `e120238`.
+- Checking each of its edits separately:
+  - `main.py`: conflict (the anchors moved);
+  - `api.ts` and `RunDetail.tsx`: clean;
+  - `App.tsx` and `Sidebar.tsx`: already present, since this branch had added the same Tools route;
+  - `Tools.tsx`: conflict (this branch's page is kept).
+- So the installer's `--apply` was **not** used. Its compatible parts were integrated by hand:
+  - **Draft pull request of a delivered run** (`app/evaluation/github_publish.py`, `api/evaluation.py`, `GitHubPublishCard.tsx` on the run page).
+    - The plan, the one-use preview (every file with its SHA-256, valid ten minutes) and the typed confirmation are the package's.
+    - The write goes through the existing `GitHubWriter`, which gained the package's identity and push-permission checks and `draft` pull requests. It makes the commit *before* creating the branch, so a failed upload leaves no half-made branch; the package's own publisher created the branch first.
+    - It uses the person's GitHub connection, or GITHUB_TOKEN.
+    - The run is looked up before any write, so a write is never left unrecorded.
+  - **`find_source_requirement_gaps`** (GPT, PLANNING, READ): conservative word-match triage that is never proof. It is registered with `submit_gap_analysis`.
+  - **Exact document-version diff** (`POST /evaluation/document-diff`).
+  - **The registered-function listing** (`GET /evaluation/tools`), over HTTP only.
+- Not taken: the package's `explain_development_tools` and `compare_development_tools` GPT tools. They duplicate `compare_tools`, which answers from the reviewed catalog with readiness and evidence.
+
+**Drive consent survives a restart** (`app/drive/persistent.py`). Grants, and refresh tokens stored only as Fernet ciphertext, are kept under CREDENTIALS_DIR and written atomically. After a restart, access is refreshed from the stored token. A different key cannot read it.
+
+**Knowledge bases come back after a restart** (`DriveRuntime.base_for`). This exposed a defect: revoking a grant after a restart did not delete its chunks from the persistent index, because only the in-memory knowledge base was cleaned. `forget` now deletes them from the index on disk.
+
+**Tests:**
+- `test_evaluation_gaps.py` (5, the package's, unchanged);
+- `test_evaluation_github_publish.py` (12: the package's planning and preview tests, plus its publisher tests ported to the existing writer and the in-process GitHub, plus the routes end to end);
+- `test_drive_persistence.py` (5);
+- `GitHubPublishCard.test.tsx` (2).
+
+**Still not live:** no GitHub write, Google consent, n8n instance or paid build has run.

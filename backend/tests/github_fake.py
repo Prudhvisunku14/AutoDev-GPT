@@ -32,6 +32,7 @@ class Repo:
     default_branch: str = "main"
     license: str | None = "MIT"
     branches: dict[str, str] = field(default_factory=dict)
+    push: bool = True  # what GitHub reports as this account's push permission
     pulls: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -132,12 +133,13 @@ class FakeGitHub:
     def _repo_call(self, request: httpx.Request, repo: Repo, rest: list[str], query: dict[str, list[str]]) -> httpx.Response:
         method = request.method
         write = method in ("POST", "PATCH", "DELETE")
-        if write and not self.authorized(request):
+        if write and (not self.authorized(request) or not repo.push):
             return httpx.Response(401 if not request.headers.get("authorization") else 403, json={"message": "Resource not accessible"})
         if not rest and method == "GET":
             return httpx.Response(200, json={"full_name": repo.full_name, "html_url": f"https://github.com/{repo.full_name}", "private": repo.private,
                                              "default_branch": repo.default_branch, "archived": False, "size": 10, "description": "a test repository",
-                                             "license": {"spdx_id": repo.license} if repo.license else None})  # fmt: skip
+                                             "license": {"spdx_id": repo.license} if repo.license else None,
+                                             **({"permissions": {"push": repo.push}} if self.authorized(request) else {})})  # fmt: skip
         if rest[:1] == ["commits"] and method == "GET":
             ref = "/".join(rest[1:])
             sha = repo.branches.get(ref) or (ref if ref in self.commits else None)

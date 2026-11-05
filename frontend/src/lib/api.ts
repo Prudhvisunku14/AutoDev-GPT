@@ -6,6 +6,8 @@ import type {
   Budget,
   Capabilities,
   GitHubStatus,
+  GithubPRPreview,
+  GithubPRResult,
   N8nHealth,
   ResourceCheck,
   ToolAnswer,
@@ -136,6 +138,11 @@ export function createApiClient({ baseUrl, getToken, fetchImpl }: ApiClientOptio
     /** Reads what the requirement names: public repositories at once, private ones through the GitHub connection. */
     checkResources: (projectId: string) => json<ResourceCheck>(`/projects/${id(projectId)}/resources/check`, { method: "POST" }),
     githubStatus: () => json<GitHubStatus>("/integrations/github"),
+    /** What a draft pull request of this verified run would upload, file by file. Nothing is written. */
+    previewGithubPR: (body: { run_id: string; repository: string; base: string; branch: string; title: string; body: string }) =>
+      json<GithubPRPreview>("/evaluation/github/preview", { method: "POST", body }),
+    /** The GitHub write, after the person typed the exact confirmation the preview asked for. */
+    publishGithubPR: (preview_id: string, confirmation: string) => json<GithubPRResult>("/evaluation/github/publish", { method: "POST", body: { preview_id, confirmation } }),
     /** Read-only: each registered workflow against n8n's own list, with its recent executions. 404 while n8n is off. */
     n8nStatus: () => json<N8nHealth>("/integrations/n8n/status"),
     /** The GitHub consent URL; the backend keeps the token, the dashboard never sees it. */

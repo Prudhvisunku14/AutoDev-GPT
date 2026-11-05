@@ -37,7 +37,10 @@ CI on GitHub (first run, 2026-11-05, run `41976410351`): backend on Windows and 
 | **GPT-written RAG answers**, every citation checked (retrieved source, verbatim quote, every marker cited) | `app/rag/grounded.py`, `POST /projects/{id}/knowledge/ask` | `test_rag_grounded.py` |
 | Dashboard sessions: HttpOnly cookie, CSRF header, one-time sign-in link | `app/core/sessions.py` | `test_web_sessions.py`, Vitest |
 | Run timeline for every new event | `lib/timeline.ts` | Vitest |
-| Google OAuth consent with PKCE; read-only grants; revocation | `app/drive/` | `test_drive_oauth.py`, `test_drive_tools.py` |
+| Google OAuth consent with PKCE; read-only grants; revocation; **consent and encrypted refresh tokens persist across restarts** | `app/drive/`, `drive/persistent.py` | `test_drive_oauth.py`, `test_drive_tools.py`, `test_drive_persistence.py` |
+| Knowledge bases restored from the persistent index after a restart; revocation deletes the grant's chunks from disk even then | `DriveRuntime.base_for`, `forget` | `test_drive_persistence.py` |
+| Evaluation upgrade: preview → typed confirmation → **draft** pull request of a delivered, verified run (one new `devpilot/*` branch, one commit) | `app/evaluation/github_publish.py`, `api/evaluation.py`, `GitHubPublishCard.tsx` | `test_evaluation_github_publish.py`, Vitest |
+| Evaluation upgrade: conservative source-to-requirement triage for GPT (`find_source_requirement_gaps`, never proof) and exact document-version diff | `app/evaluation/gaps.py`, `agent_tools.py` | `test_evaluation_gaps.py` |
 
 ## 3. Implemented, blocked here
 
@@ -56,8 +59,7 @@ CI on GitHub (first run, 2026-11-05, run `41976410351`): backend on Windows and 
 
 Found by reviewing the eight phases against the original request, most important first:
 
-1. **Persistent Google credentials.** Drive's encrypted refresh tokens and grants live in memory (`drive/oauth.CredentialStore`, `drive/access.GrantStore`), so a backend restart loses consent. The requirement asked for encrypted *persistent* storage. GitHub's connection is persistent.
-2. **Knowledge bases do not survive a restart.** The SQLite index keeps the vectors, but the per-project knowledge base (`DriveRuntime.bases`) is rebuilt only by re-running indexing.
+1. ~~Persistent Google credentials~~ and 2. ~~knowledge bases after a restart~~: **done** (2026-11-05, `drive/persistent.py`, `DriveRuntime.base_for`).
 3. **No permission popup inside a run.** The popup works before a build starts. A run that hits a private repository in `import_repository`, or that needs Google consent mid-run, pauses and shows it in the timeline, but offers no popup button, and does not continue by itself after access is granted.
 4. **Drive specifications are not part of the gap analysis.** The gap analysis compares *code* with requirements. Documents the request links to are indexed for RAG, but their content is not summarised into GPT's analysis.
 5. **No dashboard panel for asking a knowledge base.** The grounded-answer API exists, with no UI yet.

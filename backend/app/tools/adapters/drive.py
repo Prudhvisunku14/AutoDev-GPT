@@ -33,6 +33,7 @@ from app.db.models import Project, Run, RunState
 from app.drive.access import Authorizer, Discovery, DiscoveryLimits, Grant, GrantStatus, GrantStore, RevocationResult, ScopedDrive
 from app.drive.model import READ_ONLY_SCOPES, DriveAccessRefused, DriveAuthorizationRequired, DriveError, DriveUnavailable, folder_id, safe_label
 from app.drive.oauth import GoogleOAuthAuthorizer, GoogleOAuthProvider, build_cipher
+from app.drive.persistent import FileCredentialStore, FileGrantStore
 from app.drive.source import DriveSource, GoogleDriveSource
 from app.orchestrator.run_control import end_run
 from app.rag.blueprint import blueprint
@@ -90,10 +91,24 @@ class DriveRuntime:
     def scope(self, project_id: str) -> AccessScope:
         return AccessScope(project_id, frozenset(g.id for g in self.grants.for_project(project_id) if g.status is GrantStatus.GRANTED))
 
+    def base_for(self, project_id: str) -> KnowledgeBase | None:
+        """The project's knowledge base: the one built in this process, or, after a restart, the persistent index's chunks for the
+        project's still-active grants (RAG_EMBEDDER=openai). None when nothing is indexed for it."""
+        base = self.bases.get(project_id)
+        if base is None and self.index_factory is not None and self.embedders:
+            embedder = next((e for e in self.embedders if not e.simulated), self.embedders[0])
+            index = self.index_factory(embedder)
+            if index.chunks(self.scope(project_id)):
+                base = self.bases[project_id] = KnowledgeBase(embedder, index=index)
+        return base
+
     def forget(self, project_id: str, grant_id: str) -> tuple[int, int]:
-        """Everything read under a grant: (documents, chunks) removed from the caches and the index."""
+        """Everything read under a grant: (documents, chunks) removed from the caches and the index, the persistent index included,
+        even after a restart, when no knowledge base is in memory."""
         base = self.bases.get(project_id)
         chunks = base.revoke(grant_id) if base is not None else 0
+        if base is None and self.index_factory is not None:
+            chunks += sum(self.index_factory(embedder).remove_grant(grant_id) for embedder in self.embedders)
         documents = len(self.extracted.pop((project_id, grant_id), {}))
         self.discovered.pop((project_id, grant_id), None)
         return documents, chunks
@@ -577,9 +592,12 @@ def build_drive_runtime(settings: Settings, egress: EgressPolicy, sandbox: Sandb
         return None
     cipher, why = build_cipher(settings.devpilot_token_key)
     provider = GoogleOAuthProvider(egress, settings.google_oauth_client_id, settings.google_oauth_client_secret) if settings.google_oauth_client_id else None
-    authorizer = GoogleOAuthAuthorizer(settings.google_oauth_client_id, settings.google_oauth_redirect_uri, provider=provider, cipher=cipher, cipher_problem=why)
+    # Consent survives a restart: grants and the encrypted refresh tokens live under CREDENTIALS_DIR (drive/persistent.py).
+    store = FileCredentialStore(settings.credentials_dir / "drive")
+    authorizer = GoogleOAuthAuthorizer(settings.google_oauth_client_id, settings.google_oauth_redirect_uri, provider=provider, cipher=cipher, cipher_problem=why, store=store)
     embedders, index_factory = real_embedding(settings, egress)
-    return DriveRuntime(GoogleDriveSource(egress, authorizer), authorizer, embedders, parser=IsolatedParser(sandbox, image=PARSER_IMAGE, settings=settings), index_factory=index_factory)
+    return DriveRuntime(GoogleDriveSource(egress, authorizer), authorizer, embedders, parser=IsolatedParser(sandbox, image=PARSER_IMAGE, settings=settings), index_factory=index_factory,
+                        grants=FileGrantStore(settings.credentials_dir / "drive-grants.json"))  # fmt: skip
 
 
 def real_embedding(settings: Settings, egress: EgressPolicy) -> tuple[tuple[Embedder, ...], Callable[[Embedder], VectorIndex] | None]:
