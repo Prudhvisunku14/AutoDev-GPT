@@ -118,6 +118,35 @@ function describe(event: RunEvent): Omit<TimelineItem, "key" | "ts"> | null {
       return { kind: "recovery", title: `Recovery ${p.resolved ? "resolved the failure" : "did not resolve the failure"}`, tone: p.resolved ? "good" : "warn" };
     case "delivery.finished":
       return { kind: "delivery", title: `Delivered ${count(p.files)} file${count(p.files) === 1 ? "" : "s"} into the project`, tone: "good" };
+    case "analysis.gap_recorded":
+      return {
+        kind: "milestone",
+        title: `Existing code compared with the requirements: ${count(p.missing_features)} to build, ${count(p.similarities)} already there`,
+        detail: `${count(p.files)} file decisions, ${count(p.tests)} planned tests`,
+        tone: "good",
+      };
+    case "github.publish_started":
+      return { kind: "delivery", title: `Publishing ${count(p.files)} verified file${count(p.files) === 1 ? "" : "s"} to GitHub`, detail: text(p.repository) || undefined, tone: "neutral" };
+    case "github.published":
+      return p.pull_request_url
+        ? { kind: "delivery", title: `Pull request opened on ${text(p.repository)}`, detail: text(p.pull_request_url), tone: "good" }
+        : { kind: "delivery", title: `Repository ${text(p.repository)} created with the verified project`, detail: text(p.repository_url) || undefined, tone: "good" };
+    case "rag.indexed":
+      return { kind: "milestone", title: `Documents indexed: ${count(p.documents)} documents, ${count(p.chunks)} chunks`, detail: p.simulated ? "Test-double embedder: lexical, not semantic" : `Embedder ${text(p.embedder)}`, tone: p.simulated ? "warn" : "good" };
+    case "drive.authorized":
+      return { kind: "info", title: p.status === "pending_consent" ? "Google Drive permission needed" : "Google Drive access granted", tone: p.status === "pending_consent" ? "warn" : "good" };
+    case "drive.consent_completed":
+      return { kind: "info", title: "Google Drive access granted", tone: "good" };
+    case "n8n.triggered":
+      return { kind: "tool", title: `n8n workflow ${text(p.workflow)} started`, tone: "neutral" };
+    case "n8n.callback":
+      return { kind: "tool", title: `n8n workflow reported ${text(p.status)}`, tone: p.status === "success" ? "good" : "warn" };
+    case "n8n.waiting":
+      return { kind: "info", title: `Waiting for n8n's result of ${text(p.workflow)}`, detail: "The run continues by itself when n8n reports back", tone: "neutral" };
+    case "n8n.resumed_run":
+      return { kind: "state", title: `n8n reported back: the run continues`, tone: "good" };
+    case "n8n.resume_refused":
+      return { kind: "info", title: "n8n reported back; start the run again to continue", detail: text(p.reason) || undefined, tone: "warn" };
     case "repository.searched":
       return { kind: "tool", title: "Searched public repositories", tone: "neutral" };
     case "repository.imported":

@@ -63,14 +63,40 @@ describe("Composer", () => {
     expect(within(details as HTMLElement).getByText(/OPENCODE_ENABLED is false/)).toBeInTheDocument();
   });
 
-  it("declines a stack the backend cannot verify with the backend's own reason, and does not open the approval", async () => {
+  it("guesses no stack from keywords: the request goes to GPT, which chooses from the stacks this backend can verify", async () => {
     const api = stubApi();
     renderWithProviders(<Composer />, { api });
-    await userEvent.type(screen.getByLabelText(BOX), "Create a React dashboard for my sales data");
-    expect(await screen.findByRole("alert")).toHaveTextContent("React single-page app with Vite builds are not available on this backend yet: runtime is not approved.");
-    await userEvent.click(screen.getByRole("button", { name: "Build Application" }));
-    expect(screen.queryByRole("dialog", { name: "Review build spending" })).not.toBeInTheDocument();
-    expect(api.createProject).not.toHaveBeenCalled();
+    const dialog = await openDialog("Create a React dashboard for my sales data");
+    expect(screen.queryByText(/not available on this backend/)).not.toBeInTheDocument();
+    expect(within(dialog).getByText("Chosen by GPT from: Python command-line application")).toBeInTheDocument();
+  });
+
+  it("pauses before spending when the request names a repository it cannot read, and starts once the person decides", async () => {
+    const project = makeProject({ id: "p7", stack: "python-cli" });
+    const run = makeRun({ id: "r7", project_id: "p7" });
+    const needs = {
+      resources: [{ kind: "github" as const, key: "github:acme/secret@", url: "https://github.com/acme/secret", label: "acme/secret", full_name: "acme/secret",
+                    status: "authorization_required", message: "It may be private, or the name may be wrong.", action: "connect_github" as const }],
+      problems: [],
+      needs_permission: ["github:acme/secret@"],
+    };
+    const api = stubApi({
+      createProject: vi.fn(() => Promise.resolve(project)),
+      createRun: vi.fn(() => Promise.resolve(run)),
+      startRun: vi.fn(() => Promise.resolve(makeRun({ ...run, state: "ANALYZING" }))),
+      checkResources: vi.fn(() => Promise.resolve(needs)),
+    });
+    const onCreated = vi.fn();
+    renderWithProviders(<Composer onCreated={onCreated} />, { api });
+    await openDialog("Create a Python tool that improves https://github.com/acme/secret");
+    await userEvent.click(screen.getByRole("checkbox", { name: APPROVE }));
+    await userEvent.click(screen.getByRole("button", { name: "Approve and start build" }));
+    expect(await screen.findByRole("dialog", { name: "Permission needed" })).toBeInTheDocument();
+    expect(api.checkResources).toHaveBeenCalledWith("p7");
+    expect(api.startRun).not.toHaveBeenCalled(); // nothing is spent while the person decides
+    await userEvent.click(screen.getByRole("button", { name: "Build without it" }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(project, run));
+    expect(api.startRun).toHaveBeenCalledWith("r7", DEFAULT_BUDGET.run_limit_usd);
   });
 
   it("builds a weather forecast request on the Python stack after explicit approval", async () => {
@@ -98,18 +124,14 @@ describe("Composer", () => {
     await userEvent.click(checkbox);
     await userEvent.click(screen.getByRole("button", { name: "Approve and start build" }));
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith(project, run));
-    expect(api.createProject).toHaveBeenCalledWith({
-      name: "Create a weather forecast application",
-      requirement_text: "Create a weather forecast application\n\nTechnology stack selected by the user: Python command-line application (stack id: python-cli). Use this stack exactly.",
-      stack: "python-cli",
-    });
+    expect(api.createProject).toHaveBeenCalledWith({ name: "Create a weather forecast application", requirement_text: "Create a weather forecast application" }); // no stack: GPT chooses
     expect(api.createRun).toHaveBeenCalledWith("p9");
     expect(api.startRun).toHaveBeenCalledWith("r9", 2);
     expect(api.getCapabilities).toHaveBeenCalledTimes(2); // asked again at the moment of approval
     expect(api.getBudget).toHaveBeenCalledTimes(2);
   });
 
-  it("builds a website as a static site when the backend can verify static sites, and says so in the dialog", async () => {
+  it("offers every verifiable stack to GPT, a static site included, and sends the request as written", async () => {
     const SITE_READY: Capabilities = {
       ...DEFAULT_CAPABILITIES,
       stacks: [...DEFAULT_CAPABILITIES.stacks, { id: "static-html", name: "Static website", language: "html", frameworks: [], description: "HTML, CSS and JavaScript.", verifiable: true, reason: "verified in the self-tested image" }],
@@ -124,20 +146,21 @@ describe("Composer", () => {
     });
     renderWithProviders(<Composer />, { api });
     const dialog = await openDialog("Create a homepage for my bakery with opening hours");
-    expect(within(dialog).getByText("Static website")).toBeInTheDocument();
+    expect(within(dialog).getByText("Chosen by GPT from: Python command-line application, Static website")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("checkbox", { name: APPROVE }));
     await userEvent.click(screen.getByRole("button", { name: "Approve and start build" }));
     await waitFor(() => expect(api.createProject).toHaveBeenCalled());
-    expect(vi.mocked(api.createProject).mock.calls[0]?.[0]).toMatchObject({ stack: "static-html" });
+    expect(vi.mocked(api.createProject).mock.calls[0]?.[0]).toEqual({ name: "Create a homepage for my bakery with opening hours", requirement_text: "Create a homepage for my bakery with opening hours" });
   });
 
-  it("declines a website when this backend has no verifiable static-site stack, instead of building a Python app", async () => {
-    const api = stubApi();
+  it("blocks the start, with every stack's reason, when this backend can verify no kind of application", async () => {
+    const NONE: Capabilities = { ...DEFAULT_CAPABILITIES, stacks: DEFAULT_CAPABILITIES.stacks.map((s) => ({ ...s, verifiable: false })) };
+    const api = stubApi({ getCapabilities: async () => NONE });
     renderWithProviders(<Composer />, { api });
-    await userEvent.type(screen.getByLabelText(BOX), "Create a homepage for my bakery with opening hours");
-    expect(await screen.findByRole("alert")).toHaveTextContent("no static-html stack");
-    await userEvent.click(screen.getByRole("button", { name: "Build Application" }));
-    expect(screen.queryByRole("dialog", { name: "Review build spending" })).not.toBeInTheDocument();
+    const dialog = await openDialog("Create a homepage for my bakery with opening hours");
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("Setup required — no kind of application can be verified yet");
+    await userEvent.click(screen.getByRole("checkbox", { name: APPROVE }));
+    expect(screen.getByRole("button", { name: "Approve and start build" })).toBeDisabled();
     expect(api.createProject).not.toHaveBeenCalled();
   });
 

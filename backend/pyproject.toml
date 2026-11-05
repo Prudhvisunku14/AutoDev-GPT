@@ -16,6 +16,7 @@ dependencies = [
     "pyyaml>=6.0,<7.0",
     "openai>=2.54,<3.0",
     "httpx>=0.28,<1.0",
+    "cryptography>=44,<50",  # Fernet: the approved cipher for stored OAuth credentials (SECURITY.md §7)
 ]
 
 [project.scripts]

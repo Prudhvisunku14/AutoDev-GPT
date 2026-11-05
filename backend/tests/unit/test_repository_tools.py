@@ -13,6 +13,8 @@ from app.coding.simulated import SimulatedLauncher
 from app.db.models import Approval, ApprovalStatus, Run, RunState
 from app.verification.report import build_report
 from app.demo import mvp, weather
+from app.demo.gap import gap_step
+from app.tools.adapters.gap import register_gap_tool
 from app.orchestrator.fake_llm import FakeLLM, Step, call
 from app.repos.fixtures import OWNER, FixtureSource
 from app.tools.adapters.repositories import RepositoryRuntime, register_repository_tools
@@ -134,8 +136,14 @@ def _imported(r: Rig) -> None:
                           payload={"full_name": SUITABLE, "commit": COMMIT, "license": "MIT", "notices_file": "THIRD_PARTY_NOTICES.md", "license_files": ["LICENSE"]})  # fmt: skip
 
 
+def reused_opening() -> list[Step]:
+    analysis, plan, criteria = opening()
+    return [analysis, gap_step(mvp._CALCULATOR_ANALYSIS, test_path="test_calculator.py"), plan, criteria]
+
+
 def test_reused_code_is_not_delivered_without_its_licence_and_notice(tmp_path: Path) -> None:
-    r = Rig(tmp_path, *opening(), generate(1), generate(2), submit(), finish(), coding=[GOOD, TESTS])
+    r = Rig(tmp_path, *reused_opening(), generate(1), generate(2), submit(), finish(), coding=[GOOD, TESTS])
+    register_gap_tool(r.h.registry)
     _imported(r)
     assert r.advance().state is not RunState.COMPLETED and r.untouched()
     error = r.output("finish")["error"]
@@ -143,7 +151,8 @@ def test_reused_code_is_not_delivered_without_its_licence_and_notice(tmp_path: P
 
 
 def test_reused_code_is_delivered_with_its_licence_and_notice(tmp_path: Path) -> None:
-    r = Rig(tmp_path, *opening(), generate(1), generate(2), submit(), finish(), coding=[GOOD, TESTS])
+    r = Rig(tmp_path, *reused_opening(), generate(1), generate(2), submit(), finish(), coding=[GOOD, TESTS])
+    register_gap_tool(r.h.registry)
     r.h.workspace.write_text(r.project_id, "LICENSE", "MIT License\n")
     r.h.workspace.write_text(r.project_id, "THIRD_PARTY_NOTICES.md", "# Third-party code\n")
     _imported(r)

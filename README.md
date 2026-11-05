@@ -80,11 +80,13 @@ Requirement ─► GPT orchestrator (OpenAI Responses API, function calling)
                   │             classifies failures · verifies results
                   ├─► OpenCode (code generation, edit-only)
                   ├─► Docker sandbox (install · run · pytest · Playwright)
-                  ├─► Git / GitHub (import · checkpoints · publish with approval)
-                  ├─► Google Drive (OAuth, read-only, approval per import)
-                  ├─► n8n (notifications · workflow triggers · OpenCode-via-n8n)
-                  └─► Documents: PDF, DOCX, text (parsed in a no-network container, indexed in SQLite FTS5)
+                  ├─► GitHub (inspect named repos · import · gap analysis · PR or new repo, with approval)
+                  ├─► Google Drive (OAuth, read-only, per-project grants)
+                  ├─► n8n (signed workflow triggers and callbacks · notifications · run events)
+                  └─► Documents: PDF, DOCX, text (parsed in a no-network container, embedded, indexed in SQLite per project)
 ```
+
+**Prompt only.** Open the one-time sign-in link the launcher prints, type what you want, approve the run's spending limit, and approve anything else in small popups: a GitHub or Google connection the request needs, a pull request, a paid tool. Nobody pastes a token, picks a stack or names a tool. GPT chooses the stack from what this backend can verify, and reads the repositories and documents the request links to. The Tools page compares DevPilot's tools from recorded evidence, at no cost.
 
 **GPT decides, code governs.** GPT is the central orchestrator: it plans the work and chooses which actions to take. Deterministic backend code validates every action, enforces safety and limits, and computes the platform's three core algorithms.
 
@@ -241,6 +243,11 @@ Details: [docs/MILESTONE_1_GITHUB.md](docs/MILESTONE_1_GITHUB.md).
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): the four ways to run DevPilot and the proposed cloud architecture (not deployed)
 - [docs/WEBSITES_AND_REPOSITORIES.md](docs/WEBSITES_AND_REPOSITORIES.md): your own GitHub repositories (public and private), repository inspection, the website verifier and its network controls, and the capability status of website generation
 - [docs/MILESTONE_1_GITHUB.md](docs/MILESTONE_1_GITHUB.md): GitHub-assisted development (repository discovery, evaluation and safe import, offline-tested with fixtures), the weather application's specification, and what a first real run needs
+- [docs/FEATURE_STATUS.md](docs/FEATURE_STATUS.md): every feature by its strongest evidence (tested live, tested offline, blocked here, not built), and the requirements still missing
+- [docs/LIVE_TEST_PLAN.md](docs/LIVE_TEST_PLAN.md): the step-by-step live test plan for scenarios A–H, cheapest first, with what each needs and what counts as a pass
+- [docs/COMPETITION_SCENARIOS.md](docs/COMPETITION_SCENARIOS.md): the truthful capability matrix. For each competition scenario: what is built, what has run live, and what it still needs
+- [docs/ADDING_A_STACK.md](docs/ADDING_A_STACK.md): how a new framework is added (catalog entry, recipe, runtime image, approval) and which stacks are verifiable here
+- [n8n/README.md](n8n/README.md): the signed n8n workflows, and running them on a local n8n
 - [CLAUDE.md](CLAUDE.md): rules for the AI development assistant used to build this project
 
 ## Acknowledgements

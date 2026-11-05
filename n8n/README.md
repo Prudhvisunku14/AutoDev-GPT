@@ -8,8 +8,13 @@ DevPilot triggers only the workflows registered in [`config/n8n_workflows.yaml`]
 |---|---|---|
 | `workflows/devpilot-echo.json` | `echo` | Verifies the signature, then posts the text back, signed. Use it to check both directions. |
 | `workflows/devpilot-notify.json` | `notify` | Verifies the signature and passes on `title` and `message`. Replace its last node with your channel (Slack, email, …). |
+| `workflows/devpilot-run-events.json` | `run-events` | Verifies the signature and formats one run event (`event`, `summary`) as a line for a team channel, for example "delivered", "failed" or "waiting for approval". Replace its last node with your channel. |
 
 ## Trying it with a local n8n
+
+**Shortcut:** `.\scripts\n8n-local.ps1` starts n8n on `127.0.0.1:5678`, keeps its data in `D:\DevPilotCache\n8n`, passes the secret from `.env` without printing it, and imports all three templates. Activate them in the editor afterwards. The first start pulls the n8n image, about 600 MB. Then the opt-in live test checks the real round trip: `$env:RUN_LIVE_N8N_TESTS='true'` with `N8N_WEBHOOK_SECRET` and `N8N_API_KEY` set in the terminal, and `pytest tests/live/test_n8n_live.py`.
+
+By hand:
 
 1. Start n8n on loopback only. The secret must be the same value as DevPilot's `N8N_WEBHOOK_SECRET`:
 

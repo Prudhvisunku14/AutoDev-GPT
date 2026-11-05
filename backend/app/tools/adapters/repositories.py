@@ -184,6 +184,9 @@ def _record(ctx: ToolContext, event_type: str, payload: dict[str, Any]) -> None:
 
 
 def register_repository_tools(registry: ToolRegistry, runtime: RepositoryRuntime) -> None:
+    from app.tools.adapters.gap import register_gap_tool  # here, not at the top: the gap tool reads this module's records
+
+    register_gap_tool(registry)  # a run that can import code must compare it with the requirements before planning
     registry.register(
         ToolSpec(
             name="search_repositories",

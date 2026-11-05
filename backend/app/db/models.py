@@ -355,6 +355,18 @@ class ToolOutcome(Base):
     recovery_action: Mapped[str | None] = mapped_column(String(16), default=None)  # the decision that led to it
 
 
+class WebSession(Base):
+    """A signed-in dashboard browser (app/core/sessions.py). Only a SHA-256 of the cookie's value is stored."""
+
+    __tablename__ = "web_sessions"
+
+    id_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    last_used_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    remember: Mapped[bool] = mapped_column(default=False)
+
+
 class Event(Base):
     """Append-only execution log. `seq` is monotonic per project."""
 

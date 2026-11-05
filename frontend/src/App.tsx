@@ -8,6 +8,7 @@ import { Projects } from "./pages/Projects";
 import { RunDetail } from "./pages/RunDetail";
 import { Runs } from "./pages/Runs";
 import { Templates } from "./pages/Templates";
+import { Tools } from "./pages/Tools";
 
 function NotFound() {
   return (
@@ -27,6 +28,7 @@ export function AppRoutes() {
         <Route path="runs" element={<Runs />} />
         <Route path="runs/:runId" element={<RunDetail />} />
         <Route path="templates" element={<Templates />} />
+        <Route path="tools" element={<Tools />} />
         <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>

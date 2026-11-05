@@ -52,6 +52,8 @@ from app.orchestrator.run_control import change_state, end_run, pause_run
 from app.orchestrator.state_machine import ORCHESTRATED_STATES, REQUIRED_PHASE
 from app.coding.types import CodingProvider
 from app.sandbox.runner import SandboxRunner
+from app.sources.check import for_gpt
+from app.sources.events import latest_check
 from app.stacks.catalog import StackCatalog
 from app.tools.adapters.workspace_fs import WorkspaceFS
 from app.tools.base import ErrorClass, RecoveryInfo, ToolContext, ToolResult
@@ -312,6 +314,8 @@ class Orchestrator:
             assert run is not None
             if run.is_terminal or run.state is RunState.AWAITING_APPROVAL:
                 return None
+            if run.pause_reason:  # a tool paused the run (wait_for_workflow): no further GPT call until it is resumed
+                return None
             if run.state not in self._orchestrated:
                 needed = REQUIRED_PHASE.get(run.state, "a later phase")
                 pause_run(
@@ -344,7 +348,9 @@ class Orchestrator:
             if run.last_response_id is None:
                 project = s.get(Project, run.project_id)
                 assert project is not None
-                messages.insert(0, prompts.initial_message(project.name, project.requirement_text))
+                checked = latest_check(s, project.id)
+                resources = for_gpt(checked["resources"]) if checked and checked.get("resources") else None
+                messages.insert(0, prompts.initial_message(project.name, project.requirement_text, resources))
             if not items and not messages:
                 messages.append(prompts.continue_message(run.state))
             items.extend({"role": "user", "content": m} for m in messages)

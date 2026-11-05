@@ -1,4 +1,4 @@
-import { FolderOpen, LayoutGrid, PanelLeftClose, PanelLeftOpen, PlayCircle, Plus } from "lucide-react";
+import { FolderOpen, LayoutGrid, PanelLeftClose, PanelLeftOpen, PlayCircle, Plus, Wrench } from "lucide-react";
 import { NavLink, useNavigate } from "react-router";
 import { cn } from "../../lib/cn";
 import { Logo } from "../Logo";
@@ -7,6 +7,7 @@ export const NAV = [
   { to: "/projects", label: "Projects", icon: FolderOpen },
   { to: "/templates", label: "Templates", icon: LayoutGrid },
   { to: "/runs", label: "Runs", icon: PlayCircle },
+  { to: "/tools", label: "Tools", icon: Wrench },
 ] as const;
 
 /** The navigation itself, shared by the fixed sidebar and the mobile drawer. `narrow` shows icons only. */

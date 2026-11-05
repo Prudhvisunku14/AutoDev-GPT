@@ -3,22 +3,23 @@ import { ArrowUp, Loader2, Sparkles } from "lucide-react";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { ApiError } from "../lib/api";
 import { useApi } from "../lib/apiContext";
-import { projectNameFrom, requirementForStack } from "../lib/capabilities";
-import { decideStack, requestedStack, validatePrompt, DEFAULT_STACK_ID } from "../lib/prompt";
+import { projectNameFrom } from "../lib/capabilities";
+import { validatePrompt, verifiableStacks } from "../lib/prompt";
 import { assessReadiness } from "../lib/readiness";
 import { keys, useBudget, useCapabilities, useStatus } from "../lib/queries";
 import { cn } from "../lib/cn";
-import type { Project, Run } from "../lib/types";
+import type { Project, ResourceCheck, Run } from "../lib/types";
 import { BuildStatus } from "./BuildStatus";
+import { PermissionDialog } from "./PermissionDialog";
 
 const MAX_HEIGHT = 320;
 
 /**
  * Collects a requirement, then asks for explicit approval of the spending limit the backend enforces before creating
- * and starting a run. The stack comes from the request (decideStack) and is built only if the backend's capabilities say
- * it can be verified; otherwise the request is declined with the backend's reason, never turned into another kind of
- * application. The dialog names the stack. Whether a build may start is the backend's answer (assessReadiness), checked
- * again on fresh data at the moment of approval and once more by the backend itself when the run starts.
+ * and starting a run. No stack is chosen here: GPT analyses the request and picks one from the backend's catalog, and the
+ * backend's code refuses to code or deliver a stack it cannot verify. The dialog lists the stacks this backend can verify.
+ * Whether a build may start is the backend's answer (assessReadiness), checked again on fresh data at the moment of
+ * approval and once more by the backend itself when the run starts.
  */
 export function Composer({ initialPrompt = "", onCreated }: { initialPrompt?: string; onCreated?: (project: Project, run: Run, error?: string) => void }) {
   const [prompt, setPrompt] = useState(initialPrompt);
@@ -26,6 +27,8 @@ export function Composer({ initialPrompt = "", onCreated }: { initialPrompt?: st
   const [confirming, setConfirming] = useState(false);
   const [spendApproved, setSpendApproved] = useState(false);
   const [busy, setBusy] = useState(false);
+  // A project whose request names a repository or document DevPilot cannot read yet: the run waits for the person's permission.
+  const [gate, setGate] = useState<{ project: Project; run: Run; limit: number; checked: ResourceCheck } | null>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const dialog = useRef<HTMLElement>(null);
   const submissionLock = useRef(false);
@@ -35,16 +38,15 @@ export function Composer({ initialPrompt = "", onCreated }: { initialPrompt?: st
   const capabilities = useCapabilities();
   const budget = useBudget();
   const backendStatus = useStatus();
-  const decision = decideStack(prompt, capabilities.data?.stacks);
-  const stackId = decision.stack?.id ?? requestedStack(prompt).stackId ?? DEFAULT_STACK_ID;
+  const buildable = verifiableStacks(capabilities.data?.stacks);
   const readiness = assessReadiness({
     capabilities: capabilities.data,
     budget: budget.data,
     status: backendStatus.data,
-    stackId,
+    stackId: null, // GPT chooses
     failed: { capabilities: capabilities.error, budget: budget.error, status: backendStatus.error },
   });
-  const unsupported = decision.refusal;
+  const unsupported: string | null = null;
   const loading = capabilities.isLoading || budget.isLoading || backendStatus.isLoading;
 
   useEffect(() => {
@@ -98,32 +100,23 @@ export function Composer({ initialPrompt = "", onCreated }: { initialPrompt?: st
         setError("The spending limit changed. Please approve the new limit.");
         return;
       }
-      const chosen = decideStack(prompt, freshCapabilities.stacks); // the backend may have changed since the dialog opened
-      if (chosen.refusal || !chosen.stack) {
-        setError(chosen.refusal ?? "This request cannot be built on this backend.");
-        return;
-      }
-      const stack = chosen.stack;
-      const fresh = assessReadiness({ capabilities: freshCapabilities, budget: freshBudget, status, stackId: stack.id });
+      const fresh = assessReadiness({ capabilities: freshCapabilities, budget: freshBudget, status, stackId: null }); // the backend may have changed
       if (!fresh.ready) {
         setError(fresh.summary);
         return;
       }
-      const project = await api.createProject({ name: projectNameFrom(prompt), requirement_text: requirementForStack(prompt, stack), stack: stack.id });
+      // The request goes as written: GPT chooses the stack, and the backend refuses any it cannot verify.
+      const project = await api.createProject({ name: projectNameFrom(prompt), requirement_text: prompt.trim() });
       const run = await api.createRun(project.id);
-      try {
-        await api.startRun(run.id, freshBudget.run_limit_usd);
-      } catch (failure) {
-        const message = failure instanceof Error ? failure.message : "The run could not be started.";
-        await Promise.all([client.invalidateQueries({ queryKey: keys.projects }), client.invalidateQueries({ queryKey: keys.runs })]);
+      // Repositories and documents the request names are read now, so GPT starts from what they contain. One that needs the
+      // person's permission pauses here, before anything is spent.
+      const checked = await api.checkResources(project.id).catch(() => null);
+      if (checked && checked.needs_permission.length > 0) {
         setConfirming(false);
-        onCreated?.(project, run, message);
+        setGate({ project, run, limit: freshBudget.run_limit_usd, checked });
         return;
       }
-      await Promise.all([client.invalidateQueries({ queryKey: keys.projects }), client.invalidateQueries({ queryKey: keys.runs })]);
-      setPrompt("");
-      setConfirming(false);
-      onCreated?.(project, run);
+      await begin(project, run, freshBudget.run_limit_usd);
     } catch (failure) {
       if (failure instanceof ApiError && [0, 401, 503].includes(failure.status)) {
         await Promise.all([
@@ -135,6 +128,34 @@ export function Composer({ initialPrompt = "", onCreated }: { initialPrompt?: st
       setError(failure instanceof Error ? failure.message : "The build could not be prepared.");
     } finally {
       submissionLock.current = false;
+      setBusy(false);
+    }
+  }
+
+  async function begin(project: Project, run: Run, limit: number) {
+    try {
+      await api.startRun(run.id, limit);
+    } catch (failure) {
+      const message = failure instanceof Error ? failure.message : "The run could not be started.";
+      await Promise.all([client.invalidateQueries({ queryKey: keys.projects }), client.invalidateQueries({ queryKey: keys.runs })]);
+      setConfirming(false);
+      onCreated?.(project, run, message);
+      return;
+    }
+    await Promise.all([client.invalidateQueries({ queryKey: keys.projects }), client.invalidateQueries({ queryKey: keys.runs })]);
+    setPrompt("");
+    setConfirming(false);
+    onCreated?.(project, run);
+  }
+
+  async function continueAfterPermission() {
+    if (!gate) return;
+    const { project, run, limit } = gate;
+    setGate(null);
+    setBusy(true);
+    try {
+      await begin(project, run, limit);
+    } finally {
       setBusy(false);
     }
   }
@@ -195,6 +216,20 @@ export function Composer({ initialPrompt = "", onCreated }: { initialPrompt?: st
         </div>
       </form>
 
+      {gate && (
+        <PermissionDialog
+          projectId={gate.project.id}
+          initial={gate.checked}
+          onReady={() => void continueAfterPermission()}
+          onSkip={() => void continueAfterPermission()}
+          onCancel={() => {
+            const { project, run } = gate;
+            setGate(null);
+            onCreated?.(project, run, "The build was not started: permission for a named resource was not granted.");
+          }}
+        />
+      )}
+
       {confirming && budget.data && (
         // The overlay never scrolls the page behind it. The dialog is as tall as the viewport allows: its body scrolls,
         // and the approval checkbox and both buttons stay in the footer, reachable at any height.
@@ -214,7 +249,7 @@ export function Composer({ initialPrompt = "", onCreated }: { initialPrompt?: st
             <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 [overflow-wrap:anywhere] sm:px-6" data-testid="spend-body">
               <dl className="space-y-2 rounded-xl bg-slate-50 p-3 text-sm sm:p-4">
                 <div className="flex justify-between gap-3"><dt className="shrink-0 text-muted">Application</dt><dd className="min-w-0 text-right font-medium">{projectNameFrom(prompt)}</dd></div>
-                <div className="flex justify-between gap-3"><dt className="shrink-0 text-muted">Builds as</dt><dd className="min-w-0 text-right font-medium">{decision.stack?.name ?? "Checking the backend…"}</dd></div>
+                <div className="flex justify-between gap-3"><dt className="shrink-0 text-muted">Builds as</dt><dd className="min-w-0 text-right font-medium">{buildable.length ? `Chosen by GPT from: ${buildable.map((stack) => stack.name).join(", ")}` : "Checking the backend…"}</dd></div>
                 <div className="flex justify-between gap-3"><dt className="text-muted">Maximum spending</dt><dd className="font-semibold">${budget.data.run_limit_usd.toFixed(2)}</dd></div>
               </dl>
               {(error || !readiness.ready) && (

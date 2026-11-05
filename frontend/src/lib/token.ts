@@ -6,6 +6,15 @@ import { useSyncExternalStore } from "react";
 // "Disconnect" forgets it too.
 
 const KEY = "devpilot-token";
+/**
+ * What is stored once the browser is signed in with a session cookie (POST /session): a marker, not a secret. The cookie
+ * itself is HttpOnly, so no page script can read it, and the API token is never kept by the browser.
+ */
+export const SESSION = "session-cookie";
+
+export function isSessionMarker(value: string | null): boolean {
+  return value === SESSION;
+}
 const listeners = new Set<() => void>();
 
 function storages(): Storage[] {

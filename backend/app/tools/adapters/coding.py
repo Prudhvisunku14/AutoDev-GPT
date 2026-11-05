@@ -226,8 +226,14 @@ def _brief_input(ctx: ToolContext, task: PlanTask, args: GenerateCodeArgs, *, st
     return BriefInput(
         task_order=task.order, total_tasks=total, title=task.title, description=task.description, capability=task.capability,
         requirements=requirements, criteria=criteria, stack_id=stack_id, language=language, instructions=args.instructions,
-        existing_files=files, last_failure=_last_failure(run),
+        existing_files=files, last_failure=_last_failure(run), gap=_gap_brief(ctx),
     )  # fmt: skip
+
+
+def _gap_brief(ctx: ToolContext) -> str:
+    from app.tools.adapters.gap import brief_text, recorded_gap
+
+    return brief_text(recorded_gap(ctx.session, ctx.run.id))
 
 
 def _last_failure(run: Run) -> str:

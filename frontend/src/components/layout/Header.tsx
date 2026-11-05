@@ -1,6 +1,7 @@
 import { Bell, LogOut, Menu, Server } from "lucide-react";
 import { Link } from "react-router";
 import { useApprovals, useStatus } from "../../lib/queries";
+import { useApi } from "../../lib/apiContext";
 import { clearToken } from "../../lib/token";
 import { BudgetIndicator } from "../BudgetIndicator";
 import { Popover } from "../Popover";
@@ -38,6 +39,11 @@ function Notifications() {
 
 function AccountMenu() {
   const status = useStatus();
+  const api = useApi();
+  async function signOut() {
+    await api.signOut().catch(() => undefined); // ends the session cookie on the backend; forgetting it here happens either way
+    clearToken();
+  }
   return (
     <Popover
       label="Account and backend"
@@ -73,7 +79,7 @@ function AccountMenu() {
       ) : (
         <p className="mt-2 text-[13px] text-muted">{status.isError ? "The backend status could not be read." : "Loading…"}</p>
       )}
-      <button type="button" onClick={clearToken} className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-line px-3 py-2 text-[13px] font-medium hover:bg-slate-50">
+      <button type="button" onClick={() => void signOut()} className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-line px-3 py-2 text-[13px] font-medium hover:bg-slate-50">
         <LogOut className="size-4" aria-hidden />
         Forget the API token
       </button>

@@ -50,8 +50,13 @@ export function assessReadiness({ capabilities, budget, status, stackId, failed 
       if (!part.ready) block(short, part.detail ?? short);
     }
     for (const problem of capabilities.problems) if (!details.some((existing) => existing.includes(problem) || problem.includes(existing))) details.push(problem);
-    const stack = capabilities.stacks.find((candidate) => candidate.id === stackId);
-    if (!stack?.verifiable) block("Setup required — Python applications cannot be verified yet", stack?.reason ?? "The Python stack is not available on this backend.");
+    if (stackId) {
+      const stack = capabilities.stacks.find((candidate) => candidate.id === stackId);
+      if (!stack?.verifiable) block(`Setup required — ${stack?.name ?? stackId} cannot be verified yet`, stack?.reason ?? `The ${stackId} stack is not available on this backend.`);
+    } else if (!capabilities.stacks.some((stack) => stack.verifiable)) {
+      // GPT chooses the stack: at least one must be verifiable here, or nothing could be delivered
+      block("Setup required — no kind of application can be verified yet", capabilities.stacks.map((stack) => `${stack.name}: ${stack.reason}`).join(" "));
+    }
     if (!capabilities.can_build && !summary) block("Setup required — the backend cannot build yet", "The backend reports that builds cannot start.");
   }
   if (budget && !budget.cost_known) block("Setup required — spending prices are not set", budget.estimate);

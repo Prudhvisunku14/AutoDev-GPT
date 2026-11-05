@@ -1,14 +1,15 @@
 import { KeyRound, Loader2 } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ApiError, UnauthorizedError } from "../lib/api";
 import { useApi } from "../lib/apiContext";
-import { cleanToken, setToken } from "../lib/token";
+import { SESSION, cleanToken, setToken } from "../lib/token";
 import { Notice } from "./Notice";
 
 /**
- * Asks for the backend's API token and checks it against /status before keeping it, so a wrong token is never stored
- * and this card stays on screen to say why. By default the token is remembered on this computer, so a new tab or a
- * browser restart does not ask again; unticking keeps it in this tab only.
+ * Signs the dashboard in. The usual way needs no typing: the launcher prints a one-time link (`#login=<code>`), and opening it
+ * signs this browser in. Otherwise the person pastes the API token once; it goes to POST /session, which answers with an
+ * HttpOnly session cookie, and the token itself is never kept by the browser. A wrong token is refused and this card says
+ * why. "Remember" keeps the cookie after the browser closes; unticked, it ends with the browser session.
  */
 export function ConnectCard() {
   const api = useApi();
@@ -16,6 +17,31 @@ export function ConnectCard() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [remember, setRemember] = useState(true);
+  const probed = useRef(false);
+
+  useEffect(() => {
+    if (probed.current) return; // once, even under React's double effects in development
+    probed.current = true;
+    const code = new URLSearchParams(window.location.hash.slice(1)).get("login");
+    if (code) {
+      window.history.replaceState(null, "", window.location.pathname + window.location.search); // the code works once: never leave it in the address bar
+      setBusy(true);
+      api
+        .exchangeLogin(code)
+        .then(() => setToken(SESSION, { remember: true }))
+        .catch((failure: unknown) => {
+          setBusy(false);
+          setError(failure instanceof Error ? failure.message : "The sign-in link did not work: open the newest one the launcher printed.");
+        });
+      return;
+    }
+    api
+      .getSession()
+      .then((session) => {
+        if (session.authenticated) setToken(SESSION, { remember: true }); // already signed in by cookie, in another tab or before a restart
+      })
+      .catch(() => undefined); // an older backend without sessions: the token form below still works
+  }, [api]);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -27,7 +53,7 @@ export function ConnectCard() {
     setBusy(true);
     setError(null);
     try {
-      await api.checkToken(token);
+      await api.signIn(token, remember);
     } catch (failure) {
       setBusy(false);
       setError(
@@ -39,7 +65,7 @@ export function ConnectCard() {
       );
       return;
     }
-    setToken(token, { remember }); // this card unmounts here: the layout now shows the page
+    setToken(SESSION, { remember }); // only a marker: the cookie is HttpOnly and the token is not kept. This card unmounts here
   }
 
   return (

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.demo.gap import gap_step
 from app.orchestrator.fake_llm import Step, call
 from app.verification.acceptance import AcceptanceSuite, SuiteCriterion
 
@@ -214,7 +215,7 @@ def fullstack_steps(backend: str, commit: str) -> list[Step]:
     return [
         call("submit_analysis", ANALYSIS), call("search_repositories", BACKEND_SEARCH), call("search_repositories", FRONTEND_SEARCH),
         call("import_repository", {"full_name": backend, "commit": commit, "component": "backend"}), again,
-        call("submit_plan", FULLSTACK_PLAN), call("submit_criteria", FULL_CRITERIA), call("generate_code", {"task_order": 1, "instructions": "Adapt the reused back end."}),
+        gap_step(ANALYSIS, test_path="backend/tests/test_devpilot_contract.py", component="the reused back end"), call("submit_plan", FULLSTACK_PLAN), call("submit_criteria", FULL_CRITERIA), call("generate_code", {"task_order": 1, "instructions": "Adapt the reused back end."}),
     ]  # fmt: skip
 
 
@@ -224,5 +225,5 @@ def offline_steps(full_name: str, commit: str, *, scope: str = "full") -> list[S
     analysis, plan = (ANALYSIS, PLAN) if scope == "full" else (BACKEND_ANALYSIS, BACKEND_PLAN)
     return [
         call("submit_analysis", analysis), call("search_repositories", SEARCH), call("import_repository", {"full_name": full_name, "commit": commit}),
-        call("submit_plan", plan), call("submit_criteria", CRITERIA), call("generate_code", {"task_order": 1, "instructions": "Adapt the imported back end to the weather contract."}),
+        gap_step(analysis, test_path="tests/test_devpilot_contract.py"), call("submit_plan", plan), call("submit_criteria", CRITERIA), call("generate_code", {"task_order": 1, "instructions": "Adapt the imported back end to the weather contract."}),
     ]  # fmt: skip

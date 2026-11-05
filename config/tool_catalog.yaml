@@ -1,0 +1,176 @@
+# DevPilot's development tools: what each one is for, what it is good and bad at, what it needs, and the evidence for it.
+#
+# This file holds only reviewed facts. Whether a tool is usable right now is NOT written here: the backend computes
+# readiness from its running configuration (app/toolcatalog/live.py). Evidence lines cite where the result is recorded
+# (docs/PROGRESS.md and the milestone documents). Never add a tool DevPilot has no adapter for, never add a benchmark that
+# was not measured, and never raise an evidence level past what really ran.
+#
+# Evidence levels, weakest to strongest:
+#   documentation   - what the tool's own documentation says; nothing ran here
+#   offline_test    - DevPilot's automated tests with fakes (scripted model, simulated service)
+#   real_container  - real Docker containers on this computer, with a scripted model
+#   live            - the real service or model was used
+# Outcomes: passed | failed | partial.
+
+tasks:
+  requirement_analysis: Turn a natural-language request into numbered, testable requirements
+  architecture: Choose the stack, components and plan
+  tool_selection: Decide which tool does each step
+  acceptance_criteria: Write acceptance criteria and freeze their checks before coding
+  gap_analysis: Compare existing code with the requirements before planning
+  code_generation: Write a new application's source files
+  code_modification: Change existing source code
+  debugging: Find and repair failures from test output
+  test_generation: Write automated tests
+  documentation: Write README and usage notes
+  test_execution: Run tests in an isolated container
+  browser_verification: Check a website in a real browser against frozen checks
+  repository_search: Find public repositories similar to a request
+  source_reuse: Inspect and import existing repository code at a pinned commit
+  repository_publish: Create a repository, branch, commit or pull request
+  document_access: Read documents the user authorized
+  rag_indexing: Chunk, embed and index documents with citations
+  workflow_automation: Run an automation workflow and receive its result
+  notifications: Send notifications and forward events to other services
+
+tools:
+  gpt:
+    name: GPT (OpenAI Responses API)
+    role: orchestrator
+    aliases: [gpt, openai, chatgpt, "gpt-5", llm, model, orchestrator]
+    description: >-
+      The only orchestrator. It analyses the request, plans, writes acceptance criteria and decides which tool runs next,
+      through strict function calls that DevPilot's code validates and governs.
+    tasks: [requirement_analysis, architecture, tool_selection, acceptance_criteria, gap_analysis]
+    functions: [submit_analysis, submit_plan, submit_criteria, request_human_input, compare_tools, submit_gap_analysis]
+    advantages:
+      - Understands free-form requests and explains its choices
+      - Every call is bounded by the run's dollar and token limits before it is sent
+    limitations:
+      - Each call costs money, so a run needs an approved spending limit
+      - It never runs code itself; every action goes through a validated tool
+    requirements: [OPENAI_API_KEY in the backend's .env, prices and an output cap set, spending approval per run]
+    evidence:
+      - {level: live, outcome: passed, date: 2026-10-29, summary: "First live call: the analysis was accepted (1 call, 919 tokens)", source: docs/PROGRESS.md}
+      - {level: live, outcome: passed, date: 2026-11-03, summary: "Planning CLI: 32 requirements and 9 tasks accepted by the gates, 2 requests, about $0.039", source: docs/PROGRESS.md}
+
+  opencode:
+    name: OpenCode
+    role: coding engine
+    aliases: [opencode, "open code", coding engine, coder]
+    description: >-
+      The coding engine. It writes and changes files in a disposable copy of the project inside Docker, reaching the model
+      only through DevPilot's metered gateway. Its work counts only after the frozen tests pass.
+    tasks: [code_generation, code_modification, debugging, test_generation, documentation]
+    functions: [generate_code, submit_implementation, finish]
+    advantages:
+      - Edits many files with real tools (read, search, patch) instead of returning one blob of text
+      - Runs in containers with no route out except the metered gateway, which holds the only copy of the key
+    limitations:
+      - Python command-line programs are its only shown stack; static websites are declared at a reduced weight
+      - React and FastAPI builds stay blocked until their verification runtimes are built and approved
+    requirements: [Docker Desktop running, the approved devpilot/opencode-runtime image, the live launcher (scripts/live_server.py)]
+    evidence:
+      - {level: real_container, outcome: passed, date: 2026-11-01, summary: "Real OpenCode on real containers wrote files behind the filter and gateway; the model was scripted", source: docs/PROGRESS.md}
+      - {level: live, outcome: failed, date: 2026-11-03, summary: "First real build: task 1 completed, task 2 failed on DevPilot's own gateway budget; nothing delivered", source: docs/FIRST_REAL_BUILD.md}
+
+  docker:
+    name: Docker sandbox
+    role: execution and verification
+    aliases: [docker, sandbox, container, containers]
+    description: >-
+      Runs generated code and its tests in throwaway containers with no network, memory, CPU and process limits, and a
+      timeout. Generated code never runs on the host.
+    tasks: [test_execution]
+    functions: [run_sandbox_command, submit_implementation]
+    advantages:
+      - Isolation is enforced by container settings, not by asking the model
+      - The same frozen tests judge every attempt
+    limitations:
+      - Only stacks with an approved runtime image can be verified
+      - Needs Docker Desktop with WSL2 running on this computer
+    requirements: [Docker Desktop running, approved runtime images]
+    evidence:
+      - {level: real_container, outcome: passed, date: 2026-10-30, summary: "No network, timeout kill and memory limit verified on real containers", source: docs/PROGRESS.md}
+
+  web_verifier:
+    name: Website verifier (Chromium in Docker)
+    role: verification
+    aliases: [chromium, browser, playwright, website verifier, verify-web]
+    description: >-
+      Serves a generated static website in a container and checks it in Chromium against browser checks frozen before
+      coding: visible text, roles, labels and console errors.
+    tasks: [browser_verification]
+    functions: [submit_implementation]
+    advantages:
+      - Judges a site by what a visitor sees, not by its source
+    limitations:
+      - Static HTML, CSS and JavaScript only; React + Vite needs its own runtime
+      - The image must be built and self-tested on this computer first (devpilot setup --web)
+    requirements: [Docker Desktop running, the devpilot/verify-web image self-tested here]
+    evidence:
+      - {level: real_container, outcome: passed, date: 2026-11-04, summary: "Scripted pipeline: a broken site failed a frozen browser check, was repaired and delivered", source: docs/WEBSITES_AND_REPOSITORIES.md}
+
+  n8n:
+    name: n8n
+    role: workflow automation
+    aliases: [n8n, "n8n.io", workflow, workflows, automation]
+    description: >-
+      Runs registered automation workflows through signed webhooks, and receives their results through a signed callback.
+      Each workflow declares its effect, and anything that writes waits for a person's approval.
+    tasks: [workflow_automation, notifications]
+    functions: [trigger_workflow, get_workflow_result, wait_for_workflow]
+    advantages:
+      - Hundreds of ready-made service connectors without writing integration code
+      - Signed requests both ways, with a replay guard and an egress allowlist
+    limitations:
+      - A waiting run is resumed by its callback only before the deadline and within the approved limit; with REQUIRE_SPEND_APPROVAL a person continues it
+      - It cannot write code; OpenCode through n8n is not implemented
+    requirements: [a running n8n instance, N8N_ENABLED, N8N_WEBHOOK_SECRET, the workflows imported and active]
+    evidence:
+      - {level: offline_test, outcome: passed, date: 2026-11-04, summary: "Signed triggers, signed callbacks and the health check, against a simulated n8n", source: docs/PROGRESS.md}
+
+  github:
+    name: GitHub
+    role: source discovery, reuse and publishing
+    aliases: [github, "github.com", git, repository, repositories, repo]
+    description: >-
+      Finds public repositories, reads a repository the user names at a pinned commit (public ones automatically,
+      private ones through the user's GitHub connection), imports approved code into an isolated workspace, and publishes
+      the verified project as a pull request on a new branch or as a new repository, after the user's approval.
+    tasks: [repository_search, source_reuse, repository_publish]
+    functions: [search_repositories, import_repository, publish_repository_changes]
+    advantages:
+      - Reuses working code and keeps its licence and attribution
+      - Every write waits for a person's approval
+    limitations:
+      - Private repositories and every write need the user to connect their GitHub account
+      - A pull request carries only added and changed files; deletions are listed, never pushed
+      - Imported code is untrusted and is never run outside the sandbox
+    requirements: [REPOSITORY_SOURCE=github, the GitHub egress entries, a GitHub OAuth App and DEVPILOT_TOKEN_KEY for private repositories and writes]
+    evidence:
+      - {level: offline_test, outcome: passed, date: 2026-11-02, summary: "Discovery, evaluation, licence checks and safe import, against recorded fixtures", source: docs/MILESTONE_1_GITHUB.md}
+
+  google_drive:
+    name: Google Drive
+    role: document access
+    aliases: [google drive, drive, gdrive, google docs, docs]
+    description: >-
+      Reads only the Drive files and folders the user authorized, parses them in the no-network parser container, and
+      indexes them for retrieval with citations.
+    tasks: [document_access, rag_indexing]
+    functions: [request_drive_authorization, discover_drive_documents, ingest_drive_documents, build_rag_index, configure_retrieval, prepare_rag_application, revoke_drive_authorization]
+    advantages:
+      - Read-only scopes, encrypted refresh tokens, and revocation that deletes everything read
+    limitations:
+      - Needs a Google OAuth client created by the user
+      - Documents are refused until the parser container image is approved
+    requirements: [DRIVE_SOURCE=google, a Google OAuth client, DEVPILOT_TOKEN_KEY, the cryptography package, the parser image]
+    evidence:
+      - {level: offline_test, outcome: passed, date: 2026-11-03, summary: "OAuth contracts, grants, ingestion and retrieval against a simulated Drive", source: docs/MILESTONE_2_GOOGLE_DRIVE_RAG.md}
+
+# Named in the design but not built. They are listed so a question about them gets a truthful answer.
+planned:
+  opencode_via_n8n:
+    name: OpenCode through n8n
+    description: Running the coding engine from an n8n workflow. Not implemented; nothing calls OpenCode through n8n.

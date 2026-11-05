@@ -157,6 +157,10 @@ def submit_analysis(ctx: ToolContext, args: SubmitAnalysisArgs) -> dict[str, obj
 
 
 def submit_plan(ctx: ToolContext, args: SubmitPlanArgs) -> dict[str, object]:
+    from app.tools.adapters.gap import needs_gap_analysis, recorded_gap  # imported here: the gap tool reads the repository adapter's records
+
+    if needs_gap_analysis(ctx) and recorded_gap(ctx.session, ctx.run.id) is None:
+        raise ToolError(ErrorClass.VALIDATION_FAILED, "this project starts from existing code: call submit_gap_analysis first, so the plan builds on what exists")
     problems: list[str] = []
     known = set(_requirement_codes(ctx))
     stack = ctx.catalog.get(args.stack)

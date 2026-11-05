@@ -5,6 +5,11 @@ import type {
   BackendStatus,
   Budget,
   Capabilities,
+  GitHubStatus,
+  N8nHealth,
+  ResourceCheck,
+  ToolAnswer,
+  ToolsListing,
   Criterion,
   FileContent,
   FileList,
@@ -18,6 +23,7 @@ import type {
   RunListItem,
   RunEvent,
 } from "./types";
+import { isSessionMarker } from "./token";
 
 // Typed client for the existing FastAPI backend (/api/v1). Starting a run requires an explicit spending cap.
 
@@ -56,7 +62,8 @@ export function createApiClient({ baseUrl, getToken, fetchImpl }: ApiClientOptio
   async function send(path: string, init: { method?: "GET" | "POST"; body?: unknown; token?: string } = {}): Promise<Response> {
     const headers: Record<string, string> = { Accept: "application/json" };
     const token = init.token ?? getToken();
-    if (token) headers.Authorization = `Bearer ${token}`;
+    if (token && !isSessionMarker(token)) headers.Authorization = `Bearer ${token}`; // signed in by cookie: nothing to send
+    headers["X-DevPilot-Request"] = "1"; // a cookie-authenticated write must carry it (backend core/sessions.py); another site cannot add it
     if (init.body !== undefined) headers["Content-Type"] = "application/json";
     let response: Response;
     try {
@@ -116,9 +123,27 @@ export function createApiClient({ baseUrl, getToken, fetchImpl }: ApiClientOptio
     status: () => json<BackendStatus>("/status"),
     /** /status with a token that is not stored yet, so a wrong one is never kept or sent by other requests. */
     checkToken: (token: string) => json<BackendStatus>("/status", { token }),
+    /** Signs this browser in: the backend answers with an HttpOnly session cookie, and the token is not kept. */
+    signIn: (token: string, remember: boolean) => json<{ authenticated: boolean }>("/session", { method: "POST", body: { token, remember } }),
+    /** Signs in with the one-time code of a login link the launcher printed. */
+    exchangeLogin: (code: string, remember = true) => json<{ authenticated: boolean }>("/session/exchange", { method: "POST", body: { code, remember } }),
+    getSession: () => json<{ authenticated: boolean }>("/session"),
+    signOut: () => json<{ authenticated: boolean }>("/session/logout", { method: "POST" }),
     listProjects: (limit = 200) => json<Project[]>(`/projects?limit=${limit}`),
     getBudget: () => json<Budget>("/budget"),
     getCapabilities: () => json<Capabilities>("/capabilities"),
+    listTools: () => json<ToolsListing>("/tools"),
+    /** Reads what the requirement names: public repositories at once, private ones through the GitHub connection. */
+    checkResources: (projectId: string) => json<ResourceCheck>(`/projects/${id(projectId)}/resources/check`, { method: "POST" }),
+    githubStatus: () => json<GitHubStatus>("/integrations/github"),
+    /** Read-only: each registered workflow against n8n's own list, with its recent executions. 404 while n8n is off. */
+    n8nStatus: () => json<N8nHealth>("/integrations/n8n/status"),
+    /** The GitHub consent URL; the backend keeps the token, the dashboard never sees it. */
+    connectGitHub: () => json<{ url: string }>("/integrations/github/connect", { method: "POST" }),
+    disconnectGitHub: () => json<{ local_deleted: boolean; remote_revocation: string; note?: string }>("/integrations/github/disconnect", { method: "POST" }),
+    authorizeGoogle: (projectId: string) => json<{ url: string; grant_id: string }>(`/projects/${id(projectId)}/resources/google/authorize`, { method: "POST" }),
+    /** Answered from the backend's tool catalog: no model is called and nothing is spent. */
+    askTools: (question: string) => json<ToolAnswer>("/tools/compare", { method: "POST", body: { question } }),
     getProject: (projectId: string) => json<Project>(`/projects/${id(projectId)}`),
     createProject: (project: NewProject) => json<Project>("/projects", { method: "POST", body: project }),
     listProjectFiles: (projectId: string) => json<FileList>(`/projects/${id(projectId)}/files`),

@@ -55,7 +55,7 @@ def write(tmp_path: Path, text: str) -> Path:
 
 def test_the_shipped_workflow_file_registers_notify_and_echo() -> None:
     catalog = WorkflowCatalog.from_file(REPO_ROOT / "config" / "n8n_workflows.yaml")
-    assert catalog.keys == ["echo", "notify"]
+    assert catalog.keys == ["echo", "notify", "run-events"]
     notify, echo = catalog.get("notify"), catalog.get("echo")
     assert notify is not None and notify.inputs == ("title", "message") and not notify.callback and notify.effect == "notify"
     assert echo is not None and echo.inputs == ("text",) and echo.callback and echo.path == "devpilot-echo" and echo.effect == "read_only"
@@ -228,8 +228,8 @@ def test_the_runtime_names_every_configuration_problem(tmp_path: Path) -> None:
 
 
 def test_health_compares_each_registered_workflow_with_n8n(tmp_path: Path) -> None:
-    fake = FakeN8n([RemoteWorkflow("wf1", "Echo", True, ("devpilot-echo",)), RemoteWorkflow("wf2", "Notify", False, ("devpilot-notify",))],
-                   {"wf1": [Execution("9", "success", "webhook", "s", "t")]})  # fmt: skip
+    fake = FakeN8n([RemoteWorkflow("wf1", "Echo", True, ("devpilot-echo",)), RemoteWorkflow("wf2", "Notify", False, ("devpilot-notify",)),
+                    RemoteWorkflow("wf3", "Run events", True, ("devpilot-run-events",))], {"wf1": [Execution("9", "success", "webhook", "s", "t")]})  # fmt: skip
     runtime = build_n8n_runtime(make_settings(tmp_path, **N8N), EGRESS, client=fake)
     report = runtime.health()  # type: ignore[union-attr]
     by_key = {w["key"]: w for w in report["workflows"]}
@@ -473,7 +473,7 @@ def _run_template_code(tmp_path: Path, template: str, headers: dict[str, str], b
     (tmp_path / "host.js").write_text(_NODE_HOST, encoding="utf-8")
     (tmp_path / "code.js").write_text(_code_of(template), encoding="utf-8")
     (tmp_path / "input.json").write_text(json.dumps({"secret": SECRET, "headers": {k.lower(): v for k, v in headers.items()}, "body": body}), encoding="utf-8")
-    done = subprocess.run([node, str(tmp_path / "host.js"), str(tmp_path / "code.js"), str(tmp_path / "input.json")], capture_output=True, text=True, timeout=30, check=False)
+    done = subprocess.run([node, str(tmp_path / "host.js"), str(tmp_path / "code.js"), str(tmp_path / "input.json")], capture_output=True, text=True, encoding="utf-8", timeout=30, check=False)  # Node writes UTF-8; the Windows default codepage would garble it
     return json.loads(done.stdout)
 
 
@@ -499,6 +499,17 @@ def test_the_echo_templates_signature_code_agrees_with_devpilot_byte_for_byte(tm
     forged = _run_template_code(tmp_path, "devpilot-echo.json", signed_headers("not-the-secret", raw), body)
     stale = _run_template_code(tmp_path, "devpilot-notify.json", signed_headers(SECRET, raw, now=1_000_000_000), body)
     assert forged == {"error": "DevPilot signature rejected"} and stale == {"error": "DevPilot signature rejected"}
+
+
+
+def test_the_run_events_template_verifies_the_signature_and_formats_one_line(tmp_path: Path) -> None:
+    body = {"trigger_id": TRIGGER_ID, "workflow": "run-events", "project_id": "a" * 32, "run_id": "b" * 32, "inputs": {"event": "delivered", "summary": "3 files, all criteria passed"}, "callback_url": None}
+    raw = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    out = _run_template_code(tmp_path, "devpilot-run-events.json", signed_headers(SECRET, raw), body)
+    assert out[0]["json"]["text"] == "[DevPilot] delivered: 3 files, all criteria passed (run bbbbbbbb)"
+    assert _run_template_code(tmp_path, "devpilot-run-events.json", signed_headers("not-the-secret", raw), body) == {"error": "DevPilot signature rejected"}
+    spec = WorkflowCatalog.from_file(REPO_ROOT / "config" / "n8n_workflows.yaml").get("run-events")
+    assert spec is not None and spec.effect == "notify" and spec.auto_approvable and not spec.callback
 
 
 # --- The callback route -------------------------------------------------------------------------------------------------
@@ -537,7 +548,7 @@ def post(client: TestClient, body: bytes, *, secret: str = SECRET, now: float | 
 def test_a_signed_callback_is_stored_once(site: Any) -> None:
     client, project, run = site()
     body = reply(project, run)
-    assert post(client, body).json() == {"accepted": True, "trigger_id": TRIGGER_ID}
+    assert post(client, body).json() == {"accepted": True, "trigger_id": TRIGGER_ID, "resumed": False}  # the run was not waiting for it
     again = post(client, reply(project, run, execution_id="2"))  # a new signature for a second report of the same trigger
     assert again.status_code == 409 and "already has its callback" in again.json()["detail"]
     with client.app.state.session_factory() as s:  # type: ignore[attr-defined]

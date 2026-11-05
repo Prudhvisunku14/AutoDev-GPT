@@ -125,7 +125,7 @@ def test_the_selector_chooses_the_test_double_only_because_nothing_real_is_eligi
     selection = build_embedding_selector([HashingEmbedder()]).choose(EMBEDDING)
     assert chosen_embedder(selection).name == "hashing-test-double" and selection.simulated
     rejected = {r["tool"]: r["reasons"] for r in selection.details()["rejected"]}
-    assert set(rejected) == {"openai_embeddings", "local_embedding_model"} and all("planned" in " ".join(r) for r in rejected.values())
+    assert set(rejected) == {"local_embedding_model"} and all("planned" in " ".join(r) for r in rejected.values())  # OpenAI's is implemented (RAG_EMBEDDER=openai)
 
 
 def test_a_real_provider_always_outranks_the_test_double() -> None:
@@ -140,7 +140,7 @@ def test_a_real_provider_always_outranks_the_test_double() -> None:
 def test_with_no_provider_the_selector_names_every_reason() -> None:
     with pytest.raises(NoProvider) as raised:
         build_embedding_selector([]).choose(EMBEDDING)
-    assert set(raised.value.excluded) == {"openai_embeddings", "local_embedding_model"}
+    assert set(raised.value.excluded) == {"local_embedding_model"}
     from app.rag.selection import PLANNED_EMBEDDERS
 
     assert all(p.status is ToolStatus.PLANNED for p in PLANNED_EMBEDDERS)

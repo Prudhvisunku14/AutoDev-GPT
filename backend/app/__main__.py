@@ -8,6 +8,7 @@ from app.coding.launcher import OpenCodeLauncher
 from app.config import get_settings
 from app.core.egress import EgressPolicy
 from app.integrations import integrations_for
+from app.api.session import login_url
 from app.main import create_app
 from app.sandbox.runner import DockerSandbox
 from app.selection.catalog import CODING_CAPABILITIES, build_selector, opencode_profile
@@ -26,9 +27,11 @@ def main() -> None:
     # log_config=None keeps the redacting JSON handler installed by create_app.
     # access_log=False: uvicorn's access line includes the query string; the app's own
     # request log records the path only.
+    # GitHub, Google Drive and n8n, each only if its own setting enables it (app/integrations.py).
+    app = create_app(settings, sandbox=sandbox, coding=coding, **integrations_for(settings, sandbox))
+    print(f"Open this link once to sign the dashboard in (it works once, for ten minutes; no token to paste):\n  {login_url(app.state.web_sessions, settings.dashboard_url)}", flush=True)
     uvicorn.run(
-        # GitHub, Google Drive and n8n, each only if its own setting enables it (app/integrations.py).
-        create_app(settings, sandbox=sandbox, coding=coding, **integrations_for(settings, sandbox)),
+        app,
         host=settings.devpilot_host,
         port=settings.devpilot_port,
         log_config=None,

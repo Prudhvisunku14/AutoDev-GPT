@@ -1321,3 +1321,205 @@ The claim in `verification/recipes.py` that the Docker website pipeline passed w
 - **A16:** a durable queue that resumes runs after a restart.
 - **The audit's G01–G14 gaps:** GitHub writes and PRs, Drive file links and live OAuth, real RAG, the FastAPI and React runtimes, and the others.
 
+
+### General-purpose platform, Phase 1: the tool catalog (2026-11-05)
+
+Branch `feature/general-purpose-platform`, from `main` at `e120238`. Baseline before any change: backend 4160 passed, 20 skipped (Docker and paid tests, opt-in); frontend typecheck and lint clean, 123 Vitest tests passed.
+
+**Built:**
+- **`config/tool_catalog.yaml`**: reviewed facts about every development tool DevPilot really has (GPT, OpenCode, the Docker sandbox, the website verifier, n8n, GitHub, Google Drive). Each has its tasks, advantages, limitations, requirements and evidence, with a level (`documentation` < `offline_test` < `real_container` < `live`), an outcome, a date and the document that records it. `opencode_via_n8n` is listed as planned, not built.
+- **`app/toolcatalog/`**: loads and validates the file (a malformed one stops the app), and computes readiness from the running backend only, contacting nothing. A tool backed by a fake reports `simulated`, never `ready`. It also compares tools, recommends a tool per task, and reads a free-text question.
+- **`GET /api/v1/tools`** and **`POST /api/v1/tools/compare`** (names, tasks or a question). Answered from the catalog: no model call, no spend.
+- **`compare_tools`**: a strict, read-only GPT function in every working state, so the orchestrator chooses tools from the same facts. The planning CLI allows it.
+- **Dashboard: a Tools page** (sidebar). Tool cards with readiness here and strongest evidence, and an "Ask" box that answers "Compare n8n and Cloudflare".
+
+**Truthfulness rules, enforced by tests:**
+- A name with no adapter (Cloudflare, Zapier, Cursor, Vagrant) is reported as unknown, with no capabilities or results made up for it.
+- Only GPT has a passed live run. OpenCode's one live build failed, so its strongest *passed* evidence is real containers with a scripted model. n8n, GitHub and Drive have offline evidence only.
+- A coverage test wires every integration with its fixture and checks that the registry and the catalog name exactly the same GPT functions.
+
+**Tests:** `tests/unit/test_tool_catalog.py` (25) and `src/pages/Tools.test.tsx` (3). The two tests that pin the analysis-state tool list now include `compare_tools`. Backend after the phase: 4173 passed, 20 skipped, then 146 of 146 in the affected files after the fixes.
+
+**Limitations:** recommendations come from task words in the question plus the catalog's facts; they explain, they do not choose the build. GPT chooses, and code checks. The catalog cannot compare tools DevPilot has no adapter for, by design.
+
+### General-purpose platform, Phase 2: GitHub and Google Drive resources, the GitHub connection, approved writes (2026-11-05)
+
+**Built (offline, against an in-process GitHub: `tests/github_fake.py`):**
+- **Discovery** (`app/sources/discover.py`). GitHub repositories and Google Drive files, folders, Docs, Sheets and Slides named in free text. Exact hosts only. Look-alike hosts, plain http, credentials in a link and short IDs are refused with the reason. A link carrying a token is never echoed.
+- **Access check** (`app/sources/check.py`, `POST /api/v1/projects/{id}/resources/check`):
+  - A repository the person named is read automatically at a pinned commit, with the same reading as `devpilot inspect`: metadata, file list and small manifests, nothing downloaded or run.
+  - A 404 without a connection is reported as "may be private, or the name may be wrong", never as "private", and asks for a GitHub connection. With a connection, a 404 is "not visible to your account".
+  - A Drive item is readable only under an active grant of this project.
+  - The result is recorded (`resources.checked`) and given to GPT in its first message as an untrusted `<resources>` block.
+- **The person's GitHub connection** (`app/repos/github_oauth.py`, `app/api/github.py`). GitHub's OAuth web flow, managed by the backend; the dashboard never sees a token.
+  - The flow uses a single-use `state` with a 10-minute expiry, PKCE S256, and a browser-binding cookie scoped to the callback.
+  - A narrower scope than asked is refused, and the account is confirmed through `/user` before anything is stored.
+  - The token is stored encrypted with Fernet (`DEVPILOT_TOKEN_KEY`) under `CREDENTIALS_DIR`, via `app/core/secret_store.py`. Without the key or the client secret, nothing is exchanged.
+  - Disconnecting deletes the local token first, then revokes the grant, and reports the two outcomes separately.
+- **`cryptography` 49.0.0 is now installed** in the venv and declared in `pyproject.toml`. Fernet, the approved cipher, can therefore be built, and Drive refresh tokens can be stored too.
+- **Approved GitHub writes**:
+  - `app/repos/github_write.py`, through the Git Data API: a new repository, or a pull request on a **new branch**. Its tree starts from the base tree, so every file it does not name is kept. A taken branch name is refused, and the default branch is never written.
+  - **`publish_repository_changes`** (GIT_PUSH: the approval queue holds every call) is offered in DOCUMENTING once a coding engine and a configured GitHub connection exist.
+  - It publishes only after a passed verification, and only the tree whose digest equals the verified one.
+  - A pull request carries only the run's added and changed files; deletions are listed, never pushed.
+  - A new repository gets the whole project, with the imported licence and notices when code was reused.
+  - The packaging rules of the ZIP apply.
+  - The approval shows the account, the target, the branch and every file.
+- **Dashboard:**
+  - After a project is created, its resources are checked. A resource that needs permission opens a small **Permission needed** popup, and the run is not started meanwhile.
+  - "Connect GitHub" or "Allow Google Drive access" opens the consent page in its own window. The popup polls, re-checks, and the build then continues by itself. "Build without it" is also offered.
+  - The Tools page has a GitHub connection card (connect and disconnect).
+- **Google:** `POST /api/v1/projects/{id}/resources/google/authorize` creates a pending grant for the Drive items the requirement names, and returns its consent URL. The existing callback activates it.
+
+**Tests:** `tests/unit/test_github_connection.py` (36):
+- discovery, and the encrypted store;
+- the OAuth flow's refusals (replayed state, wrong browser, expired state, GitHub error, bad code, narrower scope, missing cipher or secret);
+- disconnect and revocation;
+- the HTTP flow end to end, the public, private and not-visible checks, and where the token is sent (only `api.github.com`);
+- writes that keep other files and never move a branch;
+- the publish tool through a real run and approval: approved, denied, files changed after verification, no connection, and a pull request with only the run's changes.
+
+Frontend: `PermissionDialog.test.tsx` (2), plus a Composer test showing that nothing starts while permission is pending. Backend: 4221 passed, 20 skipped. Frontend: 129 passed, typecheck and lint clean.
+
+**Not verified live:**
+- No real GitHub OAuth App exists yet. The person registers one, with callback `http://127.0.0.1:8000/oauth/github/callback`, and sets `GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET` and `DEVPILOT_TOKEN_KEY`.
+- No request reached GitHub.
+- Real Google consent still needs the person's Google OAuth client.
+- A run paused inside PLANNING by an `import_repository` authorization error is not resumed by the connection. It is resumed from the run page, as before.
+
+### General-purpose platform, Phase 3: gap analysis of existing code (2026-11-05)
+
+**Built:** `submit_gap_analysis` (`app/tools/adapters/gap.py`, PLANNING, READ). It is registered with the repository tools, and whenever GitHub reading is on.
+- When a run starts from existing code, the plan gate refuses `submit_plan` until a gap analysis is accepted. "Existing code" means a repository imported in this run, or one the person named and the resource check read.
+- **GPT writes the analysis.** It has eight parts: existing functionality, similarities, missing features, conflicts, architecture changes, every file to add, modify, delete or keep, the tests, and why each part is reused, adapted or replaced.
+- **Code decides whether it stands.** It checks that:
+  - every cited requirement exists, and every functional requirement is either already met or listed as missing;
+  - every kept, modified or deleted file exists in the real file list, and every added file does not;
+  - licence, copying and notice files are never deleted;
+  - at most 20% of the existing files are deleted ("adapt, do not blindly overwrite");
+  - a replaced component gives a reason;
+  - every missing feature has a test.
+- Every problem is returned at once.
+- The accepted analysis is recorded (`analysis.gap_recorded`) and added to every coding brief OpenCode receives.
+- The resource check now keeps the inspected file list (up to 5,000 paths) for these checks.
+- The offline demonstrations that import code (weather, full-stack rehearsal) now script a gap step (`app/demo/gap.py`), which passes the same checks.
+
+**Tests:** `tests/unit/test_gap_analysis.py` (16): every rule, the strict schema, the brief, and the plan gate in a run (refused, then accepted; a rejected analysis records nothing; a new project needs none). 15 scripted-flow tests were updated to add the gap step.
+
+### General-purpose platform, Phase 4: GPT chooses the stack; no keyword selection (2026-11-05)
+
+**Changed:**
+- The dashboard no longer maps keywords to a stack. `decideStack` and `requestedStack` were removed. The request is sent as written, with no stack. GPT chooses from the catalog while planning; its prompt lists each stack with "can be built and tested now: yes/no". The backend still never codes or delivers a stack it cannot verify.
+- The approval dialog shows "Builds as: Chosen by GPT from: …", listing the stacks this backend can verify.
+- `POST /runs/{id}/start` for a project with no stack, on a backend with the coding engine, now refuses with 409 before anything is spent when no stack at all can be verified. The refusal gives every stack's reason.
+- `docs/ADDING_A_STACK.md`: the four parts a new framework needs (catalog entry, recipe, runtime image, approval), and the status here.
+
+**Runtimes on this computer:**
+- `python-cli` is verifiable.
+- `static-html` is verifiable once `devpilot setup --web` has self-tested `devpilot/verify-web:1`, which is built.
+- The **FastAPI and React images are defined but not built**. Building them pulls base images and packages, which needs approval. Until then those stacks, and React + FastAPI projects, are planned but stopped before coding.
+
+**Tests:** `tests/unit/test_stack_choice.py` (3); frontend `prompt.test.ts` and `readiness.test.ts` rewritten; 4 Composer tests updated. Backend 4240 passed, 20 skipped. Frontend 121 passed; the keyword tests were removed, so there are fewer than before.
+
+### General-purpose platform, Phase 6: real embeddings and a persistent, isolated vector index (2026-11-05)
+
+**Built (offline, against an in-process OpenAI endpoint):**
+- **`OpenAIEmbedder`** (`app/rag/openai_embedder.py`), used when `RAG_EMBEDDER=openai`:
+  - It calls `POST /v1/embeddings` with `OPENAI_EMBEDDING_MODEL` (default `text-embedding-3-small`) at `OPENAI_EMBEDDING_DIMENSIONS`.
+  - The key goes only to api.openai.com, through the `backend` egress entry.
+  - Every batch's estimated cost is charged against `RAG_EMBEDDING_MAX_USD` at `OPENAI_EMBEDDING_PRICE_PER_MTOK` before it is sent, and a batch that could pass the limit is not sent. Both settings are required, so spending is never unbounded.
+  - There are no retries, and every returned vector is checked for its length.
+  - The adaptive selector now prefers it over the hashing test double, which stays for fixtures only.
+- **`SqliteVectorIndex`** (`app/rag/sqlite_index.py`). One file per embedder and dimension, under `RAG_INDEX_DIR`, so vectors survive restarts.
+  - Every read filters on the project and its *active* grant IDs in SQL, then again in Python.
+  - An index built by another model is refused.
+  - A re-ingested document replaces its chunks, and revoking a grant deletes them.
+- Wired into `build_drive_runtime`: real embedder plus persistent index when configured. Otherwise the run stops at indexing and says how to enable it.
+
+**Tests:** `tests/unit/test_rag_production.py` (12):
+- the request shape and where the key goes;
+- the pre-send bound, the required price, and no retry;
+- refused or malformed answers;
+- real-over-double selection;
+- persistence and isolation across projects and revoked grants, and refusal of another model's index;
+- retrieval by meaning with the fake's concept vectors;
+- document updates, revocation, oversized input, and the wiring.
+
+Two older tests that listed `openai_embeddings` as "planned" were updated, since it is now implemented.
+
+**Limits:**
+- The fake endpoint proves the pipeline, not a real model's retrieval quality. No real embedding was requested.
+- The generated RAG chatbot's answers are still the extractive, cited answers of `KnowledgeBase.answer`. GPT-written answers grounded in the retrieved chunks are part of the generated application's blueprint, and have not been built or run here.
+- Real Drive documents still need the user's Google OAuth client and the approved parser image (`document-parser` is not built).
+
+### General-purpose platform, Phase 7: dashboard sessions and the run timeline (2026-11-05)
+
+**Built:**
+- **Sessions** (`app/core/sessions.py`, `app/api/session.py`, table `web_sessions`):
+  - The dashboard signs in once and then holds only an **HttpOnly, SameSite=Strict** cookie (Secure over https). Only the cookie's SHA-256 is stored.
+  - Sessions end after 12 hours idle and 7 days in any case. Without "remember", the cookie ends with the browser session.
+  - A cookie-authenticated write must send `X-DevPilot-Request: 1` (CSRF guard). CORS allows that header and credentials only from the configured origins.
+  - Ten wrong tokens in a minute lock sign-in for the rest of that minute.
+  - Bearer tokens (CLI, scripts, tests) work as before.
+- **No token to paste:** `python -m app` and `scripts/live_server.py` print a **one-time sign-in link** (`DASHBOARD_URL/#login=<code>`), valid once for ten minutes.
+  - The dashboard redeems it, removes it from the address bar, and is signed in.
+  - Only a Bearer token can mint a new link; a session cannot.
+  - The token form remains as a fallback. The token typed there goes once to `POST /session` and is never stored in the browser, which keeps only a non-secret marker.
+  - "Disconnect" ends the backend session.
+- **Timeline:** the run page now names the new events: existing code compared, publishing to GitHub, pull request opened or repository created, documents indexed (and whether the embedder is the test double), Google Drive permission needed or granted, and n8n workflow started or reported.
+
+**Tests:**
+- `tests/unit/test_web_sessions.py` (7): cookie flags; only the hash stored; the CSRF header; one-time links; lockout; logout and idle expiry; forged cookies; Bearer unchanged.
+- Frontend: layout tests for cookie sign-in, the link and an existing session, plus a timeline test.
+
+Frontend 124 passed, typecheck and lint clean.
+
+### General-purpose platform, Phase 5: n8n, ready for a real instance (2026-11-05)
+
+**Built (offline):**
+- **`run-events` workflow** (`n8n/workflows/devpilot-run-events.json`, effect `notify`). It verifies DevPilot's signature and formats one run event as a line for a team channel. It is registered in `config/n8n_workflows.yaml`, and is auto-approvable only with `N8N_AUTO_APPROVE=true`.
+- **`scripts/n8n-local.ps1`**:
+  - starts n8n on `127.0.0.1:5678`, with its data on D:;
+  - passes the webhook secret from `.env` without printing it;
+  - imports every template;
+  - prints the image digest so the version can be pinned.
+- **`tests/live/test_n8n_live.py`** (`live_n8n`, opt-in). Against the real local n8n:
+  - every registered workflow is imported and active;
+  - signed `notify` and `run-events` triggers each produce a successful n8n execution.
+  - It reads the secret and the API key from the terminal's environment, never from `.env`.
+- **Dashboard:** the Tools page shows n8n's own report for each registered workflow (imported, active, last execution), from the read-only health route. It is hidden while n8n is off.
+- **Fixed a pre-existing test defect.** The test that runs the templates' signing code in Node read Node's output with the Windows codepage. On a machine with Node on PATH, it failed for non-ASCII text; that is reproduced on `main` at `e120238`. The PowerShell runs had skipped it because Node was not on their PATH. It now decodes UTF-8, and the templates themselves were always correct.
+
+**Tests:** n8n 57 passed with Node present, including the new template test.
+
+**Not done, and why:**
+- **No real n8n has been run.** Pulling `n8nio/n8n` (about 600 MB) and creating its owner account and API key are the person's steps, so the live test has not run.
+- `opencode_via_n8n` stays planned in the catalog: nothing calls OpenCode through n8n.
+- A delayed n8n callback still does not resume a paused run (A08).
+
+### Review fixes: n8n callbacks resume runs; GPT-written RAG answers (2026-11-05)
+
+The branch was pushed. CI ran on GitHub for the first time (run `41976410351`): the backend on Windows and the frontend on Ubuntu both passed. Before the push, every added line was scanned for credentials. Nothing real was found; one fake token-shaped literal in a test is now built at runtime.
+
+**A08 fixed: an n8n callback resumes a waiting run.**
+- New GPT function `wait_for_workflow(trigger_id)`. It returns the result at once if it has arrived. Otherwise it pauses the run as `n8n_callback:<trigger_id>`, so GPT is not asked again and again; each ask would be a paid call.
+- The orchestrator now makes no GPT call while a tool's pause is in place.
+- The signed callback resumes the run only when every rule holds:
+  - the run waits for exactly that trigger;
+  - the callback arrives before the wait's deadline (`N8N_CALLBACK_WAIT_SECONDS`, 15 minutes by default);
+  - `N8N_RESUME_ON_CALLBACK=true`;
+  - `REQUIRE_SPEND_APPROVAL=false`;
+  - the session's spending policy still admits the run.
+- The run's own enforced limit still binds. Otherwise the run stays paused and says why (`n8n.resume_refused`), for a person to continue it.
+- Tests: `tests/unit/test_n8n_resume.py` (5), end to end through the app, the run manager and the callback route. They cover resumed, approval required, late, not waiting, and the result already there.
+
+**GPT-written RAG answers** (`app/rag/grounded.py`, `POST /api/v1/projects/{id}/knowledge/ask`):
+- GPT answers from numbered, delimited, untrusted chunks through a strict `submit_answer` function.
+- Code checks every citation: a retrieved source, a verbatim quote, every `[n]` marker cited, every citation used. An answer that fails is replaced by the not-found answer, with the reasons.
+- Nothing is sent when nothing relevant is retrieved.
+- The worst case of the one call must fit the amount approved for that question.
+- The event records chunk IDs and cost, never document text.
+- The RAG blueprint now requires the same of generated chatbots: model-written answers, code-checked citations, and the key read from the application's environment at run time.
+- Tests: `tests/unit/test_rag_grounded.py` (13).
+
+**Review:** `docs/FEATURE_STATUS.md` sorts every feature by its strongest evidence, and lists the ten requirements still missing. The most important is that Google consent is kept in memory, so it does not survive a restart. `docs/LIVE_TEST_PLAN.md` is the step-by-step plan for A–H.

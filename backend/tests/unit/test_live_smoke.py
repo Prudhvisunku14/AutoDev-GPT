@@ -129,7 +129,7 @@ def test_dry_run_sends_nothing_and_describes_the_request(tmp_path: Path, env_fil
     assert summary["invocations"] == []
     assert summary["pause_reason"] == "llm_stopped" and summary["llm_errors"] == []
     (request,) = summary["requests"]
-    assert [t["name"] for t in request.tools] == ["request_human_input", "submit_analysis"]
+    assert [t["name"] for t in request.tools] == ["compare_tools", "request_human_input", "submit_analysis"]
     assert all(t["strict"] for t in request.tools)
     text = "\n".join(describe_request(request, settings))
     assert "model:               test-model" in text
