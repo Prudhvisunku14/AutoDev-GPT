@@ -229,6 +229,16 @@ class GoogleOAuthAuthorizer:
         self.simulated = bool(provider is not None and provider.simulated)
         self.on_invalidated: Callable[[str], None] | None = None  # set by the runtime: a grant Google no longer accepts
 
+    def blocker(self) -> str | None:
+        """What stops consent from completing here, from configuration only (nothing is contacted); None when nothing does."""
+        if not self._client_id:
+            return "GOOGLE_OAUTH_CLIENT_ID is not configured"
+        if self._provider is None:
+            return "no Google OAuth provider is configured, so no code could be exchanged"
+        if self._cipher is None:
+            return f"refresh tokens cannot be stored encrypted: {self._cipher_problem or 'no approved cipher is configured'}"
+        return None
+
     # --- Consent ----------------------------------------------------------------------------------------------------
 
     def authorize(self, project_id: str, folders: tuple[str, ...], scopes: frozenset[str]) -> Grant:

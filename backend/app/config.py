@@ -170,6 +170,8 @@ class Settings(BaseSettings):
     n8n_enabled: bool = False
     n8n_base_url: str = "http://127.0.0.1:5678"
     n8n_workflows_file: Path = Path("config/n8n_workflows.yaml")
+    # Reviewed facts about each development tool (app/toolcatalog). Readiness is computed, never read from this file.
+    tool_catalog_file: Path = Path("config/tool_catalog.yaml")
     n8n_auto_approve: bool = False
     n8n_callback_url: str | None = None  # where n8n should post results, as n8n sees DevPilot; None: no callback is offered
     n8n_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
@@ -275,6 +277,7 @@ class Settings(BaseSettings):
         self.workspaces_dir = _from_repo_root(self.workspaces_dir)
         self.egress_allowlist_file = _from_repo_root(self.egress_allowlist_file)
         self.n8n_workflows_file = _from_repo_root(self.n8n_workflows_file)
+        self.tool_catalog_file = _from_repo_root(self.tool_catalog_file)
         self.coding_checkpoints_dir = _from_repo_root(self.coding_checkpoints_dir)
         self.coding_work_dir = _from_repo_root(self.coding_work_dir)
         return self

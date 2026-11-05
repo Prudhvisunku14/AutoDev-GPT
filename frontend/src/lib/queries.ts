@@ -55,6 +55,7 @@ export const keys = {
   status: ["status"] as const,
   budget: ["budget"] as const,
   capabilities: ["capabilities"] as const,
+  tools: ["tools"] as const,
   projects: ["projects"] as const,
   runs: ["runs"] as const,
   project: (id: string) => ["project", id] as const,
@@ -88,6 +89,11 @@ export function useBudget() {
 export function useCapabilities() {
   const api = useApi();
   return useQuery({ queryKey: keys.capabilities, queryFn: api.getCapabilities, enabled: useConnected(), staleTime: 30_000 });
+}
+
+export function useTools() {
+  const api = useApi();
+  return useQuery({ queryKey: keys.tools, queryFn: api.listTools, enabled: useConnected(), staleTime: 30_000 });
 }
 
 export function useProjects() {

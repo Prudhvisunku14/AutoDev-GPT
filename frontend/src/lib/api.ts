@@ -5,6 +5,8 @@ import type {
   BackendStatus,
   Budget,
   Capabilities,
+  ToolAnswer,
+  ToolsListing,
   Criterion,
   FileContent,
   FileList,
@@ -119,6 +121,9 @@ export function createApiClient({ baseUrl, getToken, fetchImpl }: ApiClientOptio
     listProjects: (limit = 200) => json<Project[]>(`/projects?limit=${limit}`),
     getBudget: () => json<Budget>("/budget"),
     getCapabilities: () => json<Capabilities>("/capabilities"),
+    listTools: () => json<ToolsListing>("/tools"),
+    /** Answered from the backend's tool catalog: no model is called and nothing is spent. */
+    askTools: (question: string) => json<ToolAnswer>("/tools/compare", { method: "POST", body: { question } }),
     getProject: (projectId: string) => json<Project>(`/projects/${id(projectId)}`),
     createProject: (project: NewProject) => json<Project>("/projects", { method: "POST", body: project }),
     listProjectFiles: (projectId: string) => json<FileList>(`/projects/${id(projectId)}/files`),

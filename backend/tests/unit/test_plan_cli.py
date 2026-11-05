@@ -83,7 +83,7 @@ def test_the_limits_are_forced_whatever_env_says(tmp_path: Path) -> None:
 def test_the_prompt_reaches_the_orchestrator_and_the_run_stops_once_the_plan_is_accepted(tmp_path: Path) -> None:
     report, fake, _ = plan(tmp_path, call("submit_analysis", ANALYSIS), call("submit_plan", PLAN), call("submit_criteria", {"criteria": []}))
     assert f"<requirement>\n{PROMPT}\n</requirement>" in fake.requests[0].input[0]["content"]
-    assert [sorted(t["name"] for t in r.tools) for r in fake.requests] == [["request_human_input", "submit_analysis"], ["request_human_input", "submit_plan"]]
+    assert [sorted(t["name"] for t in r.tools) for r in fake.requests] == [["compare_tools", "request_human_input", "submit_analysis"], ["compare_tools", "request_human_input", "submit_plan"]]
     assert fake.remaining == 1  # acceptance criteria were never asked for
     assert report["verdict"] == PLAN_ACCEPTED and [t["title"] for t in report["plan"]["tasks"]] == ["Weather CLI", "Weather tests"]
     assert [r["code"] for r in report["analysis"]["requirements"]] == ["R-001", "R-002", "R-003", "R-004"]

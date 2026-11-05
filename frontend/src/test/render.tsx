@@ -71,6 +71,8 @@ export function stubApi(overrides: Partial<ApiClient> = {}): ApiClient {
     listProjects: vi.fn(() => Promise.resolve([])),
     getBudget: vi.fn(() => Promise.resolve(DEFAULT_BUDGET)),
     getCapabilities: vi.fn(() => Promise.resolve(DEFAULT_CAPABILITIES)),
+    listTools: vi.fn(() => Promise.resolve({ tasks: {}, tools: [], planned: [] })),
+    askTools: vi.fn(() => Promise.resolve({ kind: "recommendation" as const, recommendation: { tasks: [], picks: [], gaps: [] } })),
     getProject: vi.fn(notFound),
     createProject: vi.fn(notFound),
     listProjectFiles: vi.fn(() => Promise.resolve({ files: [] })),

@@ -1321,3 +1321,23 @@ The claim in `verification/recipes.py` that the Docker website pipeline passed w
 - **A16:** a durable queue that resumes runs after a restart.
 - **The audit's G01–G14 gaps:** GitHub writes and PRs, Drive file links and live OAuth, real RAG, the FastAPI and React runtimes, and the others.
 
+
+### General-purpose platform, Phase 1: the tool catalog (2026-11-05)
+
+Branch `feature/general-purpose-platform`, from `main` at `e120238`. Baseline before any change: backend 4160 passed, 20 skipped (Docker and paid tests, opt-in); frontend typecheck and lint clean, 123 Vitest tests passed.
+
+**Built:**
+- **`config/tool_catalog.yaml`**: reviewed facts about every development tool DevPilot really has (GPT, OpenCode, the Docker sandbox, the website verifier, n8n, GitHub, Google Drive). Each has its tasks, advantages, limitations, requirements and evidence, with a level (`documentation` < `offline_test` < `real_container` < `live`), an outcome, a date and the document that records it. `opencode_via_n8n` is listed as planned, not built.
+- **`app/toolcatalog/`**: loads and validates the file (a malformed one stops the app), and computes readiness from the running backend only, contacting nothing. A tool backed by a fake reports `simulated`, never `ready`. It also compares tools, recommends a tool per task, and reads a free-text question.
+- **`GET /api/v1/tools`** and **`POST /api/v1/tools/compare`** (names, tasks or a question). Answered from the catalog: no model call, no spend.
+- **`compare_tools`**: a strict, read-only GPT function in every working state, so the orchestrator chooses tools from the same facts. The planning CLI allows it.
+- **Dashboard: a Tools page** (sidebar). Tool cards with readiness here and strongest evidence, and an "Ask" box that answers "Compare n8n and Cloudflare".
+
+**Truthfulness rules, enforced by tests:**
+- A name with no adapter (Cloudflare, Zapier, Cursor, Vagrant) is reported as unknown, with no capabilities or results made up for it.
+- Only GPT has a passed live run. OpenCode's one live build failed, so its strongest *passed* evidence is real containers with a scripted model. n8n, GitHub and Drive have offline evidence only.
+- A coverage test wires every integration with its fixture and checks that the registry and the catalog name exactly the same GPT functions.
+
+**Tests:** `tests/unit/test_tool_catalog.py` (25) and `src/pages/Tools.test.tsx` (3). The two tests that pin the analysis-state tool list now include `compare_tools`. Backend after the phase: 4173 passed, 20 skipped, then 146 of 146 in the affected files after the fixes.
+
+**Limitations:** recommendations come from task words in the question plus the catalog's facts; they explain, they do not choose the build. GPT chooses, and code checks. The catalog cannot compare tools DevPilot has no adapter for, by design.

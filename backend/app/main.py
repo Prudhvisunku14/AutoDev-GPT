@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api import approvals, artifacts, budget, capabilities, health, history, integrations, n8n, projects, runs
+from app.api import approvals, artifacts, budget, capabilities, health, history, integrations, n8n, projects, runs, tools
 from app.coding.attempt_store import SqlAttemptStore
 from app.coding.candidate import CandidateWorkspaces
 from app.config import Settings, get_settings
@@ -35,6 +35,9 @@ from app.sandbox.docker_cli import SandboxError
 from app.sandbox.runner import SandboxRunner
 from app.selection.selector import Selector
 from app.stacks.catalog import StackCatalog
+from app.toolcatalog.catalog import ToolCatalog
+from app.toolcatalog.model import load_facts
+from app.tools.adapters.catalog import register_catalog_tools
 from app.tools.adapters.coding import CodingRuntime, recover_attempts, register_coding_tools
 from app.tools.adapters.drive import DriveRuntime, register_drive_tools
 from app.tools.adapters.n8n import register_n8n_tools
@@ -116,6 +119,8 @@ def create_app(
         register_drive_tools(registry, drive)
     if n8n_runtime is not None:
         register_n8n_tools(registry, n8n_runtime)
+    tool_catalog = ToolCatalog(load_facts(settings.tool_catalog_file))  # a malformed catalog stops the app here
+    register_catalog_tools(registry, tool_catalog)
     executor = ToolExecutor(registry, PolicyEngine(), redactor, max_output_chars=settings.tool_output_max_chars)
     llm_provider, llm_problem = _llm_wiring(settings, egress, llm)
     orchestrator = Orchestrator(
@@ -174,6 +179,9 @@ def create_app(
     app.state.gpt_label = gpt_label
     app.state.scripted_llm = isinstance(llm, FakeLLM)  # scripted GPT spends nothing; any other client may, so its starts need approval
     app.state.coding_selector = coding if runtime is not None else None
+    app.state.repositories = repositories
+    app.state.tool_catalog = tool_catalog
+    tool_catalog.attach(app.state)
     app.state.start_policy = start_policy
 
     app.add_middleware(
@@ -211,6 +219,7 @@ def create_app(
     app.include_router(budget.router, prefix=API_PREFIX)
     app.include_router(capabilities.router, prefix=API_PREFIX)
     app.include_router(history.router, prefix=API_PREFIX)
+    app.include_router(tools.router, prefix=API_PREFIX)
     app.include_router(integrations.router)  # its own paths: the OAuth callback is not under the API prefix
     app.include_router(n8n.router)  # its own paths: n8n's signed callback is not under the API prefix
     if UI_DIR.is_dir():

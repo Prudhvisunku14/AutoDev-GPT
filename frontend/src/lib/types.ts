@@ -280,3 +280,73 @@ export interface NewProject {
   requirement_text: string;
   stack?: string;
 }
+
+// --- The tool catalog (GET /tools, POST /tools/compare) ---------------------------------------------------------------
+
+export type ToolStatus = "ready" | "simulated" | "not_configured" | "blocked" | "planned";
+
+export interface ToolEvidence {
+  level: "documentation" | "offline_test" | "real_container" | "live";
+  outcome: "passed" | "failed" | "partial";
+  date: string;
+  summary: string;
+  source: string;
+}
+
+export interface ToolEntry {
+  id: string;
+  name: string;
+  role: string;
+  description?: string;
+  tasks: Array<{ id: string; text: string }> | string[];
+  advantages: string[];
+  limitations: string[];
+  requirements?: string[];
+  readiness: { status: ToolStatus; detail: string };
+  functions: string[];
+  evidence?: ToolEvidence[];
+  strongest_evidence: ToolEvidence | null;
+  verified_live: boolean;
+}
+
+export interface PlannedToolEntry {
+  id: string;
+  name: string;
+  description: string;
+  readiness: { status: "planned"; detail: string };
+}
+
+export interface ToolsListing {
+  tasks: Record<string, string>;
+  tools: ToolEntry[];
+  planned: PlannedToolEntry[];
+}
+
+export interface ToolPick {
+  task: string;
+  text: string;
+  tool: string;
+  name: string;
+  readiness: ToolStatus;
+  alternatives: string[];
+  why: string;
+}
+
+export interface ToolRecommendation {
+  tasks: string[];
+  picks: ToolPick[];
+  gaps: Array<{ task: string; text: string; note: string }>;
+}
+
+export interface ToolAnswer {
+  kind: "comparison" | "recommendation";
+  question?: string;
+  tools?: ToolEntry[];
+  unknown?: Array<{ name: string; note: string }>;
+  planned?: Array<{ name: string; note: string }>;
+  shared_tasks?: string[];
+  unique_tasks?: Record<string, string[]>;
+  notes?: string[];
+  recommendation?: ToolRecommendation;
+  note?: string | null;
+}
